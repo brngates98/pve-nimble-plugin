@@ -24,6 +24,7 @@
 | **Clone from snapshot** | Implemented | Via volume restore to new volume name |
 | **Multipath** | Implemented | Same pattern as Pure: device by serial, multipathd add/remove map, block device actions |
 | **Device discovery** | Implemented | By SCSI serial from `/sys/block/*/device/serial` and `/dev/disk/by-id`; no fixed Nimble WWN prefix (Pure uses 3624a9370); Nimble prefix not documented/used here |
+| **Auto iSCSI discovery** | Implemented | Opt-in: `auto_iscsi_discovery` (default no). On activate_storage, plugin first ensures initiator group exists (nimble_ensure_initiator_group_id); then GET subnets, collects discovery IPs (allow_iscsi or type data), runs iscsiadm discovery + node startup automatic + login. If initiator group cannot be ensured (e.g. no IQN), discovery is skipped. Never fails storage activation; warns on failure. |
 | **Debian package** | Present | `libpve-storage-nimble-perl`, debian/*, scripts/build_deb.sh |
 | **CI (GitHub Actions)** | Present | checks, lint (Perl + Markdown), tests, release (tag → build .deb → gh-release) |
 | **Unit tests** | Present | test_command_validation.t, test_retry_logic.t, test_token_cache.t (+ token_cache_test.pl); no live Nimble tests |
@@ -59,10 +60,10 @@ pve-nimble-plugin/
 
 ## 4. How the Plugin Fits Together
 
-- **Config (storage.cfg):** `address`, `username`, `password`, optional `initiator_group` (if unset, plugin auto-creates/uses `pve-<nodename>` with local IQN), optional `vnprefix`, `pool_name`, `check_ssl`, `token_ttl`, `debug`.
+- **Config (storage.cfg):** `address`, `username`, `password`, optional `initiator_group` (if unset, plugin auto-creates/uses `pve-<nodename>` with local IQN), optional `vnprefix`, `pool_name`, `check_ssl`, `token_ttl`, `debug`, optional **`auto_iscsi_discovery`** (default off; when enabled, on storage activate the plugin runs iSCSI discovery and login using discovery IPs from GET subnets).
 - **Nimble API base:** `https://<address>:5392/v1/`. Auth: POST `tokens` with username/password → use `session_token` as `X-Auth-Token` on later requests.
 - **Volume naming:** `nimble_volname(scfg, volname, [snapname])` = optional prefix + volname (e.g. `vm-100-disk-0`) + optional `.snap-<name>` for snapshots.
-- **Key API calls:** volumes (GET/POST/PUT/DELETE), access_control_records (POST to grant vol to initiator group), snapshots (POST create, GET by name, DELETE), volume restore (POST with base_snap_id).
+- **Key API calls:** volumes (GET/POST/PUT/DELETE), access_control_records (POST to grant vol to initiator group), snapshots (POST create, GET by name, DELETE), volume restore (POST with base_snap_id), **subnets** (GET for auto iSCSI discovery IPs when `auto_iscsi_discovery` is set).
 - **Device path:** Volume `serial_number` from API → find block device by serial under `/sys/block/*/device/serial` and `/dev/disk/by-id` → optional multipath by WWID.
 
 ---

@@ -126,6 +126,37 @@ Other sets in full docs: active_directory_memberships, alarms, application_serve
 
 ---
 
+## 9.1 Networking (management and iSCSI discovery IPs)
+
+These endpoints are not used by the plugin today but are useful for automation (e.g. auto iSCSI discovery) or for displaying management vs discovery IPs.
+
+**GET v1/network_interfaces**
+
+- **Response (data):** Array of per-array network interfaces.
+- **Key fields:** `id`, `name`, **`ip_list`** (list of IPs on this interface), **`nic_type`** (interface role/type), `controller_id`, `controller_name`, `link_status`, `link_speed`, `mac`, `mtu`, `slot`, `port`, `array_id`, `array_name_or_serial`.
+- Use `nic_type` and `ip_list` to identify management vs data/iSCSI interfaces (exact `nic_type` values are array/OS-dependent; see Nimble CLI `ip --list` for Type: management, discovery, data, support).
+- **Normal response:** 200.
+
+**GET v1/subnets**
+
+- **Response (data):** Array of subnet configurations.
+- **Key fields:** `id`, `name`, **`type`** (e.g. `'mgmt'`, `'data'`, `'mgmt,data'`), **`discovery_ip`** (address used for iSCSI discovery on this subnet), **`allow_iscsi`**, `network`, `netmask`, `vlan_id`, `mtu`, `failover`, `netzone_type`, `creation_time`, `last_modified`.
+- For **iSCSI discovery IPs:** GET subnets, then filter by `allow_iscsi` true and/or `type` containing `'data'`; use each subnet’s **`discovery_ip`** for `iscsiadm -m discovery -t sendtargets -p <discovery_ip>`.
+- For **management:** The management IP is the one you already use for the API (the `address` in storage config). To list it from the API, use subnets with `type` containing `'mgmt'` (and use the subnet’s `discovery_ip` or similar, if documented) or use **network_interfaces** and pick the interface whose `nic_type` indicates management.
+- **Normal response:** 200.
+
+**Summary for “show management and discovery IPs”**
+
+| Goal | API call | Use |
+|------|----------|-----|
+| iSCSI discovery IPs | GET v1/subnets | Filter by `allow_iscsi` and/or `type` = data (or mgmt,data); use each entry’s `discovery_ip`. |
+| All interface IPs (mgmt + data) | GET v1/network_interfaces | Use `ip_list` and `nic_type` per interface to show management vs discovery/data. |
+| Management IP | Already known | It’s the `address` you use for the API. Optionally confirm via subnets (type mgmt) or network_interfaces. |
+
+---
+
+**Plugin use:** When storage option `auto_iscsi_discovery` is enabled, the plugin calls **GET v1/subnets**, filters entries with `allow_iscsi` or `type` containing `data`, collects unique `discovery_ip` values, and runs `iscsiadm` discovery and login on the Proxmox host. No other networking API calls are required for that feature.
+
 ## 10. Plugin-relevant endpoints summary
 
 | What | Method | Path | Body (inside `data`) |
@@ -143,6 +174,7 @@ Other sets in full docs: active_directory_memberships, alarms, application_serve
 | List snapshots | GET | snapshots?name=... | — |
 | Delete snapshot | DELETE | snapshots/:id | — |
 | List pools | GET | pools | — |
+| Get iSCSI discovery IPs (auto_iscsi_discovery) | GET | subnets | — |
 
 ---
 

@@ -128,6 +128,11 @@ sub properties {
       maximum     => 3,
       default     => 0
     },
+    auto_iscsi_discovery => {
+      description => "When storage is activated, run iSCSI discovery and login using the array's discovery IPs (from Nimble subnets API). Opt-in only; default off.",
+      type        => 'boolean',
+      default     => 'no'
+    },
   };
 }
 
@@ -143,6 +148,7 @@ sub options {
     check_ssl => { optional => 1 },
     token_ttl => { optional => 1 },
     debug     => { optional => 1 },
+    auto_iscsi_discovery => { optional => 1 },
     nodes     => { optional => 1 },
     disable   => { optional => 1 },
     content   => { optional => 1 },
@@ -413,6 +419,54 @@ sub nimble_api_call {
     die "Error :: Nimble API $method $path: " . $res->status_line . "\n" . ( $content // '' ) . "\n";
   }
   return length( $content ) ? decode_json( $content ) : {};
+}
+
+### Auto iSCSI discovery (opt-in): get discovery IPs from Nimble subnets API
+sub get_nimble_iscsi_discovery_ips {
+  my ( $scfg, $storeid ) = @_;
+  my @ips;
+  eval {
+    my $res = nimble_api_call( $scfg, 'GET', 'subnets', undef, $storeid );
+    my $list = $res->{ data };
+    return () unless ref($list) eq 'ARRAY' && @$list;
+    my %seen;
+    for my $sub ( @$list ) {
+      next unless ref($sub) eq 'HASH';
+      my $type  = $sub->{ type }   // '';
+      my $allow = $sub->{ allow_iscsi };
+      next unless $type =~ /data/i || ( $allow && $allow ne '0' && $allow ne '' );
+      my $ip = $sub->{ discovery_ip };
+      next unless defined $ip && $ip =~ m/^\S+$/ && !$seen{$ip}++;
+      push @ips, $ip;
+    }
+  };
+  if ( $@ ) {
+    chomp( my $api_err = $@ );
+    warn "Warning :: Could not get iSCSI discovery IPs from Nimble subnets API: $api_err\n";
+    return ();
+  }
+  return @ips;
+}
+
+### Run iscsiadm discovery and login; never die (for optional auto-discovery)
+sub run_iscsi_discovery_and_login {
+  my ( $storeid, $scfg, $ips_ref ) = @_;
+  return unless ref($ips_ref) eq 'ARRAY' && @$ips_ref;
+  my $iscsiadm = '/usr/sbin/iscsiadm';
+  $iscsiadm = '/sbin/iscsiadm' if !-x $iscsiadm;
+  if ( !-x $iscsiadm ) {
+    warn "Warning :: iscsiadm not found or not executable; skipping auto iSCSI discovery for storage \"$storeid\".\n";
+    return;
+  }
+  for my $ip ( @$ips_ref ) {
+    next unless defined $ip && $ip =~ m/^\S+$/ && length($ip) <= 253;
+    eval { run_command( [ $iscsiadm, '-m', 'discovery', '-t', 'sendtargets', '-p', $ip ], timeout => 15 ); };
+    if ( $@ ) { chomp( my $e = $@ ); warn "Warning :: iSCSI discovery to $ip failed: $e\n"; }
+  }
+  eval { run_command( [ $iscsiadm, '-m', 'node', '--op', 'update', '-n', 'node.startup', '-v', 'automatic' ], timeout => 10 ); };
+  if ( $@ ) { chomp( my $e = $@ ); warn "Warning :: iSCSI node startup update failed: $e\n"; }
+  eval { run_command( [ $iscsiadm, '-m', 'node', '--login' ], timeout => 30 ); };
+  if ( $@ ) { chomp( my $e = $@ ); warn "Warning :: iSCSI node login failed: $e\n"; }
 }
 
 sub nimble_get_local_iscsi_iqn {
@@ -762,6 +816,20 @@ sub status {
 sub activate_storage {
   my ( $class, $storeid, $scfg, $cache ) = @_;
   set_debug_from_config( $scfg );
+  if ( $scfg->{ auto_iscsi_discovery } && $scfg->{ auto_iscsi_discovery } ne 'no' && $scfg->{ auto_iscsi_discovery } ne '0' ) {
+    my $ig_ok = eval { nimble_ensure_initiator_group_id( $scfg, $storeid ); 1 };
+    if ( !$ig_ok ) {
+      chomp( my $err = $@ );
+      warn "Warning :: Auto iSCSI discovery skipped for storage \"$storeid\": initiator group could not be ensured ($err). Install open-iscsi and set InitiatorName in /etc/iscsi/initiatorname.iscsi, or set initiator_group to an existing group.\n";
+    } else {
+      my @ips = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
+      if ( !@ips ) {
+        warn "Warning :: No iSCSI discovery IPs returned by array for storage \"$storeid\"; skipping discovery. Check Nimble subnets (allow_iscsi or type data).\n";
+      } else {
+        run_iscsi_discovery_and_login( $storeid, $scfg, \@ips );
+      }
+    }
+  }
   return 1;
 }
 
