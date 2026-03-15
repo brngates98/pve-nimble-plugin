@@ -700,9 +700,7 @@ sub nimble_snapshot_create {
   my ( $class, $scfg, $storeid, $volname, $snap_name ) = @_;
   my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   die "Error :: Volume \"$volname\" not found\n" unless $vol_id;
-  my $snap_suffix = $snap_name;
-  $snap_suffix =~ s/^veeam_/veeam-/;
-  $snap_suffix = 'snap-' . $snap_suffix unless $snap_suffix =~ /^snap-/;
+  # Full snapshot name on array: prefix + volname + .snap-<name> (nimble_volname normalizes veeam_ → veeam-, adds snap-)
   my $snap_full_name = nimble_volname( $scfg, $volname, $snap_name );
   nimble_api_call( $scfg, 'POST', 'snapshots', { vol_id => $vol_id, name => $snap_full_name }, $storeid );
   print "Info :: Snapshot \"$snap_name\" created for volume \"$volname\".\n";

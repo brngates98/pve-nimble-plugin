@@ -21,7 +21,7 @@
 | **Auth** | Implemented | Username/password → POST /v1/tokens → session token; cached under `/etc/pve/priv/nimble/<storeid>.json` |
 | **ACL / initiator** | Implemented | **initiator_group** is optional. If set, plugin uses that Nimble initiator group. If unset, plugin reads local IQN from `/etc/iscsi/initiatorname.iscsi`, creates/finds a group named `pve-<nodename>` with that IQN, and uses it for **access_control_records** (vol_id + initiator_group_id). |
 | **Snapshots** | Implemented | Create, delete, rollback; Nimble snapshots API + volume restore |
-| **Clone from snapshot** | Implemented | Via volume restore to new volume name |
+| **Clone from snapshot** | Implemented | Via POST volumes with clone=true, name, base_snap_id (then ACL + optional volume_collection) |
 | **Multipath** | Implemented | Same pattern as Pure: device by serial, multipathd add/remove map, block device actions |
 | **Device discovery** | Implemented | By SCSI serial from `/sys/block/*/device/serial` and `/dev/disk/by-id`; no fixed Nimble WWN prefix (Pure uses 3624a9370); Nimble prefix not documented/used here |
 | **Auto iSCSI discovery** | Implemented | Opt-in: `auto_iscsi_discovery` (default no). On activate_storage, plugin first ensures initiator group exists (nimble_ensure_initiator_group_id); then GET subnets, collects discovery IPs (allow_iscsi or type data), runs iscsiadm discovery + node startup automatic + login. If initiator group cannot be ensured (e.g. no IQN), discovery is skipped. Never fails storage activation; warns on failure. |
@@ -98,7 +98,19 @@ Use this file when implementing or validating API calls instead of relying only 
 - **Validate on real Nimble:** Create storage, create VM disk, snapshot, clone, resize, delete; confirm device paths and multipath on a real node.
 - **Nimble API quirks:** Response shapes (e.g. list vs single object, pagination) may need adjustment per Nimble firmware; error codes/messages might need better handling.
 - **Status/capacity:** `status()` uses pools API; field names (`capacity`, `usage`, etc.) may vary by Nimble version—verify and adjust if needed.
-- **Changelog for first release:** Handled: `_deb.yml` has a no-tags fallback (builds 1.0.0-1 from full history when no tags exist). Pushing a tag (e.g. `v1.0.0`) runs the release workflow and produces the .deb.
+- **Changelog:** `_deb.yml` generates `debian/changelog` from git tags and history. Pushing a tag runs the release workflow and produces the .deb.
+
+---
+
+## 6.1 Releases (for AI or human)
+
+When creating a release, **always**:
+
+1. **Verify the next release version** – Run `git tag -l 'v*' | sort -V` and use the **next sequential** version (e.g. after v0.0.6 the next is v0.0.7). Do not jump versions (e.g. do not go to v1.0.0 unless that is the explicit next version).
+2. **Include release notes** – Create or update `.github/release-notes-<tagname>.md` (e.g. `.github/release-notes-v0.0.7.md`). The release workflow copies this file to the GitHub release body; without it the release has only a generic title.
+3. **Never skip versions** – Use the immediate next version from existing tags. Match the filename and package version (e.g. tag `v0.0.7` → notes file `release-notes-v0.0.7.md`, package version `0.0.7-1`).
+
+See `.cursor/rules/releases.mdc` for the full release rule.
 
 ---
 

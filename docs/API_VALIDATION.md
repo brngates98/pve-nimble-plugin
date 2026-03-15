@@ -1,39 +1,39 @@
 # Nimble REST API Validation
 
-This document validates the API calls in `NimbleStoragePlugin.pm` against the **HPE Nimble Storage REST API Reference Version 3.1.0.0** (and v1 base path).  
-Reference: [REST API Object Sets](https://support.hpe.com/docs/display/public/nmtp355en_us/htr1457290369852.html).
+This document validates the API calls in `NimbleStoragePlugin.pm` against the **HPE Nimble Storage REST API Reference Version 5.1.1.0** (and v1 base path).  
+Reference: [REST API](https://support.hpe.com/docs/display/public/nmtp352en_us/wzk1480348939804.html). In-repo spec: `docs/NIMBLE_API_REFERENCE.md`.
 
 ---
 
 ## Summary
 
-| Endpoint / usage | Plugin call | HPE doc | Status |
-|-----------------|------------|---------|--------|
-| **Authentication** | | | |
-| POST `/v1/tokens` | username, password → session_token | Create: username (mandatory), password; Response: session_token | OK |
-| **Initiator groups** | | | |
-| GET `initiator_groups?name=...` | List by name, match by `name` | Read with query param `name` | OK |
-| POST `initiator_groups` | name, access_protocol, iscsi_initiators (array of { label, iqn }) | Create: name, access_protocol (mandatory); Response includes iscsi_initiators. Request table does not list iscsi_initiators; initiators may be added via POST `initiators` (initiator_group_id, label, iqn). | Verify on array: inline iscsi_initiators may be accepted by some versions. |
-| **Volumes** | | | |
-| GET `volumes?name=...` | List by name, match by `name` | Read with query param `name` | OK |
-| GET `volumes` | List all | Read | OK |
-| POST `volumes` | name, size (MB), optional pool_name | Create: name, size (MB), optional pool_id (doc shows pool_id; response has pool_name; plugin uses pool_name) | OK; pool_name accepted by API in practice. |
-| PUT `volumes/:id` | size (resize) or name (rename) | Update | OK |
-| DELETE `volumes/:id` | Delete volume | Delete | OK |
-| POST `volumes/:id/actions/restore` | id, base_snap_id in body | Restore: Request id (restored volume), base_snap_id (mandatory) | **Fixed** to use `actions/restore` and body with id + base_snap_id. |
-| **Access control** | | | |
-| GET `access_control_records` | List all; plugin filters by vol_id and initiator_group_id (for ensure-ACL-on-activate / migration) | Read | OK |
-| POST `access_control_records` | vol_id, initiator_group_id | Create: vol_id, initiator_group_id | OK |
-| **Snapshots** | | | |
-| POST `snapshots` | vol_id, name | Create: vol_id, name (mandatory) | OK |
-| GET `snapshots?name=...` | List by name, match by `name` | Read with query param `name` | OK |
-| DELETE `snapshots/:id` | Delete by id | Delete | OK |
-| **Pools** | | | |
-| GET `pools` | capacity, usage_valid, usage | Read: capacity, usage (NsBytes = number), usage_valid | **Adjusted**: status() now handles usage as number or nested { compressed_usage, uncompressed_usage }. |
-| **Clone from snapshot** | POST `volumes` with clone=true, name, base_snap_id (then add ACL) | Create doc: clone + name + base_snap_id for clone. Restore is for existing volume only. | **Fixed**: clone_image now uses nimble_clone_from_snapshot (POST volumes clone=true) instead of restore. |
-| **Snapshot create** | volname then snap_name in call | — | **Fixed**: volume_snapshot now passes (volname, snap) to nimble_snapshot_create. |
-| **Volume collections** | GET `volume_collections?name=...` | Read with query param `name` | OK (optional: add volumes to collection via PUT volumes/:id volcoll_id). |
-| **Subnets (auto iSCSI)** | GET `subnets` | Read; discovery_ip, allow_iscsi, type | OK (used when auto_iscsi_discovery is set). |
+| Endpoint / usage                   | Plugin call                                                                                        | HPE doc                                                                                                                                                                                                      | Status                                                                                                   |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| **Authentication**                 |                                                                                                    |                                                                                                                                                                                                              |                                                                                                          |
+| POST `/v1/tokens`                  | username, password → session_token                                                                 | Create: username (mandatory), password; Response: session_token                                                                                                                                              | OK                                                                                                       |
+| **Initiator groups**               |                                                                                                    |                                                                                                                                                                                                              |                                                                                                          |
+| GET `initiator_groups?name=...`    | List by name, match by `name`                                                                      | Read with query param `name`                                                                                                                                                                                 | OK                                                                                                       |
+| POST `initiator_groups`            | name, access_protocol, iscsi_initiators (array of { label, iqn })                                  | Create: name, access_protocol (mandatory); Response includes iscsi_initiators. Request table does not list iscsi_initiators; initiators may be added via POST `initiators` (initiator_group_id, label, iqn). | Verify on array: inline iscsi_initiators may be accepted by some versions.                               |
+| **Volumes**                        |                                                                                                    |                                                                                                                                                                                                              |                                                                                                          |
+| GET `volumes?name=...`             | List by name, match by `name`                                                                      | Read with query param `name`                                                                                                                                                                                 | OK                                                                                                       |
+| GET `volumes`                      | List all                                                                                           | Read                                                                                                                                                                                                         | OK                                                                                                       |
+| POST `volumes`                     | name, size (MB), optional pool_name                                                                | Create: name, size (MB), optional pool_id (doc shows pool_id; response has pool_name; plugin uses pool_name)                                                                                                 | OK; pool_name accepted by API in practice.                                                               |
+| PUT `volumes/:id`                  | size (resize) or name (rename)                                                                     | Update                                                                                                                                                                                                       | OK                                                                                                       |
+| DELETE `volumes/:id`               | Delete volume                                                                                      | Delete                                                                                                                                                                                                       | OK                                                                                                       |
+| POST `volumes/:id/actions/restore` | id, base_snap_id in body                                                                           | Restore: Request id (restored volume), base_snap_id (mandatory)                                                                                                                                              | **Fixed** to use `actions/restore` and body with id + base_snap_id.                                      |
+| **Access control**                 |                                                                                                    |                                                                                                                                                                                                              |                                                                                                          |
+| GET `access_control_records`       | List all; plugin filters by vol_id and initiator_group_id (for ensure-ACL-on-activate / migration) | Read                                                                                                                                                                                                         | OK                                                                                                       |
+| POST `access_control_records`      | vol_id, initiator_group_id                                                                         | Create: vol_id, initiator_group_id                                                                                                                                                                           | OK                                                                                                       |
+| **Snapshots**                      |                                                                                                    |                                                                                                                                                                                                              |                                                                                                          |
+| POST `snapshots`                   | vol_id, name                                                                                       | Create: vol_id, name (mandatory)                                                                                                                                                                             | OK                                                                                                       |
+| GET `snapshots?name=...`           | List by name, match by `name`                                                                      | Read with query param `name`                                                                                                                                                                                 | OK                                                                                                       |
+| DELETE `snapshots/:id`             | Delete by id                                                                                       | Delete                                                                                                                                                                                                       | OK                                                                                                       |
+| **Pools**                          |                                                                                                    |                                                                                                                                                                                                              |                                                                                                          |
+| GET `pools`                        | capacity, usage_valid, usage                                                                       | Read: capacity, usage (NsBytes = number), usage_valid                                                                                                                                                        | **Adjusted**: status() now handles usage as number or nested { compressed_usage, uncompressed_usage }.   |
+| **Clone from snapshot**            | POST `volumes` with clone=true, name, base_snap_id (then add ACL)                                  | Create doc: clone + name + base_snap_id for clone. Restore is for existing volume only.                                                                                                                      | **Fixed**: clone_image now uses nimble_clone_from_snapshot (POST volumes clone=true) instead of restore. |
+| **Snapshot create**                | volname then snap_name in call                                                                     | —                                                                                                                                                                                                            | **Fixed**: volume_snapshot now passes (volname, snap) to nimble_snapshot_create.                         |
+| **Volume collections**             | GET `volume_collections?name=...`                                                                  | Read with query param `name`                                                                                                                                                                                 | OK (optional: add volumes to collection via PUT volumes/:id volcoll_id).                                 |
+| **Subnets (auto iSCSI)**           | GET `subnets`                                                                                      | Read; discovery_ip, allow_iscsi, type                                                                                                                                                                        | OK (used when auto_iscsi_discovery is set).                                                              |
 
 ---
 
@@ -95,14 +95,15 @@ All plugin API usage has been checked against `docs/NIMBLE_API_REFERENCE.md`:
 
 Reference: [kolesa-team/pve-purestorage-plugin](https://github.com/kolesa-team/pve-purestorage-plugin).
 
-| Area | Pure | Nimble | Notes |
-|------|------|--------|--------|
-| **activate_volume** | Connect volume to host (API), then map_volume | Ensure ACL for current node (if per-node IG), then map_volume | Same idea: ensure array-side access then map. Nimble uses initiator_group + ACR instead of Pure’s host/connection. |
-| **deactivate_volume** | unmap_volume, then disconnect from host | unmap_volume only | By design: we do not remove ACL on deactivate (documented in README). Pure disconnects so only connected host had access. |
-| **map_volume** | get path/wwid, scsi_scan_new, wait for path to exist, multipath | get serial from API, scsi_scan_new, wait by serial for device, then path/wwid, multipath | Nimble uses serial-based wait so it works after migration when device is not yet present. |
-| **free_image / delete** | Disconnect from all hosts, then destroy volume | deactivate_volume (unmap), then delete volume; no ACL removal | Nimble does not remove ACRs on delete; volume is deleted on array. |
-| **rename_volume** | unmap, rename on array | Same | Aligned. |
-| **Block/multipath** | block_device_slaves, block_device_action, multipathd add/remove | Same pattern | Aligned. |
+| Area                    | Pure                                                            | Nimble                                                                                   | Notes                                                                                                                     |
+| ----------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **activate_volume**     | Connect volume to host (API), then map_volume                   | Ensure ACL for current node (if per-node IG), then map_volume                            | Same idea: ensure array-side access then map. Nimble uses initiator_group + ACR instead of Pure’s host/connection.        |
+| **deactivate_volume**   | unmap_volume, then disconnect from host                         | unmap_volume only                                                                        | By design: we do not remove ACL on deactivate (documented in README). Pure disconnects so only connected host had access. |
+| **map_volume**          | get path/wwid, scsi_scan_new, wait for path to exist, multipath | get serial from API, scsi_scan_new, wait by serial for device, then path/wwid, multipath | Nimble uses serial-based wait so it works after migration when device is not yet present.                                 |
+| **free_image / delete** | Disconnect from all hosts, then destroy volume                  | deactivate_volume (unmap), then delete volume; no ACL removal                            | Nimble does not remove ACRs on delete; volume is deleted on array.                                                        |
+| **rename_volume**       | unmap, rename on array                                          | Same                                                                                     | Aligned.                                                                                                                  |
+| **Snapshots**           | snap_volume_create(vol, snap); volume_restore for rollback and clone; snap_volume_delete | nimble_snapshot_create; nimble_volume_restore (rollback); nimble_clone_from_snapshot; nimble_snapshot_delete | Same behavior: create snapshot on array, rollback = in-place restore, clone = new volume from snapshot, delete snapshot. Nimble uses separate clone API (POST volumes clone=true) vs Pure’s “restore to new name.” |
+| **Block/multipath**     | block_device_slaves, block_device_action, multipathd add/remove | Same pattern                                                                             | Aligned.                                                                                                                  |
 
 Conclusion: Proxmox-side flow (activate → ensure access then map; deactivate → unmap; create/delete/rename/snapshot/clone) is aligned with Pure where the model applies. Differences (no disconnect on deactivate, ACL-based access) are intentional and documented.
 
@@ -117,13 +118,14 @@ Conclusion: Proxmox-side flow (activate → ensure access then map; deactivate �
 
 ## References
 
-- [REST API (object sets index)](https://support.hpe.com/docs/display/public/nmtp355en_us/htr1457290369852.html)
+(Aligned with `docs/NIMBLE_API_REFERENCE.md` — HPE Nimble REST API 5.1.1.0.)
+
+- [REST API (object sets index)](https://support.hpe.com/docs/display/public/nmtp352en_us/wzk1480348939804.html)
 - [Perl code sample (tokens, volumes)](https://support.hpe.com/docs/display/public/nmtp352en_us/htr1449782650567.html)
-- [tokens Create](https://support.hpe.com/docs/display/public/nmtp355en_us/htr1449782671923.html)
-- [initiator_groups Create](https://support.hpe.com/docs/display/public/nmtp355en_us/htr1449782663101.html)
-- [initiators Create](https://support.hpe.com/docs/display/public/nmtp355en_us/htr1449782664211.html)
-- [volumes Create](https://support.hpe.com/docs/display/public/nmtp355en_us/htr1449782674626.html)
-- [volumes Restore](https://support.hpe.com/docs/display/public/nmtp355en_us/htr1449717107235.html)
-- [access_control_records Create](https://support.hpe.com/docs/display/public/nmtp355en_us/htr1449782650786.html)
-- [snapshots Create](https://support.hpe.com/docs/display/public/nmtp355en_us/htr1449782670282.html)
-- [pools Read](https://support.hpe.com/docs/display/public/nmtp355en_us/htr1449782666286.html)
+- [tokens](https://support.hpe.com/docs/display/public/nmtp352en_us/hyv1480349057572.html) → [Create](https://support.hpe.com/docs/display/public/nmtp352en_us/umf1480349057761.html)
+- [initiator_groups](https://support.hpe.com/docs/display/public/nmtp352en_us/jom14803490011631.html) → [Create](https://support.hpe.com/docs/display/public/nmtp352en_us/wir14803490013351.html)
+- [initiators](https://support.hpe.com/docs/display/public/nmtp352en_us/irx1480349008822.html) → [Create](https://support.hpe.com/docs/display/public/nmtp352en_us/zws1480349009009.html)
+- [volumes](https://support.hpe.com/docs/display/public/nmtp352en_us/wex1480349067913.html) → [Create](https://support.hpe.com/docs/display/public/nmtp352en_us/dyz1480349073106.html), [Restore](https://support.hpe.com/docs/display/public/nmtp352en_us/dyi1480349077467.html)
+- [access_control_records](https://support.hpe.com/docs/display/public/nmtp352en_us/ktk1480348940664.html) → [Create](https://support.hpe.com/docs/display/public/nmtp352en_us/tkf1480348940945.html)
+- [snapshots](https://support.hpe.com/docs/display/public/nmtp352en_us/clb1480349051490.html) → [Create](https://support.hpe.com/docs/display/public/nmtp352en_us/qfv1480349052600.html)
+- [pools](https://support.hpe.com/docs/display/public/nmtp352en_us/zty1480349029606.html) → [Read](https://support.hpe.com/docs/display/public/nmtp352en_us/ahk1480349034094.html)

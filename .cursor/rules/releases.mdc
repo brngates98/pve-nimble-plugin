@@ -1,0 +1,25 @@
+---
+description: Release process – verify next version, include release notes, never skip versions
+globs: .github/release-notes*.md, .github/workflows/release.yml
+alwaysApply: false
+---
+
+# Release process rule
+
+When creating or preparing a **release** (new version tag and GitHub release):
+
+1. **Always verify the next release version**  
+   Check existing tags: `git tag -l 'v*' | sort -V`. The next release must be the **immediate next** version (e.g. after `v0.0.6` the next is `v0.0.7`, not `v1.0.0` or `v0.0.8`). Do not assume or invent a version; derive it from the current tags.
+
+2. **Always include release notes**  
+   The release workflow uses `.github/release-notes-<tagname>.md` (e.g. `.github/release-notes-v0.0.7.md`). Every release must have this file so the GitHub release body is populated. If the file is missing, the release will show only a generic "Release vX.Y.Z" message.
+
+3. **Never jump versions**  
+   Do not skip versions (e.g. do not go from v0.0.5 to v0.0.7 without v0.0.6, or from v0.0.6 to v1.0.0 without an explicit decision to bump major). Use the next sequential version based on existing tags.
+
+## Quick checklist
+
+- Run `git tag -l 'v*' | sort -V` to see current tags.
+- Next version = next in sequence (patch: 0.0.6 → 0.0.7; minor/major only if intentionally decided).
+- Create or update `.github/release-notes-vX.Y.Z.md` with the **exact** tag name (e.g. `v0.0.7`).
+- In the release notes file, set package version to `X.Y.Z-1` (e.g. `0.0.7-1`) and the .deb filename accordingly.
