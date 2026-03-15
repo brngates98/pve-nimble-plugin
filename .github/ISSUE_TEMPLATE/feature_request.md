@@ -1,9 +1,9 @@
 ---
 name: Feature request
 description: Suggest a new feature or enhancement for the PVE Nimble Storage plugin
+about: Suggest a new feature or enhancement for the PVE Nimble Storage plugin
 title: "[Feature]: "
 labels: ["enhancement"]
-assignees: ""
 ---
 
 ## Problem or use case

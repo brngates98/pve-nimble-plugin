@@ -1,9 +1,9 @@
 ---
 name: Bug report
 description: Report a bug or unexpected behavior with the PVE Nimble Storage plugin
+about: Report a bug or unexpected behavior with the PVE Nimble Storage plugin
 title: "[Bug]: "
 labels: ["bug"]
-assignees: ""
 ---
 
 ## Describe the bug
