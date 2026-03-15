@@ -245,15 +245,11 @@ devices {
     rr_weight            uniform
   }
 }
-multipaths {
-    multipath {
-        wwid "YOUR_WWID"
-        alias mpathX
-    }
-}
 ```
 
-The `multipaths` section is optional (e.g. for stable aliases). After editing `/etc/multipath.conf`, run `multipathd reconfigure`. On SLES, set `user_friendly_names no` per SUSE recommendations.
+The plugin adds and removes multipath maps at runtime via `multipathd` (using the device WWID).
+
+After editing `/etc/multipath.conf`, run `multipathd reconfigure`. On SLES, set `user_friendly_names no` per SUSE recommendations.
 
 Device paths are resolved via `/sys/block/*/device/serial` and `/dev/disk/by-id/`. For the official Nimble reference, see [HPE multipath.conf settings](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00004361en_us&page=GUID-512951AE-9900-493C-9E3C-F3AA694E9771.html&docLocale=en_US).
 
