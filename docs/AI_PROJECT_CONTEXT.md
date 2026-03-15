@@ -19,7 +19,7 @@
 |------|--------|--------|
 | **Core plugin** | Implemented | Create/delete/resize/rename volumes, list, status, activate/deactivate, map/unmap |
 | **Auth** | Implemented | Username/password → POST /v1/tokens → session token; cached under `/etc/pve/priv/nimble/<storeid>.json` |
-| **ACL / initiator** | Implemented | User must create a Nimble **initiator group** (with host IQN); plugin adds **access_control_records** (vol_id + initiator_group_id) when creating volumes |
+| **ACL / initiator** | Implemented | **initiator_group** is optional. If set, plugin uses that Nimble initiator group. If unset, plugin reads local IQN from `/etc/iscsi/initiatorname.iscsi`, creates/finds a group named `pve-<nodename>` with that IQN, and uses it for **access_control_records** (vol_id + initiator_group_id). |
 | **Snapshots** | Implemented | Create, delete, rollback; Nimble snapshots API + volume restore |
 | **Clone from snapshot** | Implemented | Via volume restore to new volume name |
 | **Multipath** | Implemented | Same pattern as Pure: device by serial, multipathd add/remove map, block device actions |
@@ -57,7 +57,7 @@ pve-nimble-plugin/
 
 ## 4. How the Plugin Fits Together
 
-- **Config (storage.cfg):** `address`, `username`, `password`, `initiator_group` (required), optional `vnprefix`, `pool_name`, `check_ssl`, `token_ttl`, `debug`.
+- **Config (storage.cfg):** `address`, `username`, `password`, optional `initiator_group` (if unset, plugin auto-creates/uses `pve-<nodename>` with local IQN), optional `vnprefix`, `pool_name`, `check_ssl`, `token_ttl`, `debug`.
 - **Nimble API base:** `https://<address>:5392/v1/`. Auth: POST `tokens` with username/password → use `session_token` as `X-Auth-Token` on later requests.
 - **Volume naming:** `nimble_volname(scfg, volname, [snapname])` = optional prefix + volname (e.g. `vm-100-disk-0`) + optional `.snap-<name>` for snapshots.
 - **Key API calls:** volumes (GET/POST/PUT/DELETE), access_control_records (POST to grant vol to initiator group), snapshots (POST create, GET by name, DELETE), volume restore (POST with base_snap_id).

@@ -100,7 +100,7 @@ sub properties {
       type        => 'string'
     },
     initiator_group => {
-      description => "Initiator group name (must contain this host's iSCSI IQN).",
+      description => "Initiator group name (optional). If unset, a group is created automatically using this host's iSCSI IQN.",
       type        => 'string'
     },
     vnprefix => {
@@ -136,7 +136,7 @@ sub options {
     address  => { fixed => 1 },
     username => { fixed => 1 },
     password => { fixed => 1 },
-    initiator_group => { fixed => 1 },
+    initiator_group => { optional => 1 },
 
     vnprefix       => { optional => 1 },
     pool_name      => { optional => 1 },
@@ -410,6 +410,17 @@ sub nimble_api_call {
   return length( $content ) ? decode_json( $content ) : {};
 }
 
+sub nimble_get_local_iscsi_iqn {
+  my $path = '/etc/iscsi/initiatorname.iscsi';
+  return undef unless -r $path;
+  my $line = file_read_firstline( $path );
+  return undef unless defined $line && $line =~ m/^\s*InitiatorName\s*=\s*(.+)\s*$/;
+  my $iqn = $1;
+  $iqn =~ s/^\s+|\s+$//g;
+  return $iqn if length( $iqn ) && $iqn =~ m/^iqn\./;
+  return undef;
+}
+
 sub nimble_get_initiator_group_id {
   my ( $scfg, $name, $storeid ) = @_;
   my $enc = uri_escape( $name );
@@ -419,6 +430,36 @@ sub nimble_get_initiator_group_id {
     return $g->{ id } if $g->{ name } eq $name;
   }
   die "Error :: Initiator group \"$name\" not found on Nimble array.\n";
+}
+
+# Resolve initiator group ID: use config name if set, else auto-create/find by PVE nodename + local IQN.
+sub nimble_ensure_initiator_group_id {
+  my ( $scfg, $storeid ) = @_;
+  my $ig_name = $scfg->{ initiator_group };
+  if ( defined $ig_name && $ig_name ne '' ) {
+    return nimble_get_initiator_group_id( $scfg, $ig_name, $storeid );
+  }
+  my $iqn = nimble_get_local_iscsi_iqn();
+  die "Error :: initiator_group not set and could not read local iSCSI IQN (install open-iscsi and configure /etc/iscsi/initiatorname.iscsi).\n"
+    unless $iqn;
+  my $nodename = PVE::INotify::nodename();
+  $ig_name = "pve-$nodename";
+  my $enc = uri_escape( $ig_name );
+  my $r = nimble_api_call( $scfg, 'GET', "initiator_groups?name=$enc", undef, $storeid );
+  my $list = $r->{ data } || [];
+  for my $g ( @$list ) {
+    return $g->{ id } if $g->{ name } eq $ig_name;
+  }
+  my $body = {
+    name             => $ig_name,
+    access_protocol  => 'iscsi',
+    iscsi_initiators => [ { label => $nodename, iqn => $iqn } ],
+  };
+  $r = nimble_api_call( $scfg, 'POST', 'initiator_groups', $body, $storeid );
+  my $g = $r->{ data } || $r;
+  my $id = $g->{ id } or die "Error :: Failed to create initiator group \"$ig_name\".\n";
+  print "Info :: Created initiator group \"$ig_name\" with this host's IQN.\n";
+  return $id;
 }
 
 sub nimble_get_volume_id {
@@ -490,8 +531,7 @@ sub nimble_create_volume {
   my $vol = $r->{ data } || $r;
   my $serial = $vol->{ serial_number } or die "Error :: No serial_number in create response\n";
   print "Info :: Volume \"$volname\" created (serial=$serial).\n";
-  my $ig = $scfg->{ initiator_group } or die "Error :: initiator_group not set\n";
-  my $ig_id = nimble_get_initiator_group_id( $scfg, $ig, $storeid );
+  my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
   nimble_api_call( $scfg, 'POST', 'access_control_records', { vol_id => $vol->{ id }, initiator_group_id => $ig_id }, $storeid );
   return 1;
 }

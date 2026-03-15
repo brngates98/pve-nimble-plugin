@@ -2,6 +2,18 @@
 
 This plugin integrates HPE Nimble Storage arrays with Proxmox Virtual Environment (VE) over iSCSI. It uses the Nimble REST API to create and manage volumes and presents them as VM disks with optional multipath.
 
+## Quick start
+
+1. **Install** the plugin (APT or [package](https://github.com/brngates98/pve-nimble-plugin/releases)) and ensure **open-iscsi** is installed with an IQN set in `/etc/iscsi/initiatorname.iscsi`.
+2. **Add storage** (no need to create an initiator group on the array—the plugin will create one for this host):
+
+   ```bash
+   pvesm add nimble <storage_id> --address https://<nimble>:5392 \
+     --username <user> --password '<password>' --content images
+   ```
+
+3. In the Proxmox UI: **Datacenter → Storage** — your Nimble storage should appear. Create a VM and add a disk from this storage to use it.
+
 ## Features
 
 - Create, delete, resize, and rename volumes on the Nimble array via the REST API
@@ -16,7 +28,7 @@ This plugin integrates HPE Nimble Storage arrays with Proxmox Virtual Environmen
 - Proxmox VE 8.2+ (or compatible storage API)
 - HPE Nimble array with REST API enabled (default port 5392)
 - iSCSI initiator configured on each Proxmox node (e.g. `open-iscsi`)
-- An **initiator group** on the Nimble array that contains this host’s iSCSI IQN (create via Nimble UI or API)
+- (Optional) An initiator group on the Nimble array. If you omit it, the plugin creates one automatically using this host’s iSCSI IQN (from `/etc/iscsi/initiatorname.iscsi`).
 
 ### iSCSI on Proxmox
 
@@ -119,6 +131,14 @@ sudo apt remove libpve-storage-nimble-perl
 Add storage via CLI (no GUI for custom types):
 
 ```bash
+# Minimal: initiator group is created automatically from this host's IQN
+pvesm add nimble <storage_id> \
+  --address https://<nimble_fqdn_or_ip> \
+  --username <api_user> \
+  --password <api_password> \
+  --content images
+
+# Or specify an existing initiator group name
 pvesm add nimble <storage_id> \
   --address https://<nimble_fqdn_or_ip> \
   --username <api_user> \
@@ -134,8 +154,8 @@ nimble: <storage_id>
   address https://<nimble_fqdn_or_ip>
   username <api_user>
   password <api_password>
-  initiator_group <initiator_group_name>
   content images
+  # initiator_group <name>   # optional; omit to auto-create pve-<nodename>
 ```
 
 | Parameter         | Description |
@@ -144,7 +164,7 @@ nimble: <storage_id>
 | address          | Nimble management URL (e.g. `https://nimble.example.com`). Port 5392 is used by default if omitted. |
 | username         | Nimble REST API user |
 | password         | API password |
-| initiator_group  | **Required.** Nimble initiator group name that includes this host’s iSCSI IQN. Used for access_control_records when creating volumes. |
+| initiator_group  | **Optional.** Nimble initiator group name. If unset, the plugin creates a group named `pve-<nodename>` with this host’s iSCSI IQN and uses it for access_control_records. |
 | vnprefix         | Optional prefix for volume names on the array |
 | pool_name        | Optional Nimble pool for new volumes |
 | check_ssl        | Set to `1` or `yes` to verify TLS (default: no) |
@@ -267,6 +287,16 @@ The plugin adds and removes multipath maps at runtime via `multipathd` (using th
 After editing `/etc/multipath.conf`, run `multipathd reconfigure`. On SLES, set `user_friendly_names no` per SUSE recommendations.
 
 Device paths are resolved via `/sys/block/*/device/serial` and `/dev/disk/by-id/`. For the official Nimble reference, see [HPE multipath.conf settings](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00004361en_us&page=GUID-512951AE-9900-493C-9E3C-F3AA694E9771.html&docLocale=en_US).
+
+## Troubleshooting
+
+| Problem | What to do |
+|--------|------------|
+| **"could not read local iSCSI IQN"** | Install `open-iscsi`, set `InitiatorName=iqn.…` in `/etc/iscsi/initiatorname.iscsi`, then restart iscsid (or reboot). |
+| **"Initiator group \"X\" not found"** | You set `initiator_group` in storage config but that group doesn’t exist on the array. Create it in the Nimble UI (with this host’s IQN) or remove `initiator_group` from the config so the plugin creates one automatically. |
+| **API connection / timeout / TLS errors** | Check `address` (use `https://` and correct host or IP), firewall (port 5392), and `check_ssl` (set to 0 or omit if using self-signed certs). Test with the [API connectivity](#api-connectivity) curl example. |
+| **Storage shows but VM disk create fails** | Run with debug: `NIMBLE_DEBUG=2 pvesm status` (or set `debug 2` in storage config). Check token cache: `ls -la /etc/pve/priv/nimble/`. |
+| **Multipath not used** | Ensure multipathd is running, `/etc/multipath.conf` has Nimble in `blacklist_exceptions` (and a `devices` block if needed), then `multipathd reconfigure`. |
 
 ## Debug
 
