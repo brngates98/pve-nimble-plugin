@@ -28,6 +28,19 @@ sudo iscsiadm -m node --op update -n node.startup -v automatic
 
 Ensure `/sys/class/iscsi_host/` has at least one host before using the plugin.
 
+### API connectivity
+
+To verify the array is reachable and credentials work before adding storage in Proxmox:
+
+```bash
+# Get a session token (use -k if TLS is not verified)
+curl -sk -X POST "https://<nimble>:5392/v1/tokens" \
+  -H "Content-Type: application/json" \
+  -d '{"username":"<user>","password":"<password>"}'
+```
+
+Use the `session_token` from the response with `X-Auth-Token` for other calls (e.g. `GET /v1/volumes`).
+
 ## Installation
 
 ### Manual

@@ -30,17 +30,19 @@ jobs:
       run: |
         pkgname=libpve-storage-nimble-perl
         tag_list=$(git tag -l | grep -ve '-rc\.[0-9]$' | grep -ve '-beta\.[0-9]$' | sort -V)
+        prevtag=""
         if [[ -z "$tag_list" ]]; then
           # No tags yet (first release): one changelog block from full history
           echo >> changelog
-          git log --pretty='format: -- %aN <%aE>  %aD%n%n' HEAD >> changelog
+          git log --pretty='format:   -- %aN <%aE>  %aD' -1 HEAD >> changelog
+          echo "" >> changelog
           git log --pretty=format:'  * %s%n' HEAD >> changelog
           echo "" >> changelog
           echo "$pkgname (1.0.0-1) stable; urgency=medium" >> changelog
         else
           for tag in ${tag_list}; do
             tag_header="$tag^..$tag"
-            tag_info=$prevtag..$tag
+            tag_info="$prevtag..$tag"
             tag_version=$(echo $tag | cut -c2-)-1
             if [[ "$prevtag" == "" ]]; then
               tag_header="$tag"
@@ -50,7 +52,8 @@ jobs:
             fi
 
             echo >> changelog
-            git log --pretty='format: -- %aN <%aE>  %aD%n%n' $tag_header >> changelog
+            git log --pretty='format:   -- %aN <%aE>  %aD' -1 $tag_info >> changelog
+            echo "" >> changelog
             git log --pretty=format:'  * %s%n' $tag_info >> changelog
             echo "" >> changelog
             echo "$pkgname ($tag_version) stable; urgency=medium" >> changelog
