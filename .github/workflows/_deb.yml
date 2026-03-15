@@ -63,6 +63,7 @@ jobs:
         fi
 
         tac changelog > debian/changelog
+        echo >> debian/changelog
 
     - name: Build deb
       working-directory: ./src

@@ -3,11 +3,6 @@
 %:
 	dh $@ --parallel
 
-override_dh_auto_install:
-	dh_auto_install
-	install -d ${CURDIR}/debian/tmp/docs
-	install -m 0644 ${CURDIR}/README.md ${CURDIR}/debian/tmp/docs
-
 override_dh_auto_clean:
 	dh_auto_clean
 	rm --force --recursive ${CURDIR}/debian/tmp
