@@ -111,6 +111,10 @@ sub properties {
       description => "Pool name for new volumes (optional).",
       type        => 'string'
     },
+    volume_collection => {
+      description => "Nimble volume collection name (optional). New volumes will be added to this collection so array-side protection/snapshot schedules apply.",
+      type        => 'string'
+    },
     check_ssl => {
       description => "Verify the server's TLS certificate.",
       type        => 'boolean',
@@ -145,6 +149,7 @@ sub options {
 
     vnprefix  => { optional => 1 },
     pool_name => { optional => 1 },
+    volume_collection => { optional => 1 },
     check_ssl => { optional => 1 },
     token_ttl => { optional => 1 },
     debug     => { optional => 1 },
@@ -522,14 +527,28 @@ sub nimble_ensure_initiator_group_id {
   return $id;
 }
 
+sub nimble_get_volume_collection_id {
+  my ( $scfg, $name, $storeid ) = @_;
+  return undef if !defined $name || $name eq '';
+  my $enc  = uri_escape( $name );
+  my $r    = nimble_api_call( $scfg, 'GET', "volume_collections?name=$enc", undef, $storeid );
+  my $raw  = $r->{ data };
+  my $list = ref($raw) eq 'ARRAY' ? $raw : ( ref($raw) eq 'HASH' && defined $raw->{ id } ? [$raw] : [] );
+  for my $vc ( @$list ) {
+    return $vc->{ id } if ref($vc) eq 'HASH' && $vc->{ name } eq $name;
+  }
+  return undef;
+}
+
 sub nimble_get_volume_id {
   my ( $scfg, $volname, $storeid ) = @_;
   my $name = nimble_volname( $scfg, $volname, undef );
   my $enc  = uri_escape( $name );
   my $r    = nimble_api_call( $scfg, 'GET', "volumes?name=$enc", undef, $storeid );
-  my $list = $r->{ data } || [];
+  my $raw  = $r->{ data };
+  my $list = ref($raw) eq 'ARRAY' ? $raw : ( ref($raw) eq 'HASH' && defined $raw->{ id } ? [$raw] : [] );
   for my $v ( @$list ) {
-    return ( $v->{ id }, $v ) if $v->{ name } eq $name;
+    return ( $v->{ id }, $v ) if ref($v) eq 'HASH' && $v->{ name } eq $name;
   }
   return ( undef, undef );
 }
@@ -594,6 +613,15 @@ sub nimble_create_volume {
   print "Info :: Volume \"$volname\" created (serial=$serial).\n";
   my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
   nimble_api_call( $scfg, 'POST', 'access_control_records', { vol_id => $vol->{ id }, initiator_group_id => $ig_id }, $storeid );
+  if ( $scfg->{ volume_collection } ) {
+    my $volcoll_id = nimble_get_volume_collection_id( $scfg, $scfg->{ volume_collection }, $storeid );
+    if ( $volcoll_id ) {
+      nimble_api_call( $scfg, 'PUT', "volumes/$vol->{ id }", { volcoll_id => $volcoll_id }, $storeid );
+      print "Info :: Volume \"$volname\" added to volume collection \"$scfg->{ volume_collection }\".\n";
+    } else {
+      warn "Warning :: volume_collection \"$scfg->{ volume_collection }\" not found; volume not added to any collection.\n";
+    }
+  }
   return 1;
 }
 
@@ -695,6 +723,15 @@ sub nimble_clone_from_snapshot {
   my $vol_id = $vol->{ id } or die "Error :: Clone did not return volume id.\n";
   my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
   nimble_api_call( $scfg, 'POST', 'access_control_records', { vol_id => $vol_id, initiator_group_id => $ig_id }, $storeid );
+  if ( $scfg->{ volume_collection } ) {
+    my $volcoll_id = nimble_get_volume_collection_id( $scfg, $scfg->{ volume_collection }, $storeid );
+    if ( $volcoll_id ) {
+      nimble_api_call( $scfg, 'PUT', "volumes/$vol_id", { volcoll_id => $volcoll_id }, $storeid );
+      print "Info :: Cloned volume \"$new_volname\" added to volume collection \"$scfg->{ volume_collection }\".\n";
+    } else {
+      warn "Warning :: volume_collection \"$scfg->{ volume_collection }\" not found; clone not added to any collection.\n";
+    }
+  }
   print "Info :: Cloned volume \"$new_volname\" from \"$source_volname\" snapshot \"$snap_name\".\n";
   return 1;
 }

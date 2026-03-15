@@ -166,8 +166,9 @@ These endpoints are not used by the plugin today but are useful for automation (
 | Create initiator group | POST | initiator_groups | name, access_protocol, iscsi_initiators |
 | List volumes | GET | volumes or volumes?name=... | — |
 | Create volume | POST | volumes | name, size, optional pool_name |
-| Update volume | PUT | volumes/:id | size or name |
+| Update volume | PUT | volumes/:id | size, name, or volcoll_id (to add/remove from volume collection) |
 | Delete volume | DELETE | volumes/:id | — |
+| List volume collections | GET | volume_collections or volume_collections?name=... | — |
 | Restore volume | POST | volumes/:id/actions/restore | id, base_snap_id |
 | Create ACL | POST | access_control_records | vol_id, initiator_group_id |
 | Create snapshot | POST | snapshots | vol_id, name |

@@ -60,7 +60,7 @@ pve-nimble-plugin/
 
 ## 4. How the Plugin Fits Together
 
-- **Config (storage.cfg):** `address`, `username`, `password`, optional `initiator_group` (if unset, plugin auto-creates/uses `pve-<nodename>` with local IQN), optional `vnprefix`, `pool_name`, `check_ssl`, `token_ttl`, `debug`, optional **`auto_iscsi_discovery`** (default off; when enabled, on storage activate the plugin runs iSCSI discovery and login using discovery IPs from GET subnets).
+- **Config (storage.cfg):** `address`, `username`, `password`, optional `initiator_group` (if unset, plugin auto-creates/uses `pve-<nodename>` with local IQN), optional `vnprefix`, `pool_name`, optional **`volume_collection`** (Nimble volume collection name; new volumes are added to it for array-side protection/schedules), `check_ssl`, `token_ttl`, `debug`, optional **`auto_iscsi_discovery`** (default off; when enabled, on storage activate the plugin runs iSCSI discovery and login using discovery IPs from GET subnets).
 - **Nimble API base:** `https://<address>:5392/v1/`. Auth: POST `tokens` with username/password → use `session_token` as `X-Auth-Token` on later requests.
 - **Volume naming:** `nimble_volname(scfg, volname, [snapname])` = optional prefix + volname (e.g. `vm-100-disk-0`) + optional `.snap-<name>` for snapshots.
 - **Key API calls:** volumes (GET/POST/PUT/DELETE), access_control_records (POST to grant vol to initiator group), snapshots (POST create, GET by name, DELETE), volume restore (POST with base_snap_id), **subnets** (GET for auto iSCSI discovery IPs when `auto_iscsi_discovery` is set).

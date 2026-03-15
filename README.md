@@ -210,6 +210,7 @@ nimble: <storage_id>
 | auto_iscsi_discovery | **Optional.** Set to `1` or `yes` to run iSCSI discovery and login when the storage is activated. The plugin gets discovery IPs from the Nimble subnets API and runs `iscsiadm` on this host. Default: no (opt-in). |
 | vnprefix             | Optional prefix for volume names on the array                                                                                                                                                                       |
 | pool_name            | Optional Nimble pool for new volumes                                                                                                                                                                                |
+| volume_collection    | **Optional.** Nimble volume collection name. New volumes are added to this collection so array-side protection/snapshot schedules apply. Create the collection (and its protection template) in Nimble first.      |
 | check_ssl            | Set to `1` or `yes` to verify TLS (default: no)                                                                                                                                                                     |
 | token_ttl            | Session token cache TTL in seconds (default 3600)                                                                                                                                                                   |
 | content              | Use `images` for VM disks                                                                                                                                                                                           |
@@ -226,6 +227,22 @@ If you set `**auto_iscsi_discovery 1`** (or `yes`) on the storage:
 2. **Requirements:** `open-iscsi` must be installed and an IQN must be set in `/etc/iscsi/initiatorname.iscsi`. The plugin does not install or configure the initiator; it ensures the initiator group on the array, then runs discovery and login.
 3. **Safety:** The option is off by default. The initiator group is ensured first (so the array knows this host's IQN); if that fails, discovery is skipped. Discovery and login are additive (they do not remove or overwrite existing iSCSI nodes). If the subnets API fails or returns no IPs, or if `iscsiadm` is missing, the plugin logs a warning and does not fail storage activation.
 4. **Cluster:** On a cluster, activation runs per node; each node runs discovery/login for itself using the same Nimble subnets.
+
+### Protection plans (Nimble-side)
+
+On the Nimble array, **volume collections** group volumes and use a **protection template** to define snapshot schedule and retention (and optionally replication). To have the plugin put new disks under a protection plan:
+
+1. In Nimble (UI or API), create a **protection template** with the desired schedule/retention, then create a **volume collection** using that template (or use an existing volume collection that already has a schedule).
+2. Set **volume_collection** in the storage config to the **name** of that volume collection.
+3. Every new volume (VM disk) created on this storage, and every volume created by **Clone** from snapshot, will be associated with that collection; the array will then snapshot it according to the collection's schedule.
+
+Existing volumes are not moved into a collection; only newly created and cloned ones are. To add existing volumes to a collection, use the Nimble UI or REST API (PUT volume with `volcoll_id`).
+
+### Backup and snapshot target
+
+- **VM snapshots:** The plugin supports **storage-level snapshots**. When you take a VM snapshot in Proxmox and the VM has disks on this storage, the plugin creates a Nimble snapshot per disk; rollback and delete work as expected. So Nimble is already a "snapshot target" for VM snapshots.
+- **vzdump backup target:** Proxmox backup (vzdump) expects **file** storage (directory, NFS, or Proxmox Backup Server). This plugin provides **block** (iSCSI) storage for VM disks. It does **not** support the "vzdump backup file" content type, so you cannot select this storage as a backup destination in PVE backup jobs. Use a file-based or PBS storage for backups.
+- **Array-scheduled snapshots:** Nimble's own scheduled snapshots (from protection templates / volume collections) are created by the array, not by PVE. They do not appear as "VM snapshots" in the Proxmox UI. You can use **volume_collection** so new disks get array-side schedules; restore from those snapshots via the Nimble UI/API or by cloning/restore workflows outside PVE. See [Restore a disk from the array](docs/00-SETUP-FULLY-PROTECTED-STORAGE.md#11-restore-a-disk-from-the-array-workflow) for a step-by-step workflow (PVE rollback, clone, and in-place restore via Nimble UI or API).
 
 ## Multipath (optional)
 
