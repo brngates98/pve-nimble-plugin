@@ -43,7 +43,13 @@ Use the `session_token` from the response with `X-Auth-Token` for other calls (e
 
 ## Installation
 
-### Manual
+There are two methods: manual installation and Debian package from the [releases page](https://github.com/brngates98/pve-nimble-plugin/releases) (recommended).
+
+> **Important:** On a cluster, install the plugin on every node; storage config syncs via corosync, but the plugin must be present on each node.
+
+### Manual installation
+
+Useful for development or installing from source.
 
 ```bash
 sudo apt-get install -y libwww-perl libjson-perl libjson-xs-perl liburi-perl
@@ -53,10 +59,44 @@ sudo chmod 644 /usr/share/perl5/PVE/Storage/Custom/NimbleStoragePlugin.pm
 sudo systemctl restart pvedaemon.service pveproxy.service
 ```
 
-### Debian package (when built)
+### Debian package (recommended)
+
+The package installs dependencies and is easy to upgrade.
+
+#### Step 1: Download the package
+
+Replace `<PACKAGE_VERSION>` with the version you want (e.g. `0.0.1`). See the [releases page](https://github.com/brngates98/pve-nimble-plugin/releases) for versions.
 
 ```bash
-sudo apt install ./libpve-storage-nimble-perl_*_all.deb
+PACKAGE_VERSION="<PACKAGE_VERSION>"
+wget "https://github.com/brngates98/pve-nimble-plugin/releases/download/v${PACKAGE_VERSION}/libpve-storage-nimble-perl_${PACKAGE_VERSION}-1_all.deb"
+```
+
+#### Step 2: Install the package
+
+```bash
+sudo apt install ./libpve-storage-nimble-perl_${PACKAGE_VERSION}-1_all.deb
+```
+
+#### Step 3: Verify installation
+
+```bash
+dpkg -l | grep libpve-storage-nimble-perl
+# Should show the installed package version
+```
+
+#### To upgrade to a newer version
+
+```bash
+PACKAGE_VERSION="<NEW_VERSION>"
+wget "https://github.com/brngates98/pve-nimble-plugin/releases/download/v${PACKAGE_VERSION}/libpve-storage-nimble-perl_${PACKAGE_VERSION}-1_all.deb"
+sudo apt install ./libpve-storage-nimble-perl_${PACKAGE_VERSION}-1_all.deb
+```
+
+#### To uninstall
+
+```bash
+sudo apt remove libpve-storage-nimble-perl
 ```
 
 ## Configuration
