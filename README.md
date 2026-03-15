@@ -98,7 +98,49 @@ nimble: <storage_id>
 
 ## Multipath (optional)
 
-If you use multipath, configure it for Nimble (e.g. in `multipath.conf`) and ensure the plugin can find devices by serial. Device paths are resolved via `/sys/block/*/device/serial` and `/dev/disk/by-id/`.
+If you use multipath, configure it for Nimble in `/etc/multipath.conf`. Use `find_multipaths no` so devices are recognized correctly. Example (vendor/product as reported by HPE for Nimble):
+
+```text
+defaults {
+    user_friendly_names yes
+    find_multipaths     no
+}
+blacklist {
+    devnode "^(ram|raw|loop|fd|md|dm-|sr|scd|st)[0-9]*"
+    devnode "^hd[a-z]"
+    device {
+        vendor  ".*"
+        product ".*"
+    }
+}
+blacklist_exceptions {
+    device {
+        vendor  "Nimble"
+        product "Server"
+    }
+}
+devices {
+    device {
+        vendor               "Nimble"
+        product              "Server"
+        path_grouping_policy group_by_prio
+        prio                 "alua"
+        hardware_handler     "1 alua"
+        path_selector        "service-time 0"
+        path_checker         tur
+        no_path_retry        30
+        failback             immediate
+        fast_io_fail_tmo     5
+        dev_loss_tmo         infinity
+        rr_min_io_rq         1
+        rr_weight            uniform
+    }
+}
+```
+
+If other storage is connected, remove the broad blacklist and blacklist only local disks (e.g. by `wwid`) as needed. After editing `/etc/multipath.conf`, run `multipathd reconfigure`. On SLES, set `user_friendly_names no` per SUSE recommendations.
+
+Device paths are resolved via `/sys/block/*/device/serial` and `/dev/disk/by-id/`. For the official reference, see [HPE multipath.conf settings](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00004361en_us&page=GUID-512951AE-9900-493C-9E3C-F3AA694E9771.html&docLocale=en_US).
 
 ## Debug
 

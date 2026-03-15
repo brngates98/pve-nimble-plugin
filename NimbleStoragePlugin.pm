@@ -213,7 +213,9 @@ sub nimble_volname {
   return $name;
 }
 
-# Find block device path by SCSI serial (e.g. from Nimble volume serial_number)
+# Find block device path by SCSI serial (e.g. from Nimble volume serial_number).
+# Unlike Pure (fixed prefix 3624a9370), Nimble has no fixed WWN prefix in this plugin;
+# we match the API serial_number against /sys/block/*/device/serial and by-id.
 sub get_device_path_by_serial {
   my ( $serial ) = @_;
   die 'Error :: Volume serial is missing' unless length( $serial );
