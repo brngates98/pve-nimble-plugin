@@ -426,6 +426,15 @@ sub nimble_api_call {
   return length( $content ) ? decode_json( $content ) : {};
 }
 
+# Normalize API list response: HPE can return data as array or single object.
+sub nimble_data_as_list {
+  my ( $raw ) = @_;
+  return [] unless defined $raw;
+  return $raw if ref($raw) eq 'ARRAY';
+  return [ $raw ] if ref($raw) eq 'HASH' && defined $raw->{ id };
+  return [];
+}
+
 ### Auto iSCSI discovery (opt-in): get discovery IPs from Nimble subnets API
 sub get_nimble_iscsi_discovery_ips {
   my ( $scfg, $storeid ) = @_;
@@ -489,7 +498,7 @@ sub nimble_get_initiator_group_id {
   my ( $scfg, $name, $storeid ) = @_;
   my $enc  = uri_escape( $name );
   my $r    = nimble_api_call( $scfg, 'GET', "initiator_groups?name=$enc", undef, $storeid );
-  my $list = $r->{ data } || [];
+  my $list = nimble_data_as_list( $r->{ data } );
   for my $g ( @$list ) {
     return $g->{ id } if $g->{ name } eq $name;
   }
@@ -510,7 +519,7 @@ sub nimble_ensure_initiator_group_id {
   $ig_name = "pve-$nodename";
   my $enc  = uri_escape( $ig_name );
   my $r    = nimble_api_call( $scfg, 'GET', "initiator_groups?name=$enc", undef, $storeid );
-  my $list = $r->{ data } || [];
+  my $list = nimble_data_as_list( $r->{ data } );
 
   for my $g ( @$list ) {
     return $g->{ id } if $g->{ name } eq $ig_name;
@@ -527,13 +536,47 @@ sub nimble_ensure_initiator_group_id {
   return $id;
 }
 
+# Check if volume already has an access_control_record for the given initiator group.
+sub nimble_volume_has_acl_for_ig {
+  my ( $scfg, $vol_id, $ig_id, $storeid ) = @_;
+  my $r    = nimble_api_call( $scfg, 'GET', 'access_control_records', undef, $storeid );
+  my $list = nimble_data_as_list( $r->{ data } );
+  for my $acr ( @$list ) {
+    next unless ref($acr) eq 'HASH';
+    return 1 if ( "$acr->{ vol_id }" eq "$vol_id" && "$acr->{ initiator_group_id }" eq "$ig_id" );
+  }
+  return 0;
+}
+
+# When initiator_group is not set (per-node groups), ensure the current node's initiator group
+# has access to the volume so that migration works (target node can activate and get ACL).
+sub nimble_ensure_volume_acl_for_current_node {
+  my ( $class, $scfg, $volname, $storeid ) = @_;
+  return 1 if defined $scfg->{ initiator_group } && $scfg->{ initiator_group } ne '';
+  my ( $vol_id, $vol ) = nimble_get_volume_id( $scfg, $volname, $storeid );
+  return 1 unless $vol_id;
+  my $ig_id = eval { nimble_ensure_initiator_group_id( $scfg, $storeid ) };
+  return 1 unless $ig_id;
+  return 1 if nimble_volume_has_acl_for_ig( $scfg, $vol_id, $ig_id, $storeid );
+  eval {
+    nimble_api_call( $scfg, 'POST', 'access_control_records', { vol_id => $vol_id, initiator_group_id => $ig_id }, $storeid );
+  };
+  if ( my $err = $@ ) {
+    if ( $err =~ /already exists|duplicate|already has access/i ) {
+      return 1;
+    }
+    die $err;
+  }
+  print "Info :: Volume \"$volname\" granted access to this host's initiator group (for migration).\n";
+  return 1;
+}
+
 sub nimble_get_volume_collection_id {
   my ( $scfg, $name, $storeid ) = @_;
   return undef if !defined $name || $name eq '';
   my $enc  = uri_escape( $name );
   my $r    = nimble_api_call( $scfg, 'GET', "volume_collections?name=$enc", undef, $storeid );
-  my $raw  = $r->{ data };
-  my $list = ref($raw) eq 'ARRAY' ? $raw : ( ref($raw) eq 'HASH' && defined $raw->{ id } ? [$raw] : [] );
+  my $list = nimble_data_as_list( $r->{ data } );
   for my $vc ( @$list ) {
     return $vc->{ id } if ref($vc) eq 'HASH' && $vc->{ name } eq $name;
   }
@@ -545,8 +588,7 @@ sub nimble_get_volume_id {
   my $name = nimble_volname( $scfg, $volname, undef );
   my $enc  = uri_escape( $name );
   my $r    = nimble_api_call( $scfg, 'GET', "volumes?name=$enc", undef, $storeid );
-  my $raw  = $r->{ data };
-  my $list = ref($raw) eq 'ARRAY' ? $raw : ( ref($raw) eq 'HASH' && defined $raw->{ id } ? [$raw] : [] );
+  my $list = nimble_data_as_list( $r->{ data } );
   for my $v ( @$list ) {
     return ( $v->{ id }, $v ) if ref($v) eq 'HASH' && $v->{ name } eq $name;
   }
@@ -559,7 +601,7 @@ sub nimble_list_volumes {
   my $filter = "vm-$vmid-disk-*,vm-$vmid-cloudinit,vm-$vmid-state-*";
   my $prefix = nimble_name_prefix( $scfg );
   my $r      = nimble_api_call( $scfg, 'GET', 'volumes', undef, $storeid );
-  my $list   = $r->{ data } || [];
+  my $list   = nimble_data_as_list( $r->{ data } );
   my @volumes;
   for my $v ( @$list ) {
     my $name = $v->{ name };
@@ -672,7 +714,7 @@ sub nimble_snapshot_delete {
   my $snap_full = nimble_volname( $scfg, $volname, $snap_name );
   my $enc       = uri_escape( $snap_full );
   my $r         = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
-  my $list      = $r->{ data } || [];
+  my $list      = nimble_data_as_list( $r->{ data } );
   for my $s ( @$list ) {
     if ( $s->{ name } eq $snap_full ) {
       nimble_api_call( $scfg, 'DELETE', "snapshots/" . $s->{ id }, undef, $storeid );
@@ -691,7 +733,7 @@ sub nimble_volume_restore {
   my $snap_full = nimble_volname( $scfg, $svolname, $snap );
   my $enc       = uri_escape( $snap_full );
   my $r         = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
-  my $list      = $r->{ data } || [];
+  my $list      = nimble_data_as_list( $r->{ data } );
   my $snap_id;
 
   for my $s ( @$list ) {
@@ -710,7 +752,7 @@ sub nimble_clone_from_snapshot {
   my $snap_full = nimble_volname( $scfg, $source_volname, $snap_name );
   my $enc       = uri_escape( $snap_full );
   my $r         = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
-  my $list      = $r->{ data } || [];
+  my $list      = nimble_data_as_list( $r->{ data } );
   my $snap_id;
   for my $s ( @$list ) {
     if ( $s->{ name } eq $snap_full ) { $snap_id = $s->{ id }; last; }
@@ -832,7 +874,7 @@ sub list_images {
 sub status {
   my ( $class, $storeid, $scfg, $cache ) = @_;
   my $r     = nimble_api_call( $scfg, 'GET', 'pools', undef, $storeid );
-  my $list  = $r->{ data } || [];
+  my $list  = nimble_data_as_list( $r->{ data } );
   my $total = 0;
   my $used  = 0;
   for my $p ( @$list ) {
@@ -885,10 +927,20 @@ sub volume_size_info {
 
 sub map_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname ) = @_;
-  my ( $path, $wwid ) = $class->get_device_path_wwid( $scfg, $volname );
+  my $volume = $class->nimble_get_volume_info( $scfg, $volname, undef );
+  die "Error :: Volume \"$volname\" not found (cannot map).\n" unless $volume && $volume->{ serial };
+  my $serial = $volume->{ serial };
   scsi_scan_new( 'iscsi' );
-  my $path_exists = sub { return -e $path };
-  wait_for( $path_exists, "volume \"$volname\" to appear", 30 );
+  wait_for(
+    sub {
+      my ( $p, $w ) = get_device_path_by_serial( $serial );
+      return length($p) && -e $p;
+    },
+    "volume \"$volname\" to appear",
+    30
+  );
+  my ( $path, $wwid ) = get_device_path_by_serial( $serial );
+  die "Error :: Volume \"$volname\" device did not appear after rescan.\n" unless length($path) && -b $path;
   if ( length( $wwid ) && !multipath_check( $wwid ) ) {
     exec_command( [ 'multipathd', 'add', 'map', $wwid ] );
     my $mp_ready = sub { return multipath_check( $wwid ) };
@@ -916,6 +968,7 @@ sub unmap_volume {
 
 sub activate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache ) = @_;
+  $class->nimble_ensure_volume_acl_for_current_node( $scfg, $volname, $storeid );
   $class->map_volume( $storeid, $scfg, $volname, $snapname );
   return 1;
 }

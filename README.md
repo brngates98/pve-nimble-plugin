@@ -15,6 +15,7 @@ This plugin integrates HPE Nimble Storage arrays with Proxmox Virtual Environmen
     - [Option A: APT repository (GitHub Pages)](#option-a-apt-repository-github-pages)
     - [Option B: Download the package](#option-b-download-the-package)
 - [Configuration](#configuration)
+- [VM migration (live migration and move)](#vm-migration-live-migration-and-move)
 - [Multipath (optional)](#multipath-optional)
   - [Example: HPE Nimble only](#example-hpe-nimble-only)
   - [Example: Nimble and Pure](#example-nimble-and-pure)
@@ -210,7 +211,7 @@ nimble: <storage_id>
 | address              | Nimble management URL (e.g. `https://nimble.example.com`). Port 5392 is used by default if omitted.                                                                                                                 |
 | username             | Nimble REST API user                                                                                                                                                                                                |
 | password             | API password                                                                                                                                                                                                        |
-| initiator_group      | **Optional.** Nimble initiator group name. If unset, the plugin creates a group named `pve-<nodename>` with this host’s iSCSI IQN and uses it for access_control_records.                                           |
+| initiator_group      | **Optional.** Nimble initiator group name. If unset, the plugin creates per-node groups `pve-<nodename>` and ensures the current node has access when a volume is activated (so migration works). If set, the plugin uses that group only (it does not create it or add IQNs—create the group in Nimble and add all nodes’ IQNs for cluster-wide access). |
 | auto_iscsi_discovery | **Optional.** Set to `1` or `yes` to run iSCSI discovery and login when the storage is activated. The plugin gets discovery IPs from the Nimble subnets API and runs `iscsiadm` on this host. Default: no (opt-in). |
 | vnprefix             | Optional prefix for volume names on the array                                                                                                                                                                       |
 | pool_name            | Optional Nimble pool for new volumes                                                                                                                                                                                |
@@ -218,6 +219,13 @@ nimble: <storage_id>
 | check_ssl            | Set to `1` or `yes` to verify TLS (default: no)                                                                                                                                                                     |
 | token_ttl            | Session token cache TTL in seconds (default 3600)                                                                                                                                                                   |
 | content              | Use `images` for VM disks                                                                                                                                                                                           |
+
+### VM migration (live migration and move)
+
+- **Default (initiator_group unset):** Each node has its own initiator group (`pve-node1`, `pve-node2`, …) with only that node’s IQN. When a volume is created or cloned, it is granted access to the **creating node’s** group. When a volume is **activated** on a node (e.g. after migrating a VM to that node), the plugin ensures that node’s initiator group has an access record for the volume, adding it if missing. So **migration works by default**: the target node gets access when it activates the volume.
+- **Shared initiator_group (optional):** If you set `initiator_group` to a group name, the plugin **only looks up** that group by name and uses it for new volumes. It does **not** create that group or add any IQNs to it. You must create the group in the Nimble UI (or API) and add the iSCSI IQN of **every** Proxmox node (from each node’s `/etc/iscsi/initiatorname.iscsi`). Then all nodes can access all volumes without per-activate ACL changes. Use this if you prefer a single shared group instead of per-node groups.
+
+**Comparison with Pure Storage plugin:** Pure uses on-demand **host connections**: it connects the volume to the current host when the volume is activated and disconnects when deactivated, so migration works without a shared group. This plugin uses Nimble’s **initiator groups and ACLs**: with the default (per-node groups), it ensures the current node’s group has access on activate (adding an ACL if needed), so migration works similarly.
 
 ### Auto iSCSI discovery (opt-in)
 

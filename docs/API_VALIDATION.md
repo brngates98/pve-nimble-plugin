@@ -22,6 +22,7 @@ Reference: [REST API Object Sets](https://support.hpe.com/docs/display/public/nm
 | DELETE `volumes/:id` | Delete volume | Delete | OK |
 | POST `volumes/:id/actions/restore` | id, base_snap_id in body | Restore: Request id (restored volume), base_snap_id (mandatory) | **Fixed** to use `actions/restore` and body with id + base_snap_id. |
 | **Access control** | | | |
+| GET `access_control_records` | List all; plugin filters by vol_id and initiator_group_id (for ensure-ACL-on-activate / migration) | Read | OK |
 | POST `access_control_records` | vol_id, initiator_group_id | Create: vol_id, initiator_group_id | OK |
 | **Snapshots** | | | |
 | POST `snapshots` | vol_id, name | Create: vol_id, name (mandatory) | OK |
@@ -31,6 +32,8 @@ Reference: [REST API Object Sets](https://support.hpe.com/docs/display/public/nm
 | GET `pools` | capacity, usage_valid, usage | Read: capacity, usage (NsBytes = number), usage_valid | **Adjusted**: status() now handles usage as number or nested { compressed_usage, uncompressed_usage }. |
 | **Clone from snapshot** | POST `volumes` with clone=true, name, base_snap_id (then add ACL) | Create doc: clone + name + base_snap_id for clone. Restore is for existing volume only. | **Fixed**: clone_image now uses nimble_clone_from_snapshot (POST volumes clone=true) instead of restore. |
 | **Snapshot create** | volname then snap_name in call | — | **Fixed**: volume_snapshot now passes (volname, snap) to nimble_snapshot_create. |
+| **Volume collections** | GET `volume_collections?name=...` | Read with query param `name` | OK (optional: add volumes to collection via PUT volumes/:id volcoll_id). |
+| **Subnets (auto iSCSI)** | GET `subnets` | Read; discovery_ip, allow_iscsi, type | OK (used when auto_iscsi_discovery is set). |
 
 ---
 
@@ -73,7 +76,42 @@ The [HPE Perl code sample](https://support.hpe.com/docs/display/public/nmtp352en
 - **Request body:** payload is wrapped in a `data` key, e.g. `{ "data": { "username": "...", "password": "..." } }` for tokens, `{ "data": { "name": "vol1", "size": 1024 } }` for volume create.
 - **Response:** token and other single-object responses put the object under `data`, e.g. `$tokenObj->{"data"}->{"session_token"}`.
 
-The plugin follows this convention: it sends all POST/PUT bodies as `{ data => $body }` and reads the token from `data.session_token` when present (with a fallback to top-level `session_token` for compatibility). List responses are already read via `$r->{ data }` (array or object).
+The plugin follows this convention: it sends all POST/PUT bodies as `{ data => $body }` and reads the token from `data.session_token` when present (with a fallback to top-level `session_token` for compatibility). List responses are normalized via `nimble_data_as_list($r->{ data })` so both array and single-object API responses are handled (HPE may return either for filtered GETs).
+
+---
+
+## Validation and audit (code vs API and Pure plugin)
+
+### HPE Nimble API — endpoint checklist
+
+All plugin API usage has been checked against `docs/NIMBLE_API_REFERENCE.md`:
+
+- **Paths:** tokens, initiator_groups, initiators (not used; initiator_groups accepts iscsi_initiators inline), volumes, volumes/:id, volumes/:id/actions/restore, access_control_records, snapshots, snapshots/:id, pools, volume_collections, subnets.
+- **Methods:** POST (tokens, initiator_groups, volumes, access_control_records, snapshots), GET (all list/read), PUT (volumes/:id for size, name, volcoll_id), DELETE (volumes/:id, snapshots/:id).
+- **Request bodies:** All POST/PUT bodies are sent as `{ data => $body }`; GET/DELETE use no body.
+- **Clone vs restore:** Restore = POST volumes/:id/actions/restore (overwrite existing volume). Clone = POST volumes with clone=true, name, base_snap_id (new volume). Plugin uses both correctly.
+
+### Comparison with Pure Storage plugin (Proxmox-side logic)
+
+Reference: [kolesa-team/pve-purestorage-plugin](https://github.com/kolesa-team/pve-purestorage-plugin).
+
+| Area | Pure | Nimble | Notes |
+|------|------|--------|--------|
+| **activate_volume** | Connect volume to host (API), then map_volume | Ensure ACL for current node (if per-node IG), then map_volume | Same idea: ensure array-side access then map. Nimble uses initiator_group + ACR instead of Pure’s host/connection. |
+| **deactivate_volume** | unmap_volume, then disconnect from host | unmap_volume only | By design: we do not remove ACL on deactivate (documented in README). Pure disconnects so only connected host had access. |
+| **map_volume** | get path/wwid, scsi_scan_new, wait for path to exist, multipath | get serial from API, scsi_scan_new, wait by serial for device, then path/wwid, multipath | Nimble uses serial-based wait so it works after migration when device is not yet present. |
+| **free_image / delete** | Disconnect from all hosts, then destroy volume | deactivate_volume (unmap), then delete volume; no ACL removal | Nimble does not remove ACRs on delete; volume is deleted on array. |
+| **rename_volume** | unmap, rename on array | Same | Aligned. |
+| **Block/multipath** | block_device_slaves, block_device_action, multipathd add/remove | Same pattern | Aligned. |
+
+Conclusion: Proxmox-side flow (activate → ensure access then map; deactivate → unmap; create/delete/rename/snapshot/clone) is aligned with Pure where the model applies. Differences (no disconnect on deactivate, ACL-based access) are intentional and documented.
+
+### Audit notes (plugin and docs)
+
+- **Response handling:** All list/read responses that are iterated now use `nimble_data_as_list()` so that both array and single-object `data` from the API are handled.
+- **volume_size_info:** Uses `nimble_get_volume_info`; returns size/used; `used` from `vol_usage_compressed_bytes` or `size` fallback. Consistent with API.
+- **Error handling:** 401 triggers token cache clear and one retry; API errors die with message; ensure-ACL treats “already exists”/“duplicate” as success.
+- **Migration:** Ensure-ACL on activate (per-node initiator_group only) plus serial-based wait in map_volume ensures the target node can activate after live migration.
 
 ---
 
