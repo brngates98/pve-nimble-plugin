@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
     - id: artifact-download
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: deb-artifact-${{ github.sha }}
 
@@ -64,7 +64,7 @@ jobs:
     runs-on: ubuntu-22.04
     environment: github-pages
     steps:
-    - uses: actions/download-artifact@v4
+    - uses: actions/download-artifact@v8
       with:
         name: deb-artifact-${{ github.sha }}
 
