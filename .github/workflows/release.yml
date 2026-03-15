@@ -42,15 +42,29 @@ jobs:
     - build
     runs-on: ubuntu-22.04
     steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.ref }}
+
     - id: artifact-download
       uses: actions/download-artifact@v4
       with:
         name: deb-artifact-${{ github.sha }}
 
+    - name: Prepare release notes
+      run: |
+        NOTES=".github/release-notes-${{ github.ref_name }}.md"
+        if [ -f "$NOTES" ]; then
+          cp "$NOTES" release-notes.md
+        else
+          echo "Release ${{ github.ref_name }}" > release-notes.md
+        fi
+
     - uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ github.ref_name }}
-        generate_release_notes: true
+        body_path: release-notes.md
+        generate_release_notes: false
         make_latest: true
         prerelease: false
         files: |
