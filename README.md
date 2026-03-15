@@ -1,7 +1,5 @@
 # Proxmox VE Plugin for HPE Nimble Storage (iSCSI)
 
-[![Checks](https://github.com/brngates98/pve-nimble-plugin/actions/workflows/checks.yml/badge.svg)](https://github.com/brngates98/pve-nimble-plugin/actions/workflows/checks.yml)
-
 This plugin integrates HPE Nimble Storage arrays with Proxmox Virtual Environment (VE) over iSCSI. It uses the Nimble REST API to create and manage volumes and presents them as VM disks with optional multipath.
 
 ## Table of Contents
