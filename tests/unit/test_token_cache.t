@@ -2,7 +2,7 @@
 
 use strict;
 use warnings;
-use Test::More tests => 14;
+use Test::More tests => 15;
 use File::Temp qw(tempdir);
 use File::Path qw(make_path remove_tree);
 use JSON;
