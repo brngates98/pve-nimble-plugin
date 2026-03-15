@@ -138,7 +138,49 @@ nimble: <storage_id>
 
 ## Multipath (optional)
 
-If you use multipath, configure it in `/etc/multipath.conf` with `find_multipaths no`. If you have multiple arrays (e.g. Nimble and Pure), add each to `blacklist_exceptions` and add a `devices` block per vendor. Example for both Nimble and Pure:
+If you use multipath, configure it in `/etc/multipath.conf` with `find_multipaths no`. In `blacklist_exceptions`, list every array vendor/product you use so only those (and not local disks) get multipathed; add a `devices` block per vendor.
+
+### Example: HPE Nimble only
+
+```text
+defaults {
+    user_friendly_names yes
+    find_multipaths     no
+}
+blacklist {
+    devnode "^(ram|raw|loop|fd|md|dm-|sr|scd|st)[0-9]*"
+    devnode "^hd[a-z]"
+    device {
+        vendor  ".*"
+        product ".*"
+    }
+}
+blacklist_exceptions {
+    device {
+        vendor  "Nimble"
+        product "Server"
+    }
+}
+devices {
+    device {
+        vendor               "Nimble"
+        product              "Server"
+        path_grouping_policy group_by_prio
+        prio                 "alua"
+        hardware_handler     "1 alua"
+        path_selector        "service-time 0"
+        path_checker         tur
+        no_path_retry        30
+        failback             immediate
+        fast_io_fail_tmo     5
+        dev_loss_tmo         infinity
+        rr_min_io_rq         1
+        rr_weight            uniform
+    }
+}
+```
+
+### Example: Nimble and Pure
 
 ```text
 defaults {
@@ -152,7 +194,6 @@ defaults {
     user_friendly_names yes
     find_multipaths no
 }
-
 blacklist {
     devnode "^(ram|raw|loop|fd|md|dm-|sr|scd|st)[0-9]*"
     devnode "^hd[a-z]"
@@ -161,7 +202,6 @@ blacklist {
         product ".*"
     }
 }
-
 blacklist_exceptions {
     device {
         vendor  "Nimble"
@@ -172,7 +212,6 @@ blacklist_exceptions {
         product ".*"
     }
 }
-
 devices {
   device {
     vendor               "PURE"
@@ -206,7 +245,6 @@ devices {
     rr_weight            uniform
   }
 }
-
 multipaths {
     multipath {
         wwid "YOUR_WWID"
@@ -215,7 +253,7 @@ multipaths {
 }
 ```
 
-In `blacklist_exceptions`, list every array vendor/product you use so only those (and not local disks) get multipathed. The `multipaths` section is optional (e.g. for stable aliases). After editing `/etc/multipath.conf`, run `multipathd reconfigure`. On SLES, set `user_friendly_names no` per SUSE recommendations.
+The `multipaths` section is optional (e.g. for stable aliases). After editing `/etc/multipath.conf`, run `multipathd reconfigure`. On SLES, set `user_friendly_names no` per SUSE recommendations.
 
 Device paths are resolved via `/sys/block/*/device/serial` and `/dev/disk/by-id/`. For the official Nimble reference, see [HPE multipath.conf settings](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00004361en_us&page=GUID-512951AE-9900-493C-9E3C-F3AA694E9771.html&docLocale=en_US).
 
