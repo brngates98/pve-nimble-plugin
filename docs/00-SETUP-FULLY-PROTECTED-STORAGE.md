@@ -76,6 +76,7 @@ You need:
 - Nimble: discovery IP 10.0.1.5 (VLAN 100), discovery IP 10.0.2.5 (VLAN 200).
 - Each Proxmox node: e.g. eth1 → 10.0.1.10 (VLAN 100), eth2 → 10.0.2.10 (VLAN 200).
 - Result: two paths per LUN (multipath).
+
 </details>
 
 ---
@@ -305,6 +306,7 @@ Use this when the snapshot was taken from the PVE UI (VM → Snapshot) and you w
 3. All disks that were part of that snapshot are restored on the array (in-place); the VM state matches the snapshot.
 
 **Single-disk rollback:** PVE’s UI rollback applies to the entire VM. To restore only one disk to a PVE snapshot you can:
+
 - Use **Clone** from that snapshot to create a new VM, then attach/copy only the disk you need, or
 - Stop the VM and use the Nimble UI/API to restore that volume from the corresponding Nimble snapshot (see B.2 below; the snapshot name on the array will look like `<volname>.snap-<snapname>`).
 

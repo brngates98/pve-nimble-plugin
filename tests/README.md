@@ -11,15 +11,16 @@ This directory contains tests for the PVE Nimble Storage Plugin.
 
 ## Running Tests
 
+Run from the **repository root** (parent of `tests/`). The plugin path must be in `@INC` (e.g. `perl -I.` or use the script below).
+
 ```bash
-# Run all unit tests
-prove -v tests/unit/
+# Run all unit tests (recommended)
+./tests/run_tests.sh
 
-# Run specific test
-perl tests/unit/test_token_cache.t
-
-# Run with verbose output
+# Or run tests manually from repo root
 perl -I. tests/unit/test_command_validation.t
+perl -I. tests/unit/test_retry_logic.t
+perl -I. tests/unit/test_token_cache.t
 ```
 
 ## Test Coverage

@@ -43,9 +43,11 @@ pve-nimble-plugin/
 ├── LICENSE
 ├── docs/
 │   ├── README.md              # Short pointer to main README
+│   ├── 00-SETUP-FULLY-PROTECTED-STORAGE.md  # Step-by-step setup guide (zero to protected storage)
 │   ├── AI_PROJECT_CONTEXT.md  # This file (AI/context)
 │   ├── API_VALIDATION.md      # Nimble REST API call validation vs HPE docs
-│   └── NIMBLE_API_REFERENCE.md # In-repo extract of HPE REST API 5.1.1.0 (read for endpoint/request/response details)
+│   ├── NIMBLE_API_REFERENCE.md # In-repo extract of HPE REST API 5.1.1.0 (read for endpoint/request/response details)
+│   └── STORAGE_FEATURES_COMPARISON.md # Feature and content-type comparison vs NFS, LVM, iSCSI, Ceph RBD
 ├── .github/workflows/         # release, _deb
 ├── debian/                    # Package: libpve-storage-nimble-perl
 ├── scripts/

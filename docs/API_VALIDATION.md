@@ -38,7 +38,7 @@ Reference: [REST API Object Sets](https://support.hpe.com/docs/display/public/nm
 
 ### Authentication (tokens)
 
-- **Plugin:** POST to `https://<address>:5392/v1/tokens` with JSON `{ username, password }`; expects `session_token` in response; uses `X-Auth-Token` for subsequent requests.
+- **Plugin:** POST to `https://<address>:5392/v1/tokens` with JSON `{ "data": { "username", "password" } }`; expects `session_token` in response (under `data`); uses `X-Auth-Token` for subsequent requests.
 - **HPE doc:** POST v1/tokens; Request: username (mandatory), password; Response: session_token, id, creation_time, etc.
 - **Verdict:** Matches.
 

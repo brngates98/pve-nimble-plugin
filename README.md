@@ -25,6 +25,7 @@ This plugin integrates HPE Nimble Storage arrays with Proxmox Virtual Environmen
   - [Diagnostic commands](#diagnostic-commands)
   - [Known issues](#known-issues)
 - [Development](#development)
+- [Storage features comparison](#storage-features-comparison)
 - [Comparison with Pure Storage plugin](#comparison-with-pure-storage-plugin)
 - [Project context (contributors / AI)](#project-context-contributors--ai)
 - [License](#license)
@@ -32,11 +33,14 @@ This plugin integrates HPE Nimble Storage arrays with Proxmox Virtual Environmen
 ## Quick start
 
 1. **Install** the plugin (APT or [package](https://github.com/brngates98/pve-nimble-plugin/releases)) and ensure **open-iscsi** is installed with an IQN set in `/etc/iscsi/initiatorname.iscsi`.
+
 2. **Add storage** (no need to create an initiator group on the array—the plugin will create one for this host):
-  ```bash
+
+   ```bash
    pvesm add nimble <storage_id> --address https://<nimble>:5392 \
      --username <user> --password '<password>' --content images
-  ```
+   ```
+
 3. In the Proxmox UI: **Datacenter → Storage** — your Nimble storage should appear. Create a VM and add a disk from this storage to use it.
 
 ## Features
@@ -78,12 +82,13 @@ To verify the array is reachable and credentials work before adding storage in P
 
 ```bash
 # Get a session token (use -k if TLS is not verified)
+# Nimble API requires the request body to be wrapped in "data"
 curl -sk -X POST "https://<nimble>:5392/v1/tokens" \
   -H "Content-Type: application/json" \
-  -d '{"username":"<user>","password":"<password>"}'
+  -d '{"data":{"username":"<user>","password":"<password>"}}'
 ```
 
-Use the `session_token` from the response with `X-Auth-Token` for other calls (e.g. `GET /v1/volumes`).
+Use the `session_token` from the response (under `data.session_token`) with `X-Auth-Token` for other calls (e.g. `GET /v1/volumes`).
 
 ## Installation
 
@@ -199,7 +204,6 @@ nimble: <storage_id>
   # auto_iscsi_discovery 1   # optional; run iSCSI discovery/login on activate (default: no)
 ```
 
-
 | Parameter            | Description                                                                                                                                                                                                         |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | storage_id           | Name shown in Proxmox Storage list                                                                                                                                                                                  |
@@ -215,17 +219,20 @@ nimble: <storage_id>
 | token_ttl            | Session token cache TTL in seconds (default 3600)                                                                                                                                                                   |
 | content              | Use `images` for VM disks                                                                                                                                                                                           |
 
-
 ### Auto iSCSI discovery (opt-in)
 
-If you set `**auto_iscsi_discovery 1`** (or `yes`) on the storage:
+If you set **auto_iscsi_discovery 1** (or **yes**) on the storage:
 
 1. **When** the storage is activated on a node (e.g. after adding the storage or when the node first uses it), the plugin will:
-  - **Ensure the initiator group exists** on the Nimble array (same logic as when creating volumes): if `initiator_group` is set in storage config, that group must exist; otherwise the plugin creates or finds a group named `pve-<nodename>` using this host's IQN from `/etc/iscsi/initiatorname.iscsi`. If this step fails (e.g. no IQN), auto discovery is skipped and a warning is logged.
-  - Call the Nimble REST API **GET v1/subnets** to obtain iSCSI discovery IPs (subnets with `allow_iscsi` or type containing `data`).
-  - Run on this host: `iscsiadm -m discovery -t sendtargets -p <ip>` for each discovery IP, then set `node.startup` to `automatic`, then run `iscsiadm -m node --login`.
+
+    - **Ensure the initiator group exists** on the Nimble array (same logic as when creating volumes): if `initiator_group` is set in storage config, that group must exist; otherwise the plugin creates or finds a group named `pve-<nodename>` using this host's IQN from `/etc/iscsi/initiatorname.iscsi`. If this step fails (e.g. no IQN), auto discovery is skipped and a warning is logged.
+    - Call the Nimble REST API **GET v1/subnets** to obtain iSCSI discovery IPs (subnets with `allow_iscsi` or type containing `data`).
+    - Run on this host: `iscsiadm -m discovery -t sendtargets -p <ip>` for each discovery IP, then set `node.startup` to `automatic`, then run `iscsiadm -m node --login`.
+
 2. **Requirements:** `open-iscsi` must be installed and an IQN must be set in `/etc/iscsi/initiatorname.iscsi`. The plugin does not install or configure the initiator; it ensures the initiator group on the array, then runs discovery and login.
+
 3. **Safety:** The option is off by default. The initiator group is ensured first (so the array knows this host's IQN); if that fails, discovery is skipped. Discovery and login are additive (they do not remove or overwrite existing iSCSI nodes). If the subnets API fails or returns no IPs, or if `iscsiadm` is missing, the plugin logs a warning and does not fail storage activation.
+
 4. **Cluster:** On a cluster, activation runs per node; each node runs discovery/login for itself using the same Nimble subnets.
 
 ### Protection plans (Nimble-side)
@@ -367,7 +374,6 @@ If you encounter issues while using the plugin, consider the following steps.
 
 ### Common error messages
 
-
 | Problem                                    | What to do                                                                                                                                                                                                                    |
 | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **"could not read local iSCSI IQN"**       | Install `open-iscsi`, set `InitiatorName=iqn.…` in `/etc/iscsi/initiatorname.iscsi`, then restart iscsid (or reboot).                                                                                                         |
@@ -375,7 +381,6 @@ If you encounter issues while using the plugin, consider the following steps.
 | **API connection / timeout / TLS errors**  | Check `address` (use `https://` and correct host or IP), firewall (port 5392), and `check_ssl` (set to 0 or omit if using self-signed certs). Test with the [API connectivity](#api-connectivity) curl example.               |
 | **Storage shows but VM disk create fails** | Enable debug (see below) and check token cache: `ls -la /etc/pve/priv/nimble/`.                                                                                                                                               |
 | **Multipath not used**                     | Ensure multipathd is running, `/etc/multipath.conf` has Nimble in `blacklist_exceptions` (and a `devices` block if needed), then `multipathd reconfigure`.                                                                    |
-
 
 ### Debug logging
 
@@ -489,12 +494,12 @@ pvesm scan <storage_id>
 
 **Network connectivity:**
 
-Test Nimble API (management, port 5392):
+Test Nimble API (management, port 5392). Request body must be wrapped in `data`:
 
 ```bash
 curl -sk -X POST "https://<nimble>:5392/v1/tokens" \
   -H "Content-Type: application/json" \
-  -d '{"username":"<user>","password":"<password>"}'
+  -d '{"data":{"username":"<user>","password":"<password>"}}'
 ```
 
 Test iSCSI portal (port 3260):
@@ -518,6 +523,10 @@ nc -zv <nimble_iscsi_ip> 3260
 ## Development
 
 The plugin depends on Proxmox VE Perl modules (`PVE::Storage::Plugin`, `PVE::Tools`, etc.). Syntax and load testing should be done on a Proxmox node or in a PVE environment where those modules are installed.
+
+## Storage features comparison
+
+A feature-by-feature comparison of this plugin with NFS, LVM, LVM-thin, iSCSI, and Ceph RBD is in **[docs/STORAGE_FEATURES_COMPARISON.md](docs/STORAGE_FEATURES_COMPARISON.md)**. It covers content types (images, ISO, backup, etc.), thin provisioning, snapshots, clone, live migration, and multipath.
 
 ## Comparison with Pure Storage plugin
 
