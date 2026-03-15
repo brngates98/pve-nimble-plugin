@@ -3,6 +3,8 @@ run-name: Release-${{ github.ref_name }}-${{ github.run_number }}
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: ${{ github.workflow }}
@@ -54,3 +56,47 @@ jobs:
         files: |
           *.deb
           sha256sums
+
+  apt-repo:
+    name: APT repo (GitHub Pages)
+    needs:
+    - build
+    runs-on: ubuntu-22.04
+    environment: github-pages
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: deb-artifact-${{ github.sha }}
+
+    - name: Set up APT repo layout
+      run: |
+        mkdir -p apt/pool/main apt/dists/bookworm/main/binary-all
+        cp *.deb apt/pool/main/
+
+    - name: Generate Packages
+      run: |
+        cd apt && apt-ftparchive packages pool/main > dists/bookworm/main/binary-all/Packages
+        gzip -c dists/bookworm/main/binary-all/Packages > dists/bookworm/main/binary-all/Packages.gz
+
+    - name: Generate Release
+      run: |
+        cat > release.conf << 'EOF'
+        APT::FTPArchive::Release::Codename "bookworm";
+        APT::FTPArchive::Release::Architectures "all";
+        APT::FTPArchive::Release::Components "main";
+        APT::FTPArchive::Release::Description "PVE Nimble Storage Plugin";
+        EOF
+        cd apt && apt-ftparchive -c ../release.conf release dists/bookworm > dists/bookworm/Release
+
+    - uses: actions/upload-pages-artifact@v3
+      with:
+        path: apt
+
+  deploy-pages:
+    name: Deploy APT repo to Pages
+    needs:
+    - apt-repo
+    runs-on: ubuntu-latest
+    environment: github-pages
+    steps:
+    - uses: actions/deploy-pages@v4

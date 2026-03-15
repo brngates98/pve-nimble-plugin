@@ -63,7 +63,22 @@ sudo systemctl restart pvedaemon.service pveproxy.service
 
 The package installs dependencies and is easy to upgrade.
 
-#### Step 1: Download the package
+#### Option A: APT repository (GitHub Pages)
+
+After each release, an APT repo is published at GitHub Pages. Add it once, then use `apt install` / `apt upgrade`:
+
+```bash
+# Add the repo (Debian Bookworm; use your Proxmox base: bookworm, bullseye, etc.)
+echo "deb [trusted=yes] https://brngates98.github.io/pve-nimble-plugin bookworm main" | sudo tee /etc/apt/sources.list.d/pve-nimble-plugin.list
+sudo apt update
+sudo apt install libpve-storage-nimble-perl
+```
+
+To upgrade when a new version is released: `sudo apt update && sudo apt upgrade libpve-storage-nimble-perl`.
+
+The repo is updated on each release; it contains the latest package only. Enable **GitHub Pages** in the repo (Settings → Pages → Source: **GitHub Actions**) so the release workflow can publish the APT repo.
+
+#### Option B: Download the package
 
 Replace `<PACKAGE_VERSION>` with the version you want (e.g. `0.0.1`). See the [releases page](https://github.com/brngates98/pve-nimble-plugin/releases) for versions.
 
@@ -72,13 +87,13 @@ PACKAGE_VERSION="<PACKAGE_VERSION>"
 wget "https://github.com/brngates98/pve-nimble-plugin/releases/download/v${PACKAGE_VERSION}/libpve-storage-nimble-perl_${PACKAGE_VERSION}-1_all.deb"
 ```
 
-#### Step 2: Install the package
+#### Install the package
 
 ```bash
 sudo apt install ./libpve-storage-nimble-perl_${PACKAGE_VERSION}-1_all.deb
 ```
 
-#### Step 3: Verify installation
+#### Verify installation
 
 ```bash
 dpkg -l | grep libpve-storage-nimble-perl
