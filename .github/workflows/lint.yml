@@ -66,7 +66,7 @@ jobs:
         for file in $changed_files; do
           if [[ -n "$file" ]] && ([[ "$file" == *.pm ]] || [[ "$file" == *.pl ]]); then
             # Skip test scripts (perltidy can vary by version; we only enforce on main plugin)
-            [[ "$file" == tests/* ]] && continue
+            [[ "$file" == *"/tests/"* ]] || [[ "$file" == "./tests/"* ]] && continue
             echo "Checking formatting: $file"
             if command -v perltidy >/dev/null 2>&1; then
               formatted_file="${file}.formatted"
