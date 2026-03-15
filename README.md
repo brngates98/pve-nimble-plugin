@@ -138,13 +138,21 @@ nimble: <storage_id>
 
 ## Multipath (optional)
 
-If you use multipath, configure it for Nimble in `/etc/multipath.conf`. Use `find_multipaths no` so devices are recognized correctly. Example (vendor/product as reported by HPE for Nimble):
+If you use multipath, configure it in `/etc/multipath.conf` with `find_multipaths no`. If you have multiple arrays (e.g. Nimble and Pure), add each to `blacklist_exceptions` and add a `devices` block per vendor. Example for both Nimble and Pure:
 
 ```text
 defaults {
+    polling_interval 2
+    path_selector "round-robin 0"
+    path_grouping_policy multibus
+    uid_attribute ID_SERIAL
+    rr_min_io 100
+    failback immediate
+    no_path_retry queue
     user_friendly_names yes
-    find_multipaths     no
+    find_multipaths no
 }
+
 blacklist {
     devnode "^(ram|raw|loop|fd|md|dm-|sr|scd|st)[0-9]*"
     devnode "^hd[a-z]"
@@ -153,34 +161,63 @@ blacklist {
         product ".*"
     }
 }
+
 blacklist_exceptions {
     device {
         vendor  "Nimble"
         product "Server"
     }
-}
-devices {
     device {
-        vendor               "Nimble"
-        product              "Server"
-        path_grouping_policy group_by_prio
-        prio                 "alua"
-        hardware_handler     "1 alua"
-        path_selector        "service-time 0"
-        path_checker         tur
-        no_path_retry        30
-        failback             immediate
-        fast_io_fail_tmo     5
-        dev_loss_tmo         infinity
-        rr_min_io_rq         1
-        rr_weight            uniform
+        vendor "PURE"
+        product ".*"
+    }
+}
+
+devices {
+  device {
+    vendor               "PURE"
+    product              "FlashArray"
+    path_selector        "queue-length 0"
+    hardware_handler     "1 alua"
+    path_grouping_policy group_by_prio
+    prio                 alua
+    failback             immediate
+    path_checker         tur
+    fast_io_fail_tmo     10
+    user_friendly_names  no
+    no_path_retry        0
+    features             "0"
+    dev_loss_tmo         60
+    recheck_wwid         yes
+  }
+  device {
+    vendor               "Nimble"
+    product              "Server"
+    path_grouping_policy group_by_prio
+    prio                 "alua"
+    hardware_handler     "1 alua"
+    path_selector        "service-time 0"
+    path_checker         tur
+    no_path_retry        30
+    failback             immediate
+    fast_io_fail_tmo     5
+    dev_loss_tmo         infinity
+    rr_min_io_rq         1
+    rr_weight            uniform
+  }
+}
+
+multipaths {
+    multipath {
+        wwid "YOUR_WWID"
+        alias mpathX
     }
 }
 ```
 
-If other storage is connected, remove the broad blacklist and blacklist only local disks (e.g. by `wwid`) as needed. After editing `/etc/multipath.conf`, run `multipathd reconfigure`. On SLES, set `user_friendly_names no` per SUSE recommendations.
+In `blacklist_exceptions`, list every array vendor/product you use so only those (and not local disks) get multipathed. The `multipaths` section is optional (e.g. for stable aliases). After editing `/etc/multipath.conf`, run `multipathd reconfigure`. On SLES, set `user_friendly_names no` per SUSE recommendations.
 
-Device paths are resolved via `/sys/block/*/device/serial` and `/dev/disk/by-id/`. For the official reference, see [HPE multipath.conf settings](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00004361en_us&page=GUID-512951AE-9900-493C-9E3C-F3AA694E9771.html&docLocale=en_US).
+Device paths are resolved via `/sys/block/*/device/serial` and `/dev/disk/by-id/`. For the official Nimble reference, see [HPE multipath.conf settings](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00004361en_us&page=GUID-512951AE-9900-493C-9E3C-F3AA694E9771.html&docLocale=en_US).
 
 ## Debug
 
