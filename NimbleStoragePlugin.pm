@@ -8,19 +8,19 @@ use Data::Dumper qw( Dumper );
 use IO::File   ();
 use File::Path ();
 
-use PVE::JSONSchema      ();
-use PVE::Tools           qw( file_read_firstline run_command );
+use PVE::JSONSchema ();
+use PVE::Tools qw( file_read_firstline run_command );
 use PVE::INotify         ();
 use PVE::Storage::Plugin ();
 
-use JSON::XS       qw( decode_json encode_json );
+use JSON::XS qw( decode_json encode_json );
 use LWP::UserAgent ();
 use HTTP::Headers  ();
 use HTTP::Request  ();
-use URI::Escape    qw( uri_escape );
+use URI::Escape qw( uri_escape );
 use File::Basename qw( basename );
-use Time::HiRes    qw( gettimeofday sleep );
-use Cwd            qw( abs_path );
+use Time::HiRes qw( gettimeofday sleep );
+use Cwd qw( abs_path );
 
 use base qw(PVE::Storage::Plugin);
 
@@ -31,10 +31,10 @@ $Data::Dumper::Useqq  = 1;
 
 use constant {
   ERROR_TOKEN_UPDATED => -1,
-  ERROR_SUCCESS       =>  0,
-  ERROR_API_ERROR     =>  1,
-  ERROR_NETWORK_ERROR =>  2,
-  ERROR_AUTH_FAILED   =>  3,
+  ERROR_SUCCESS       => 0,
+  ERROR_API_ERROR     => 1,
+  ERROR_NETWORK_ERROR => 2,
+  ERROR_AUTH_FAILED   => 3,
 };
 
 use constant {
@@ -63,8 +63,8 @@ sub set_debug_from_config {
 ### Configuration
 sub api {
   my $tested_apiver = 12;
-  my $apiver = PVE::Storage::APIVER;
-  my $apiage = PVE::Storage::APIAGE;
+  my $apiver        = PVE::Storage::APIVER;
+  my $apiage        = PVE::Storage::APIAGE;
   if ( $apiver >= 2 and $apiver <= $tested_apiver ) {
     return $apiver;
   }
@@ -133,20 +133,20 @@ sub properties {
 
 sub options {
   return {
-    address  => { fixed => 1 },
-    username => { fixed => 1 },
-    password => { fixed => 1 },
+    address         => { fixed    => 1 },
+    username        => { fixed    => 1 },
+    password        => { fixed    => 1 },
     initiator_group => { optional => 1 },
 
-    vnprefix       => { optional => 1 },
-    pool_name      => { optional => 1 },
-    check_ssl      => { optional => 1 },
-    token_ttl      => { optional => 1 },
-    debug          => { optional => 1 },
-    nodes          => { optional => 1 },
-    disable        => { optional => 1 },
-    content        => { optional => 1 },
-    format         => { optional => 1 },
+    vnprefix  => { optional => 1 },
+    pool_name => { optional => 1 },
+    check_ssl => { optional => 1 },
+    token_ttl => { optional => 1 },
+    debug     => { optional => 1 },
+    nodes     => { optional => 1 },
+    disable   => { optional => 1 },
+    content   => { optional => 1 },
+    format    => { optional => 1 },
   };
 }
 
@@ -184,7 +184,7 @@ sub exec_command {
     warn "Warning :: $@" if $@ && $dm >= 0;
   }
   print "Debug :: execute '" . join( ' ', @$command ) . "'\n" if $DEBUG >= 2;
-  $param{ 'quiet' } = 1 unless exists $param{ 'quiet' } if $DEBUG < 3;
+  $param{ 'quiet' } = 1 unless exists $param{ 'quiet' }       if $DEBUG < 3;
   eval { run_command( $command, %param ) };
   if ( $@ ) {
     my $err = " :: Cannot execute '" . join( ' ', @$command ) . "'\n  ==> $@\n";
@@ -223,7 +223,7 @@ sub get_device_path_by_serial {
   return ( '', '' ) unless -d $path;
   opendir( my $dh, $path ) or return ( '', '' );
   my $best_path = '';
-  my $wwid     = '';
+  my $wwid      = '';
   while ( my $e = readdir( $dh ) ) {
     next if $e =~ /^\.\.?$/;
     my $full = "$path/$e";
@@ -232,15 +232,16 @@ sub get_device_path_by_serial {
     next unless defined $target;
     my $abs = Cwd::abs_path( "$path/$target" );
     next unless $abs && -b $abs;
-    my $blk = basename( $abs );
+    my $blk      = basename( $abs );
     my $ser_path = "/sys/block/$blk/device/serial";
+
     if ( -f $ser_path ) {
       my $dev_serial = file_read_firstline( $ser_path );
       if ( defined $dev_serial && $dev_serial =~ /^\s*(.+?)\s*$/ ) {
         $dev_serial = $1;
         if ( $dev_serial eq $serial || $dev_serial =~ /\Q$serial\E/ ) {
           $best_path = $abs;
-          $wwid = $e if $e =~ /^wwn-/;  # prefer WWN for multipath
+          $wwid      = $e if $e =~ /^wwn-/;    # prefer WWN for multipath
           last;
         }
       }
@@ -287,7 +288,7 @@ sub scsi_scan_new {
 sub multipath_check {
   my ( $wwid ) = @_;
   return 0 unless length( $wwid );
-  my $mp = get_command_path( 'multipath' );
+  my $mp  = get_command_path( 'multipath' );
   my $out = `$mp -l $wwid 2>/dev/null`;
   return $out ne '';
 }
@@ -333,8 +334,8 @@ sub write_token_cache {
   my ( $cache_path, $token_data ) = @_;
   return unless defined $cache_path;
   my $json = encode_json( $token_data );
-  my $tmp = "$cache_path.tmp.$$";
-  my $fh = IO::File->new( $tmp, 'w', 0600 ) or die "Cannot write $tmp: $!\n";
+  my $tmp  = "$cache_path.tmp.$$";
+  my $fh   = IO::File->new( $tmp, 'w', 0600 ) or die "Cannot write $tmp: $!\n";
   print $fh $json . "\n";
   $fh->close();
   rename( $tmp, $cache_path ) or die "Cannot rename $tmp -> $cache_path: $!\n";
@@ -344,8 +345,8 @@ sub is_token_valid {
   my ( $token_data, $ttl ) = @_;
   return 0 unless defined $token_data && defined $token_data->{ session_token };
   return 0 unless defined $token_data->{ created_at };
-  my $now = time();
-  my $age = $now - $token_data->{ created_at };
+  my $now     = time();
+  my $age     = $now - $token_data->{ created_at };
   my $refresh = $ttl * ( 0.8 + 0.05 * ( rand() - 0.5 ) );
   return $age < $refresh ? 1 : 0;
 }
@@ -362,10 +363,10 @@ sub nimble_base_url {
 
 sub nimble_api_call {
   my ( $scfg, $method, $path, $body, $storeid ) = @_;
-  my $base = nimble_base_url( $scfg );
-  my $url = $base . '/' . $NIMBLE_API_VERSION . '/' . $path;
+  my $base       = nimble_base_url( $scfg );
+  my $url        = $base . '/' . $NIMBLE_API_VERSION . '/' . $path;
   my $cache_path = defined $storeid ? get_token_cache_path( $storeid ) : undef;
-  my $ttl = $scfg->{ token_ttl } // 3600;
+  my $ttl        = $scfg->{ token_ttl } // 3600;
 
   my $auth = $scfg->{ _auth_token };
   if ( !$auth && $cache_path ) {
@@ -377,7 +378,7 @@ sub nimble_api_call {
   }
   if ( !$auth ) {
     my $login_url = $base . '/' . $NIMBLE_API_VERSION . '/tokens';
-    my $ua = LWP::UserAgent->new( timeout => 15 );
+    my $ua        = LWP::UserAgent->new( timeout => 15 );
     $ua->ssl_opts( verify_hostname => 0, SSL_verify_mode => 0x00 ) unless $scfg->{ check_ssl };
     my $req = HTTP::Request->new( 'POST', $login_url );
     $req->header( 'Content-Type' => 'application/json' );
@@ -397,8 +398,9 @@ sub nimble_api_call {
   $req->header( 'Content-Type' => 'application/json' );
   $req->header( 'X-Auth-Token' => $auth );
   $req->content( encode_json( $body ) ) if defined $body && ref $body eq 'HASH' && %$body;
-  my $res = $ua->request( $req );
+  my $res     = $ua->request( $req );
   my $content = $res->decoded_content;
+
   if ( !$res->is_success ) {
     if ( $res->code == 401 && $cache_path ) {
       unlink $cache_path;
@@ -423,8 +425,8 @@ sub nimble_get_local_iscsi_iqn {
 
 sub nimble_get_initiator_group_id {
   my ( $scfg, $name, $storeid ) = @_;
-  my $enc = uri_escape( $name );
-  my $r = nimble_api_call( $scfg, 'GET', "initiator_groups?name=$enc", undef, $storeid );
+  my $enc  = uri_escape( $name );
+  my $r    = nimble_api_call( $scfg, 'GET', "initiator_groups?name=$enc", undef, $storeid );
   my $list = $r->{ data } || [];
   for my $g ( @$list ) {
     return $g->{ id } if $g->{ name } eq $name;
@@ -444,9 +446,10 @@ sub nimble_ensure_initiator_group_id {
     unless $iqn;
   my $nodename = PVE::INotify::nodename();
   $ig_name = "pve-$nodename";
-  my $enc = uri_escape( $ig_name );
-  my $r = nimble_api_call( $scfg, 'GET', "initiator_groups?name=$enc", undef, $storeid );
+  my $enc  = uri_escape( $ig_name );
+  my $r    = nimble_api_call( $scfg, 'GET', "initiator_groups?name=$enc", undef, $storeid );
   my $list = $r->{ data } || [];
+
   for my $g ( @$list ) {
     return $g->{ id } if $g->{ name } eq $ig_name;
   }
@@ -456,7 +459,7 @@ sub nimble_ensure_initiator_group_id {
     iscsi_initiators => [ { label => $nodename, iqn => $iqn } ],
   };
   $r = nimble_api_call( $scfg, 'POST', 'initiator_groups', $body, $storeid );
-  my $g = $r->{ data } || $r;
+  my $g  = $r->{ data } || $r;
   my $id = $g->{ id } or die "Error :: Failed to create initiator group \"$ig_name\".\n";
   print "Info :: Created initiator group \"$ig_name\" with this host's IQN.\n";
   return $id;
@@ -465,8 +468,8 @@ sub nimble_ensure_initiator_group_id {
 sub nimble_get_volume_id {
   my ( $scfg, $volname, $storeid ) = @_;
   my $name = nimble_volname( $scfg, $volname, undef );
-  my $enc = uri_escape( $name );
-  my $r = nimble_api_call( $scfg, 'GET', "volumes?name=$enc", undef, $storeid );
+  my $enc  = uri_escape( $name );
+  my $r    = nimble_api_call( $scfg, 'GET', "volumes?name=$enc", undef, $storeid );
   my $list = $r->{ data } || [];
   for my $v ( @$list ) {
     return ( $v->{ id }, $v ) if $v->{ name } eq $name;
@@ -479,8 +482,8 @@ sub nimble_list_volumes {
   $vmid = '*' unless defined $vmid;
   my $filter = "vm-$vmid-disk-*,vm-$vmid-cloudinit,vm-$vmid-state-*";
   my $prefix = nimble_name_prefix( $scfg );
-  my $r = nimble_api_call( $scfg, 'GET', 'volumes', undef, $storeid );
-  my $list = $r->{ data } || [];
+  my $r      = nimble_api_call( $scfg, 'GET', 'volumes', undef, $storeid );
+  my $list   = $r->{ data } || [];
   my @volumes;
   for my $v ( @$list ) {
     my $name = $v->{ name };
@@ -488,16 +491,17 @@ sub nimble_list_volumes {
     my $volname = length( $prefix ) ? substr( $name, length( $prefix ) ) : $name;
     next unless $volname =~ m/^vm-\d+-(disk-|cloudinit|state-)/;
     my ( undef, undef, $volvm ) = $class->parse_volname( $volname );
-    push @volumes, {
-      name   => $volname,
-      vmid   => $volvm,
-      serial => $v->{ serial_number },
-      size   => ( $v->{ size } || 0 ) * 1024 * 1024,
-      used   => ( $v->{ vol_usage_compressed_bytes } || $v->{ size } || 0 ) * 1024 * 1024,
-      ctime  => $v->{ creation_time } || 0,
-      volid  => $storeid ? "$storeid:$volname" : $volname,
-      format => 'raw'
-    };
+    push @volumes,
+      {
+        name   => $volname,
+        vmid   => $volvm,
+        serial => $v->{ serial_number },
+        size   => ( $v->{ size } || 0 ) * 1024 * 1024,
+        used   => ( $v->{ vol_usage_compressed_bytes } || $v->{ size } || 0 ) * 1024 * 1024,
+        ctime  => $v->{ creation_time } || 0,
+        volid  => $storeid ? "$storeid:$volname" : $volname,
+        format => 'raw'
+      };
   }
   return \@volumes;
 }
@@ -507,7 +511,7 @@ sub nimble_get_volume_info {
   my ( $id, $vol ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   return undef unless $vol;
   my $volname = $vol->{ name };
-  my $prefix = nimble_name_prefix( $scfg );
+  my $prefix  = nimble_name_prefix( $scfg );
   $volname = substr( $volname, length( $prefix ) ) if length( $prefix );
   return {
     name   => $volname,
@@ -522,13 +526,13 @@ sub nimble_get_volume_info {
 
 sub nimble_create_volume {
   my ( $class, $scfg, $volname, $size_bytes, $storeid ) = @_;
-  my $name = nimble_volname( $scfg, $volname, undef );
+  my $name    = nimble_volname( $scfg, $volname, undef );
   my $size_mb = int( $size_bytes / ( 1024 * 1024 ) );
   $size_mb = 1 if $size_mb < 1;
   my $body = { name => $name, size => $size_mb };
   $body->{ pool_name } = $scfg->{ pool_name } if $scfg->{ pool_name };
-  my $r = nimble_api_call( $scfg, 'POST', 'volumes', $body, $storeid );
-  my $vol = $r->{ data } || $r;
+  my $r      = nimble_api_call( $scfg, 'POST', 'volumes', $body, $storeid );
+  my $vol    = $r->{ data } || $r;
   my $serial = $vol->{ serial_number } or die "Error :: No serial_number in create response\n";
   print "Info :: Volume \"$volname\" created (serial=$serial).\n";
   my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
@@ -581,9 +585,9 @@ sub nimble_snapshot_create {
 sub nimble_snapshot_delete {
   my ( $class, $scfg, $storeid, $volname, $snap_name ) = @_;
   my $snap_full = nimble_volname( $scfg, $volname, $snap_name );
-  my $enc = uri_escape( $snap_full );
-  my $r = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
-  my $list = $r->{ data } || [];
+  my $enc       = uri_escape( $snap_full );
+  my $r         = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
+  my $list      = $r->{ data } || [];
   for my $s ( @$list ) {
     if ( $s->{ name } eq $snap_full ) {
       nimble_api_call( $scfg, 'DELETE', "snapshots/" . $s->{ id }, undef, $storeid );
@@ -600,10 +604,11 @@ sub nimble_volume_restore {
   my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   die "Error :: Volume \"$volname\" not found\n" unless $vol_id;
   my $snap_full = nimble_volname( $scfg, $svolname, $snap );
-  my $enc = uri_escape( $snap_full );
-  my $r = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
-  my $list = $r->{ data } || [];
+  my $enc       = uri_escape( $snap_full );
+  my $r         = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
+  my $list      = $r->{ data } || [];
   my $snap_id;
+
   for my $s ( @$list ) {
     if ( $s->{ name } eq $snap_full ) { $snap_id = $s->{ id }; last; }
   }
@@ -708,8 +713,8 @@ sub list_images {
 
 sub status {
   my ( $class, $storeid, $scfg, $cache ) = @_;
-  my $r = nimble_api_call( $scfg, 'GET', 'pools', undef, $storeid );
-  my $list = $r->{ data } || [];
+  my $r     = nimble_api_call( $scfg, 'GET', 'pools', undef, $storeid );
+  my $list  = $r->{ data } || [];
   my $total = 0;
   my $used  = 0;
   for my $p ( @$list ) {
@@ -765,6 +770,7 @@ sub unmap_volume {
   exec_command( [ 'blockdev', '--flushbufs', $device_path ] );
   eval { exec_command( [ 'udevadm', 'settle', '--timeout=10' ] ) };
   exec_command( ['sync'] );
+
   if ( length( $wwid ) && multipath_check( $wwid ) ) {
     exec_command( [ 'multipathd', 'remove', 'map', $wwid ] );
   }
