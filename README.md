@@ -290,18 +290,155 @@ Device paths are resolved via `/sys/block/*/device/serial` and `/dev/disk/by-id/
 
 ## Troubleshooting
 
+If you encounter issues while using the plugin, consider the following steps.
+
+### Common error messages
+
 | Problem | What to do |
 |--------|------------|
 | **"could not read local iSCSI IQN"** | Install `open-iscsi`, set `InitiatorName=iqn.…` in `/etc/iscsi/initiatorname.iscsi`, then restart iscsid (or reboot). |
 | **"Initiator group \"X\" not found"** | You set `initiator_group` in storage config but that group doesn’t exist on the array. Create it in the Nimble UI (with this host’s IQN) or remove `initiator_group` from the config so the plugin creates one automatically. |
 | **API connection / timeout / TLS errors** | Check `address` (use `https://` and correct host or IP), firewall (port 5392), and `check_ssl` (set to 0 or omit if using self-signed certs). Test with the [API connectivity](#api-connectivity) curl example. |
-| **Storage shows but VM disk create fails** | Run with debug: `NIMBLE_DEBUG=2 pvesm status` (or set `debug 2` in storage config). Check token cache: `ls -la /etc/pve/priv/nimble/`. |
+| **Storage shows but VM disk create fails** | Enable debug (see below) and check token cache: `ls -la /etc/pve/priv/nimble/`. |
 | **Multipath not used** | Ensure multipathd is running, `/etc/multipath.conf` has Nimble in `blacklist_exceptions` (and a `devices` block if needed), then `multipathd reconfigure`. |
 
-## Debug
+### Debug logging
 
-- Set `debug` in storage config (0–3) or use `NIMBLE_DEBUG=1` in the environment when running `pvesm` commands.
-- Token cache: `ls -la /etc/pve/priv/nimble/`
+The plugin writes debug output to syslog; you can view it in Proxmox logs.
+
+**Enable debug logging:**
+
+Persistent (via storage configuration):
+
+```bash
+pvesm set <storage_id> --debug 1
+```
+
+Temporary (for a single command, when debug is not set in config):
+
+```bash
+NIMBLE_DEBUG=1 pvesm list <storage_id>
+```
+
+If `debug` is set in storage configuration, it takes priority over the `NIMBLE_DEBUG` environment variable.
+
+**Debug levels:**
+
+- `0` – Off (default)
+- `1` – Basic (token operations, main calls)
+- `2` – Verbose (HTTP details, API responses)
+- `3` – Trace (all internals)
+
+**Example debug output:**
+
+```bash
+NIMBLE_DEBUG=1 pvesm list <storage_id>
+Debug :: activate_storage (<storage_id>)
+Debug :: Read token cache from: /etc/pve/priv/nimble/<storage_id>.json
+```
+
+**Common debug scenarios:**
+
+Debug volume creation:
+
+```bash
+NIMBLE_DEBUG=2 pvesm alloc <storage_id> <vmid> <volname> 10G
+```
+
+Debug API authentication:
+
+```bash
+NIMBLE_DEBUG=3 pvesm status <storage_id>
+```
+
+**View debug logs:**
+
+```bash
+journalctl -u pvedaemon -f
+journalctl -u pvedaemon | grep -E "(Debug ::|Info ::|Warning ::|Error ::)"
+```
+
+**Token cache:**
+
+```bash
+ls -la /etc/pve/priv/nimble/
+cat /etc/pve/priv/nimble/<storage_id>.json | jq .
+```
+
+### Service status
+
+Ensure Proxmox VE services are running. Restart if needed:
+
+```bash
+sudo systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pveproxy.service pvescheduler.service
+```
+
+### Diagnostic commands
+
+**Multipath:**
+
+```bash
+multipath -ll
+multipath -ll -v3
+multipath -ll | grep -A 10 "Nimble"
+systemctl reload multipathd
+```
+
+Nimble has no fixed WWID prefix; devices are matched by SCSI serial from the array. Use the volume serial from the Nimble UI or API and match against `/sys/block/*/device/serial` or `/dev/disk/by-id/`.
+
+**iSCSI:**
+
+```bash
+iscsiadm -m session
+iscsiadm -m session -P 3
+iscsiadm -m node
+iscsiadm -m session --rescan
+```
+
+**Device and mapper:**
+
+```bash
+ls -l /dev/disk/by-id/
+lsblk
+dmsetup table
+dmsetup ls --tree
+```
+
+**Storage plugin:**
+
+```bash
+pvesm list <storage_id>
+pvesm status <storage_id>
+pvesm scan <storage_id>
+```
+
+**Network connectivity:**
+
+Test Nimble API (management, port 5392):
+
+```bash
+curl -sk -X POST "https://<nimble>:5392/v1/tokens" \
+  -H "Content-Type: application/json" \
+  -d '{"username":"<user>","password":"<password>"}'
+```
+
+Test iSCSI portal (port 3260):
+
+```bash
+nc -zv <nimble_iscsi_ip> 3260
+```
+
+**Other checks:**
+
+- **API credentials:** Use a Nimble user with permissions to create volumes and manage initiator groups and access control records.
+- **Multipath configuration:** Verify `multipath.conf` (e.g. `find_multipaths no`, Nimble in `blacklist_exceptions`, Nimble `devices` block). See [Multipath (optional)](#multipath-optional).
+- **Plugin updates:** Ensure you are using a supported plugin version.
+
+### Known issues
+
+**Debug output in command results:** When debug logging is enabled, debug messages can appear in outputs that scripts expect to be clean (e.g. `pvesm path`, `qm showcmd`). Disable debug for production or use `NIMBLE_DEBUG=1` only when running diagnostic commands.
+
+**LVM on top of Nimble volumes:** If you use LVM inside a Nimble-backed volume, add the relevant device patterns to LVM’s `global_filter` in `/etc/lvm/lvmlocal.conf` so LVM does not scan those devices (e.g. by serial or `/dev/mapper/` pattern).
 
 ## Development
 
