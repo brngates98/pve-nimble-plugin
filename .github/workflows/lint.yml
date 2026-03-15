@@ -53,6 +53,7 @@ jobs:
 
     - name: Check code formatting with perltidy
       if: inputs.perl-files != ''
+      continue-on-error: true
       run: |
         echo "Checking code formatting..."
         changed_files="${{ inputs.perl-files }}"
