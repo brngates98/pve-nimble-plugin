@@ -19,8 +19,8 @@ use HTTP::Headers  ();
 use HTTP::Request  ();
 use URI::Escape qw( uri_escape );
 use File::Basename qw( basename );
-use Time::HiRes    qw( gettimeofday sleep );
-use Cwd            qw( abs_path );
+use Time::HiRes qw( gettimeofday sleep );
+use Cwd qw( abs_path );
 
 use base qw(PVE::Storage::Plugin);
 

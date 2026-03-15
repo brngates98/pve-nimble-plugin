@@ -2,10 +2,6 @@ name: Checks
 run-name: Checks on ${{ github.ref_name }} by ${{ github.actor }}
 
 on:
-  push:
-    branches:
-    - main
-    - master
   pull_request:
     types:
     - opened
@@ -43,11 +39,9 @@ jobs:
     - name: Determine if we should check all files
       id: set-check-all
       run: |
-        # Check all files: manual dispatch with check_all_files=true, or push to main/master
+        # Check all files only for manual workflow dispatch with check_all_files=true
         # For PRs, check only changed files
         if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ "${{ inputs.check_all_files }}" == "true" ]; then
-          echo "check-all=true" >> $GITHUB_OUTPUT
-        elif [ "${{ github.event_name }}" == "push" ] && ( [ "${{ github.ref }}" == "refs/heads/main" ] || [ "${{ github.ref }}" == "refs/heads/master" ] ); then
           echo "check-all=true" >> $GITHUB_OUTPUT
         else
           echo "check-all=false" >> $GITHUB_OUTPUT
