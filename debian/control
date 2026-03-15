@@ -3,7 +3,9 @@ Section: perl
 Priority: optional
 Maintainer: Proxmox VE Nimble Plugin <noreply@example.com>
 Standards-Version: 4.6.0
-Homepage: https://github.com/your-org/pve-nimble-plugin
+Homepage: https://github.com/brngates98/pve-nimble-plugin
+Vcs-Browser: https://github.com/brngates98/pve-nimble-plugin
+Vcs-Git: https://github.com/brngates98/pve-nimble-plugin.git
 Build-Depends: debhelper, devscripts
 
 Package: libpve-storage-nimble-perl

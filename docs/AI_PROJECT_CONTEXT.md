@@ -28,7 +28,7 @@
 | **CI (GitHub Actions)** | Present | checks, lint (Perl + Markdown), tests, release (tag → build .deb → gh-release) |
 | **Unit tests** | Present | test_command_validation.t, test_retry_logic.t, test_token_cache.t (+ token_cache_test.pl); no live Nimble tests |
 | **Real-array testing** | Not done | No automated tests against a real Nimble array; manual only |
-| **debian/watch** | Placeholder | Points at `your-org/pve-nimble-plugin`; update to real repo URL |
+| **debian/watch** | Done | Points at `brngates98/pve-nimble-plugin` |
 
 ---
 
@@ -76,11 +76,10 @@ pve-nimble-plugin/
 
 ## 6. What Might Need Work (when resuming)
 
-- **Replace placeholder URL** in `debian/watch` (and optionally in `debian/control` Homepage/Vcs-*) with the real repo URL.
 - **Validate on real Nimble:** Create storage, create VM disk, snapshot, clone, resize, delete; confirm device paths and multipath on a real node.
 - **Nimble API quirks:** Response shapes (e.g. list vs single object, pagination) may need adjustment per Nimble firmware; error codes/messages might need better handling.
 - **Status/capacity:** `status()` uses pools API; field names (`capacity`, `usage`, etc.) may vary by Nimble version—verify and adjust if needed.
-- **Changelog for first release:** Release workflow builds changelog from git tags; for the very first tag, ensure there is at least one tag so changelog generation in `_deb.yml` succeeds (or add a no-tags fallback there if you want to build from branch).
+- **Changelog for first release:** Handled: `_deb.yml` has a no-tags fallback (builds 1.0.0-1 from full history when no tags exist). Pushing a tag (e.g. `v1.0.0`) runs the release workflow and produces the .deb.
 
 ---
 
@@ -103,4 +102,4 @@ pve-nimble-plugin/
 
 ---
 
-*Last updated: project creation. Update this file when you make significant changes or when status/next steps change.*
+*Last updated: repo URL and first-release prep. Update this file when you make significant changes or when status/next steps change.*

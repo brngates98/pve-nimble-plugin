@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: libpve-storage-nimble-perl
-Source: https://github.com/your-org/pve-nimble-plugin
+Source: https://github.com/brngates98/pve-nimble-plugin
 
 Files: *
 Copyright: 2025
