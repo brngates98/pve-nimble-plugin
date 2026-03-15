@@ -4,7 +4,7 @@ use strict;
 use warnings;
 use Test::More tests => 11;
 use File::Temp qw( tempdir );
-use JSON::XS   qw( encode_json decode_json );
+use JSON::XS qw( encode_json decode_json );
 
 # Mock PVE::Tools for testing
 BEGIN {
@@ -61,9 +61,9 @@ sub write_test_cache {
 
 # Test 2: Token validation - expired token
 {
-  my $token_data = create_token_data( 3000 );   # 3000s old
+  my $token_data = create_token_data( 3000 );    # 3000s old
   my $ttl        = 3600;
-  my $threshold  = $ttl * 0.8;                  # 2880s
+  my $threshold  = $ttl * 0.8;                   # 2880s
 
   ok( 3000 >= $threshold, 'Expired token needs refresh (age >= 80% TTL)' );
 }
@@ -163,13 +163,13 @@ sub write_test_cache {
 # Test 10: session_token field (Nimble uses session_token not auth_token)
 {
   my $token_data = create_token_data( 50 );
-  ok( defined $token_data->{session_token}, 'Token has session_token field' );
+  ok( defined $token_data->{ session_token }, 'Token has session_token field' );
 }
 
 # Test 11: created_at required for validation
 {
   my $no_created = { session_token => 'x', ttl => 3600 };
-  ok( !defined $no_created->{created_at}, 'Missing created_at would fail validation' );
+  ok( !defined $no_created->{ created_at }, 'Missing created_at would fail validation' );
 }
 
 done_testing();
