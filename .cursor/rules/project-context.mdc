@@ -17,4 +17,6 @@ When starting work in this repo (or resuming after a break), **read `docs/AI_PRO
 
 Keep that document updated when you make significant changes or when status/next steps change.
 
+**API compatibility:** Any implementation or change that uses the Nimble REST API must be validated against the API for compatibility. When editing `NimbleStoragePlugin.pm` or API docs, follow `.cursor/rules/api-compatibility.mdc`: use `docs/NIMBLE_API_REFERENCE.md` and `docs/API_VALIDATION.md`, correct paths and request/response shapes (including the `data` wrapper), and the right operation (e.g. clone vs restore). Update `API_VALIDATION.md` when adding or changing API usage.
+
 **Tech stack:** Perl; PVE storage plugin API; HPE Nimble REST API (v1, port 5392); iSCSI + optional multipath.

@@ -1,0 +1,39 @@
+---
+description: Nimble API implementations must be validated against the API for compatibility
+globs: NimbleStoragePlugin.pm, docs/NIMBLE_API_REFERENCE.md, docs/API_VALIDATION.md
+alwaysApply: false
+---
+
+# API compatibility rule
+
+Any **new or changed** code that calls the HPE Nimble REST API must be **validated against the API** for compatibility before considering the work complete.
+
+## Required steps
+
+1. **Reference the in-repo API spec**  
+   Use `docs/NIMBLE_API_REFERENCE.md` for:
+   - Correct **paths** (e.g. `volumes/:id/actions/restore`, not `volumes/:id/restore`)
+   - **Request envelope**: all request bodies must be sent as `{ "data": { ... } }`
+   - **Parameters**: mandatory vs optional, names (e.g. `pool_id` vs `pool_name`), and types (e.g. size in MB, `base_snap_id` required for restore)
+
+2. **Use the right operation**  
+   - **Restore** = overwrite an *existing* volume from a snapshot → `POST volumes/:id/actions/restore` with `id`, `base_snap_id`
+   - **Clone** = create a *new* volume from a snapshot → `POST volumes` with `clone: true`, `name`, `base_snap_id` (then add ACL)
+   - Do not use restore when the target volume does not exist yet (e.g. clone).
+
+3. **Response handling**  
+   - List/read responses: use `$r->{ data }` (array or object)
+   - Single-object create/update: use `$r->{ data } || $r` for compatibility with wrapped and unwrapped responses
+   - Token response: read from `$data->{ data }->{ session_token }` with fallback to `$data->{ session_token }`
+
+4. **Document and cross-check**  
+   - After implementing or changing API usage, update `docs/API_VALIDATION.md` if you add or change endpoints, request bodies, or response parsing.
+   - When in doubt, confirm against the [HPE Nimble REST API](https://support.hpe.com/docs/display/public/nmtp352en_us/wzk1480348939804.html) (or the linked operation pages in `docs/NIMBLE_API_REFERENCE.md`).
+
+## Quick checks
+
+- New endpoint? → Verify method, path, and body in `NIMBLE_API_REFERENCE.md` (section 10 table and the relevant object-set section).
+- New or changed request body? → Must be wrapped in `data`; parameter names and types must match the API.
+- New or changed response parsing? → Handle both `{ "data": { ... } }` and, where applicable, top-level object for backward compatibility.
+
+Failure to validate can cause runtime failures or wrong behavior on real Nimble arrays (wrong paths, missing/wrong parameters, or misuse of restore vs clone).

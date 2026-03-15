@@ -382,11 +382,13 @@ sub nimble_api_call {
     $ua->ssl_opts( verify_hostname => 0, SSL_verify_mode => 0x00 ) unless $scfg->{ check_ssl };
     my $req = HTTP::Request->new( 'POST', $login_url );
     $req->header( 'Content-Type' => 'application/json' );
-    $req->content( encode_json( { username => $scfg->{ username }, password => $scfg->{ password } } ) );
+    # HPE Perl sample: request body is { "data": { "username", "password" } }; response has session_token under "data"
+    $req->content( encode_json( { data => { username => $scfg->{ username }, password => $scfg->{ password } } } ) );
     my $res = $ua->request( $req );
     die "Error :: Nimble login failed: " . $res->status_line . "\n" . ( $res->decoded_content // '' ) . "\n" unless $res->is_success;
     my $data = decode_json( $res->decoded_content );
-    $auth = $data->{ session_token } or die "Error :: No session_token in response\n";
+    $auth = ( $data->{ data } && $data->{ data }->{ session_token } ) ? $data->{ data }->{ session_token } : $data->{ session_token };
+    $auth or die "Error :: No session_token in response\n";
     $scfg->{ _auth_token } = $auth;
     my $token_data = { session_token => $auth, created_at => time(), ttl => $ttl };
     write_token_cache( $cache_path, $token_data ) if $cache_path;
@@ -397,7 +399,8 @@ sub nimble_api_call {
   my $req = HTTP::Request->new( $method, $url );
   $req->header( 'Content-Type' => 'application/json' );
   $req->header( 'X-Auth-Token' => $auth );
-  $req->content( encode_json( $body ) ) if defined $body && ref $body eq 'HASH' && %$body;
+  # HPE API uses "data" wrapper for request body (see Perl code sample)
+  $req->content( encode_json( { data => $body } ) ) if defined $body && ref $body eq 'HASH' && %$body;
   my $res     = $ua->request( $req );
   my $content = $res->decoded_content;
 
@@ -613,8 +616,32 @@ sub nimble_volume_restore {
     if ( $s->{ name } eq $snap_full ) { $snap_id = $s->{ id }; last; }
   }
   die "Error :: Snapshot \"$snap\" not found\n" unless $snap_id;
-  nimble_api_call( $scfg, 'POST', "volumes/$vol_id/restore", { base_snap_id => $snap_id }, $storeid );
+  # HPE REST API: POST v1/volumes/id/actions/restore with id and base_snap_id (both mandatory)
+  nimble_api_call( $scfg, 'POST', "volumes/$vol_id/actions/restore", { id => $vol_id, base_snap_id => $snap_id }, $storeid );
   print "Info :: Volume \"$volname\" restored from snapshot \"$snap\".\n";
+  return 1;
+}
+
+# Create a new volume from a snapshot (clone). API: POST volumes with clone=true, name, base_snap_id.
+sub nimble_clone_from_snapshot {
+  my ( $class, $scfg, $storeid, $new_volname, $source_volname, $snap_name ) = @_;
+  my $snap_full = nimble_volname( $scfg, $source_volname, $snap_name );
+  my $enc       = uri_escape( $snap_full );
+  my $r         = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
+  my $list      = $r->{ data } || [];
+  my $snap_id;
+  for my $s ( @$list ) {
+    if ( $s->{ name } eq $snap_full ) { $snap_id = $s->{ id }; last; }
+  }
+  die "Error :: Snapshot \"$snap_name\" not found for volume \"$source_volname\".\n" unless $snap_id;
+  my $name_on_array = nimble_volname( $scfg, $new_volname, undef );
+  my $body = { clone => JSON::XS::true, name => $name_on_array, base_snap_id => $snap_id };
+  $r = nimble_api_call( $scfg, 'POST', 'volumes', $body, $storeid );
+  my $vol = $r->{ data } || $r;
+  my $vol_id = $vol->{ id } or die "Error :: Clone did not return volume id.\n";
+  my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
+  nimble_api_call( $scfg, 'POST', 'access_control_records', { vol_id => $vol_id, initiator_group_id => $ig_id }, $storeid );
+  print "Info :: Cloned volume \"$new_volname\" from \"$source_volname\" snapshot \"$snap_name\".\n";
   return 1;
 }
 
@@ -719,8 +746,12 @@ sub status {
   my $used  = 0;
   for my $p ( @$list ) {
     $total += ( $p->{ capacity } || 0 );
-    if ( $p->{ usage_valid } && $p->{ usage } ) {
-      $used += ( $p->{ usage }->{ compressed_usage } || $p->{ usage }->{ uncompressed_usage } || 0 );
+    if ( $p->{ usage_valid } && defined $p->{ usage } ) {
+      # API: usage is NsBytes (number); some versions return nested { compressed_usage, uncompressed_usage }
+      my $u = $p->{ usage };
+      $used += ( ref($u) eq 'HASH' )
+        ? ( $u->{ compressed_usage } || $u->{ uncompressed_usage } || 0 )
+        : ( 0 + $u );
     }
   }
   $total = 1 if $total <= 0;
@@ -807,7 +838,7 @@ sub rename_volume {
 
 sub volume_snapshot {
   my ( $class, $scfg, $storeid, $volname, $snap ) = @_;
-  $class->nimble_snapshot_create( $scfg, $storeid, $snap, $volname );
+  $class->nimble_snapshot_create( $scfg, $storeid, $volname, $snap );
   return 1;
 }
 
@@ -826,7 +857,7 @@ sub volume_snapshot_delete {
 sub clone_image {
   my ( $class, $scfg, $storeid, $volname, $vmid, $snap ) = @_;
   my $name = $class->find_free_diskname( $storeid, $scfg, $vmid );
-  $class->nimble_volume_restore( $scfg, $storeid, $name, $volname, $snap );
+  $class->nimble_clone_from_snapshot( $scfg, $storeid, $name, $volname, $snap );
   return $name;
 }
 

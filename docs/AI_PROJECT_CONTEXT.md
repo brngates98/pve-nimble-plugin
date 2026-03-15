@@ -42,8 +42,10 @@ pve-nimble-plugin/
 ├── LICENSE
 ├── docs/
 │   ├── README.md              # Short pointer to main README
-│   └── AI_PROJECT_CONTEXT.md  # This file (AI/context)
-├── .github/workflows/         # checks, lint, tests, release, _deb
+│   ├── AI_PROJECT_CONTEXT.md  # This file (AI/context)
+│   ├── API_VALIDATION.md      # Nimble REST API call validation vs HPE docs
+│   └── NIMBLE_API_REFERENCE.md # In-repo extract of HPE REST API 5.1.1.0 (read for endpoint/request/response details)
+├── .github/workflows/         # release, _deb
 ├── debian/                    # Package: libpve-storage-nimble-perl
 ├── scripts/
 │   └── build_deb.sh           # Local Docker build
@@ -71,6 +73,20 @@ pve-nimble-plugin/
 - **ACL:** Nimble = initiator groups + access_control_records (vol_id, initiator_group_id); Pure = host/volume “connections.”
 - **API shape:** Nimble = `/v1/` JSON with `data` arrays; Pure = custom filter/params and `items`.
 - **Cache:** Nimble = one file per storage (`<storeid>.json`); Pure = per-array (`<storeid>_arrayN.json`) for Active Cluster.
+
+---
+
+## 5.1 Nimble API reference (for AI / contributors)
+
+**Read `docs/NIMBLE_API_REFERENCE.md`** for in-repo API context loaded from HPE docs. It contains:
+
+- **Source:** [HPE Nimble REST API 5.1.1.0](https://support.hpe.com/docs/display/public/nmtp352en_us/wzk1480348939804.html) (object sets index and operation details).
+- **Request/response envelope:** All request bodies and single-object responses use a `data` wrapper (`{ "data": { ... } }`).
+- **Object sets used by the plugin:** tokens, initiator_groups, initiators, volumes, access_control_records, snapshots, pools — with Create/Read/Update/Delete and RPC (e.g. volumes **restore**: `POST v1/volumes/id/actions/restore` with `id`, `base_snap_id`).
+- **Key parameters:** e.g. tokens (username, password → session_token), volume create (name, size, optional pool_name), initiator_groups create (name, access_protocol, iscsi_initiators array), pools read (capacity, usage, usage_valid).
+- **Links** to the official HPE pages for each object set and operation.
+
+Use this file when implementing or validating API calls instead of relying only on external docs.
 
 ---
 
