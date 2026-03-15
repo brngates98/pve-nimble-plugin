@@ -1,0 +1,33 @@
+name: Tests
+run-name: Tests - ${{ github.ref_name }}
+
+on:
+  workflow_call:
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Perl
+      uses: shogo82148/actions-setup-perl@v1
+      with:
+        perl-version: '5.34'
+
+    - name: Install cpanm
+      run: |
+        curl -L https://cpanmin.us | perl - App::cpanminus
+
+    - name: Install Perl dependencies
+      run: |
+        cpanm --notest Test::More JSON JSON::XS
+
+    - name: Run tests
+      run: |
+        chmod +x tests/run_tests.sh
+        ./tests/run_tests.sh

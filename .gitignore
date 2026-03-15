@@ -1,0 +1,7 @@
+debian/tmp
+build/
+*.deb
+*.buildinfo
+*.changes
+changelog
+.DS_Store

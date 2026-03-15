@@ -1,0 +1,166 @@
+name: Lint
+run-name: Lint ${{ inputs.enable-perl-lint && 'Perl' || '' }} ${{ inputs.enable-markdown-lint && 'Markdown' || '' }}
+
+on:
+  workflow_call:
+    inputs:
+      enable-perl-lint:
+        description: 'Enable Perl linting'
+        required: false
+        type: boolean
+        default: false
+      enable-markdown-lint:
+        description: 'Enable Markdown linting'
+        required: false
+        type: boolean
+        default: false
+      perl-files:
+        description: 'List of changed Perl files'
+        required: false
+        type: string
+        default: ''
+      markdown-files:
+        description: 'List of changed Markdown files'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  perl-lint:
+    name: Perl Lint
+    if: ${{ inputs.enable-perl-lint == true }}
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Perl
+      uses: shogo82148/actions-setup-perl@v1
+      with:
+        perl-version: '5.34'
+
+    - name: Install cpanm
+      run: |
+        curl -L https://cpanmin.us | perl - App::cpanminus
+
+    - name: Install linting tools
+      run: |
+        cpanm --notest Perl::Critic
+        sudo apt-get update
+        sudo apt-get install -y perltidy || true
+
+    - name: Check code formatting with perltidy
+      if: inputs.perl-files != ''
+      run: |
+        echo "Checking code formatting..."
+        changed_files="${{ inputs.perl-files }}"
+        if [ -z "$changed_files" ] || [ "$changed_files" == " " ]; then
+          echo "No Perl files to check"
+          exit 0
+        fi
+        if [ ! -f ".perltidyrc" ]; then
+          echo "Warning: .perltidyrc not found, using default perltidy settings"
+        fi
+        for file in $changed_files; do
+          if [[ -n "$file" ]] && ([[ "$file" == *.pm ]] || [[ "$file" == *.pl ]]); then
+            echo "Checking formatting: $file"
+            if command -v perltidy >/dev/null 2>&1; then
+              formatted_file="${file}.formatted"
+              if [ -f ".perltidyrc" ]; then
+                perltidy -pro=.perltidyrc "$file" -o "$formatted_file" 2>&1 || true
+              else
+                perltidy "$file" -o "$formatted_file" 2>&1 || true
+              fi
+              if [ -f "$formatted_file" ]; then
+                if ! diff -q "$file" "$formatted_file" >/dev/null 2>&1; then
+                  echo "::error file=$file::File is not properly formatted. Run 'perltidy -pro=.perltidyrc $file' to fix."
+                  echo "Differences:"
+                  diff "$file" "$formatted_file" | head -20 || true
+                  rm -f "$formatted_file"
+                  exit 1
+                fi
+                rm -f "$formatted_file"
+              else
+                echo "Warning: perltidy failed to create formatted file for $file"
+              fi
+            else
+              echo "Warning: perltidy not found, skipping formatting check"
+            fi
+          fi
+        done
+        find . -name '*.formatted' -delete 2>/dev/null || true
+
+    - name: Run Perl::Critic (optional)
+      if: inputs.perl-files != ''
+      continue-on-error: true
+      run: |
+        echo "Running Perl::Critic static analysis..."
+        if command -v perlcritic >/dev/null 2>&1; then
+          changed_files="${{ inputs.perl-files }}"
+          if [ -z "$changed_files" ] || [ "$changed_files" == " " ]; then
+            echo "No Perl files to analyze"
+            exit 0
+          fi
+          for file in $changed_files; do
+            if [[ -n "$file" ]] && [[ "$file" == *.pm ]]; then
+              echo "Analyzing: $file"
+              perlcritic --quiet "$file" || true
+            fi
+          done
+        else
+          echo "Perl::Critic not available, skipping..."
+        fi
+
+  markdown-lint:
+    name: Markdown Lint
+    if: ${{ inputs.enable-markdown-lint == true }}
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install markdownlint
+      run: |
+        npm install -g markdownlint-cli2 || true
+
+    - name: Lint Markdown files
+      if: inputs.markdown-files != ''
+      run: |
+        echo "Linting Markdown files..."
+        changed_files="${{ inputs.markdown-files }}"
+        if [ -z "$changed_files" ] || [ "$changed_files" == " " ]; then
+          echo "No Markdown files to lint"
+          exit 0
+        fi
+        if command -v markdownlint-cli2 >/dev/null 2>&1; then
+          for file in $changed_files; do
+            if [[ -n "$file" ]] && [[ "$file" == *.md ]]; then
+              echo "Linting: $file"
+              markdownlint-cli2 "$file" "#node_modules" "#.git" || {
+                echo "::error file=$file::Markdown linting failed"
+                exit 1
+              }
+            fi
+          done
+        elif command -v markdownlint >/dev/null 2>&1; then
+          for file in $changed_files; do
+            if [[ -n "$file" ]] && [[ "$file" == *.md ]]; then
+              echo "Linting: $file"
+              markdownlint "$file" || {
+                echo "::error file=$file::Markdown linting failed"
+                exit 1
+              }
+            fi
+          done
+        else
+          echo "Markdown linter not available, skipping..."
+        fi

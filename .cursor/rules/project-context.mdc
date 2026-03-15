@@ -1,0 +1,20 @@
+---
+description: Project context for PVE Nimble plugin – read when resuming or working broadly
+alwaysApply: true
+---
+
+# PVE Nimble Storage Plugin – Project Context
+
+When starting work in this repo (or resuming after a break), **read `docs/AI_PROJECT_CONTEXT.md` first**. It contains:
+
+- What the project is (Proxmox VE plugin for HPE Nimble iSCSI storage)
+- Current implementation status (done vs not done)
+- Repo layout and where the main plugin and tests live
+- How the plugin works (config, Nimble API, auth, ACL, device discovery)
+- Differences from the Pure Storage plugin (this was derived from it)
+- Likely next steps and known gaps
+- How to run tests, lint, and build the Debian package
+
+Keep that document updated when you make significant changes or when status/next steps change.
+
+**Tech stack:** Perl; PVE storage plugin API; HPE Nimble REST API (v1, port 5392); iSCSI + optional multipath.

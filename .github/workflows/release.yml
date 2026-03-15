@@ -1,0 +1,56 @@
+name: Release
+run-name: Release-${{ github.ref_name }}-${{ github.run_number }}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+    - 'v[0-9]+.[0-9]+.[0-9]+'
+    - 'v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]'
+    - 'v[0-9]+.[0-9]+.[0-9]+-beta.[0-9]'
+
+jobs:
+  test:
+    name: Test release tag
+    runs-on: ubuntu-22.04
+    steps:
+    - run: |
+        echo ${{ github.ref }}
+    - if: ${{ github.ref_type != 'tag' }}
+      run: |
+        echo "::error::${{ github.ref }} branch is not a release tag"; exit 1
+
+  build:
+    name: Make deb package
+    needs:
+    - test
+    uses: ./.github/workflows/_deb.yml
+    secrets: inherit
+
+  release:
+    name: Release
+    needs:
+    - build
+    runs-on: ubuntu-22.04
+    steps:
+    - id: artifact-download
+      uses: actions/download-artifact@v4
+      with:
+        name: deb-artifact-${{ github.sha }}
+
+    - uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.ref_name }}
+        generate_release_notes: true
+        make_latest: true
+        prerelease: false
+        files: |
+          *.deb
+          sha256sums

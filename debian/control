@@ -1,0 +1,23 @@
+Source: libpve-storage-nimble-perl
+Section: perl
+Priority: optional
+Maintainer: Proxmox VE Nimble Plugin <noreply@example.com>
+Standards-Version: 4.6.0
+Homepage: https://github.com/your-org/pve-nimble-plugin
+Build-Depends: debhelper, devscripts
+
+Package: libpve-storage-nimble-perl
+Architecture: all
+Depends: ${perl:Depends}, ${misc:Depends},
+ libpve-storage-perl (>= 8.2.1),
+ multipath-tools,
+ libjson-xs-perl,
+ libwww-perl,
+ liburi-perl
+Description: HPE Nimble Storage integration for Proxmox VE
+ This package provides a Perl library to integrate HPE Nimble Storage
+ arrays with Proxmox VE storage management over iSCSI.
+ .
+ It allows administrators to configure and manage Nimble volumes
+ directly within Proxmox VE (create, delete, resize, snapshots).
+ Supports Proxmox VE 8.2+.
