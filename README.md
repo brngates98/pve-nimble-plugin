@@ -1,6 +1,35 @@
 # Proxmox VE Plugin for HPE Nimble Storage (iSCSI)
 
+[![Checks](https://github.com/brngates98/pve-nimble-plugin/actions/workflows/checks.yml/badge.svg)](https://github.com/brngates98/pve-nimble-plugin/actions/workflows/checks.yml)
+
 This plugin integrates HPE Nimble Storage arrays with Proxmox Virtual Environment (VE) over iSCSI. It uses the Nimble REST API to create and manage volumes and presents them as VM disks with optional multipath.
+
+## Table of Contents
+
+- [Quick start](#quick-start)
+- [Features](#features)
+- [Prerequisites](#prerequisites)
+  - [iSCSI on Proxmox](#iscsi-on-proxmox)
+  - [API connectivity](#api-connectivity)
+- [Installation](#installation)
+  - [Manual installation](#manual-installation)
+  - [Debian package (recommended)](#debian-package-recommended)
+    - [Option A: APT repository (GitHub Pages)](#option-a-apt-repository-github-pages)
+    - [Option B: Download the package](#option-b-download-the-package)
+- [Configuration](#configuration)
+- [Multipath (optional)](#multipath-optional)
+  - [Example: HPE Nimble only](#example-hpe-nimble-only)
+  - [Example: Nimble and Pure](#example-nimble-and-pure)
+- [Troubleshooting](#troubleshooting)
+  - [Common error messages](#common-error-messages)
+  - [Debug logging](#debug-logging)
+  - [Service status](#service-status)
+  - [Diagnostic commands](#diagnostic-commands)
+  - [Known issues](#known-issues)
+- [Development](#development)
+- [Comparison with Pure Storage plugin](#comparison-with-pure-storage-plugin)
+- [Project context (contributors / AI)](#project-context-contributors--ai)
+- [License](#license)
 
 ## Quick start
 
