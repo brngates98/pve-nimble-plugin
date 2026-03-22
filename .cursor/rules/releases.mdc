@@ -12,7 +12,7 @@ When creating or preparing a **release** (new version tag and GitHub release):
    Check existing tags: `git tag -l 'v*' | sort -V`. The next release must be the **immediate next** version (e.g. after `v0.0.6` the next is `v0.0.7`, not `v1.0.0` or `v0.0.8`). Do not assume or invent a version; derive it from the current tags.
 
 2. **Always include release notes**  
-   The release workflow uses `.github/release-notes-<tagname>.md` (e.g. `.github/release-notes-v0.0.7.md`). Every release must have this file so the GitHub release body is populated. If the file is missing, the release will show only a generic "Release vX.Y.Z" message.
+   The release workflow **requires** `.github/release-notes-<tagname>.md` (e.g. `.github/release-notes-v0.0.8.md`). If it is missing, the release job fails (no generic fallback). Match the style of the latest notes file: product summary, **What is new** for this version, highlights table, requirements, config, installation, upgrade section, documentation links, package metadata, and any CI/contributor notes.
 
 3. **Never jump versions**  
    Do not skip versions (e.g. do not go from v0.0.5 to v0.0.7 without v0.0.6, or from v0.0.6 to v1.0.0 without an explicit decision to bump major). Use the next sequential version based on existing tags.
