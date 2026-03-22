@@ -982,15 +982,26 @@ sub get_nimble_iscsi_discovery_ips {
   return @merged;
 }
 
+# open-iscsi stores node.portal as "host:port" or "host:port,tpgt". Strip ",N" so discovery/login -p matches.
+sub nimble_iscsi_portal_strip_tpgt {
+  my ($p) = @_;
+  return '' if !defined $p;
+  my $s = $p;
+  $s =~ s/,[0-9]+\z//;
+  return $s;
+}
+
 sub nimble_iscsi_portal {
   my ($ip) = @_;
-  return $ip if $ip =~ /:\d+$/;
-  return $ip if $ip =~ /^\[.+\]:\d+$/;
+  return '' if !defined $ip || $ip !~ m/\S/;
+  my $s = nimble_iscsi_portal_strip_tpgt($ip);
+  return $s if $s =~ /:\d+$/;
+  return $s if $s =~ /^\[.+\]:\d+$/;
   # Unbracketed IPv6: open-iscsi expects -p [addr]:3260
-  if ( $ip =~ /:/ && $ip !~ /^\d+\.\d+\.\d+\.\d+$/ ) {
-    return "[$ip]:3260";
+  if ( $s =~ /:/ && $s !~ /^\d+\.\d+\.\d+\.\d+$/ ) {
+    return "[$s]:3260";
   }
-  return "$ip:3260";
+  return "$s:3260";
 }
 
 # Portals already in open-iscsi node DB for this target (after sendtargets on any host).
@@ -1034,8 +1045,9 @@ sub nimble_iscsi_merge_portal_list {
     }
   }
   if ( length($target_iqn) && $target_iqn =~ m/^iqn\./i ) {
-    for my $p ( nimble_iscsi_node_portals_for_target($target_iqn) ) {
-      push @list, $p unless $seen{$p}++;
+    for my $raw ( nimble_iscsi_node_portals_for_target($target_iqn) ) {
+      my $p = nimble_iscsi_portal($raw);
+      push @list, $p if length($p) && !$seen{$p}++;
     }
   }
   return @list;
@@ -1063,7 +1075,8 @@ sub nimble_iscsi_target_in_sessions {
   my $iscsiadm = nimble_iscsiadm_path();
   return 0 unless -x $iscsiadm;
   my $out = `"$iscsiadm" -m session 2>/dev/null` // '';
-  return index( $out, $target_iqn ) >= 0;
+  return 1 if index( lc($out), lc($target_iqn) ) >= 0;
+  return 0;
 }
 
 # One sendtargets pass per host (quiet). Caller then runs targeted --login; do not mix with global `node --login` on map.
@@ -2023,7 +2036,7 @@ sub map_volume {
       return length($p) && -e $p;
     },
     "volume \"$volname\" to appear (API serial " . $serial . "; check iscsiadm -m session and ACL)",
-    120
+    180
   );
   my ( $path, $wwid ) = get_device_path_by_serial( $serial );
   die "Error :: Volume \"$volname\" device did not appear after rescan (serial $serial).\n" unless length($path) && -b $path;
