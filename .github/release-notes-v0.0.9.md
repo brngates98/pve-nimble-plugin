@@ -2,19 +2,19 @@
 
 **Proxmox VE Plugin for HPE Nimble Storage (iSCSI)**
 
-This plugin adds HPE Nimble Storage as a custom storage backend in Proxmox VE. It uses the Nimble REST API to create and manage volumes and presents them as VM disks over iSCSI, with optional multipath. The design follows the same patterns as the [Pure Storage plugin](https://github.com/kolesa-team/pve-purestorage-plugin) for consistency and familiarity.
+This plugin adds HPE Nimble Storage as a custom storage backend in Proxmox VE. It uses the Nimble REST API to create and manage volumes and presents them as VM disks over iSCSI, with optional multipath.
 
 ---
 
 ## What is new in v0.0.9
 
 - **Package postinst: PVE services on `apt upgrade` / `dpkg --configure`** – The Debian **postinst** now uses **`deb-systemd-invoke try-restart`** when available (falls back to **`systemctl`**) and only runs under **`/run/systemd/system`**. On **install and upgrade**, it **try-restarts** `pve-cluster`, `pvedaemon`, `pvestatd`, `pveproxy`, and `pvescheduler` so the updated **`NimbleStoragePlugin.pm`** is loaded without a manual restart (Perl reads the module at daemon start).
-- **Device path discovery (Pure-style / multipath)** – Resolves VM disks via **`/dev/disk/by-id`** first: deterministic **`wwn-0x<serial>`**, then any **by-id** name containing the API **`serial_number`**, then sysfs serial. Fixes timeouts when the active node is a **multipath `dm-*`** device without **`/sys/block/dm-*/device/serial`**.
+- **Device path discovery (by-id / multipath)** – Resolves VM disks via **`/dev/disk/by-id`** first: deterministic **`wwn-0x<serial>`**, then any **by-id** name containing the API **`serial_number`**, then sysfs serial. Fixes timeouts when the active node is a **multipath `dm-*`** device without **`/sys/block/dm-*/device/serial`**.
 - **Multipath WWID alignment** – Maps **`wwn-0x` + 32-hex NAA** to the **multipath** id form (**leading type nibble + 32 hex**, e.g. as in **`dm-uuid-mpath-…`** / **`scsi-2…`**). **`multipathd add/remove map`** and **`multipath -l`** try compatible id variants; **unmap** removes the **active** map id.
 - **Perl taint mode (`-T`)** – **`pvedaemon`** runs custom storage plugins under taint checks. Device paths and WWIDs are **validated and untainted** before **`blockdev`**, **`multipathd`**, and related **`exec`** paths (fixes **“Insecure dependency in exec”** during volume deactivate).
 - **iSCSI / discovery** – **`GET subnets/:id`** when the list is summary-only; prefer subnets whose **`type` contains `data`**; **`GET network_interfaces/:id`** when **`ip_list`** is missing; **live `iscsiadm` session IPs merged first**; **`node.startup=automatic`** per target+portal; **`iscsiadm -m session --rescan`**; longer **map** wait with periodic SCSI rescan; optional sendtargets/login **retry**.
 - **`api()`** – Safer fallbacks if **`PVE::Storage::APIVER` / `APIAGE`** are unavailable.
-- **Documentation** – README troubleshooting (duplicate **`properties`** keys, multipath WWID, taint); **Pure vs Nimble** map/discovery notes; **`docs/API_VALIDATION`**, **`NIMBLE_API_REFERENCE`**, **`AI_PROJECT_CONTEXT`** updates.
+- **Documentation** – README troubleshooting (duplicate **`properties`** keys, multipath WWID, taint); map/discovery notes; **`docs/API_VALIDATION`**, **`NIMBLE_API_REFERENCE`**, **`AI_PROJECT_CONTEXT`** updates.
 
 ---
 
@@ -107,7 +107,7 @@ No storage config changes are required.
 |----------|-------------|
 | [README](https://github.com/brngates98/pve-nimble-plugin#readme) | Installation, configuration, migration, multipath, troubleshooting, scripted installer |
 | [docs/00-SETUP-FULLY-PROTECTED-STORAGE.md](https://github.com/brngates98/pve-nimble-plugin/blob/main/docs/00-SETUP-FULLY-PROTECTED-STORAGE.md) | Step-by-step setup from zero to protected storage; restore workflow |
-| [docs/API_VALIDATION.md](https://github.com/brngates98/pve-nimble-plugin/blob/main/docs/API_VALIDATION.md) | Nimble REST validation; Python SDK cross-check; Pure plugin comparison |
+| [docs/API_VALIDATION.md](https://github.com/brngates98/pve-nimble-plugin/blob/main/docs/API_VALIDATION.md) | Nimble REST validation; Python SDK cross-check |
 | [docs/NIMBLE_API_REFERENCE.md](https://github.com/brngates98/pve-nimble-plugin/blob/main/docs/NIMBLE_API_REFERENCE.md) | In-repo extract of HPE REST API 5.1.1.0 (endpoints, request/response) |
 | [docs/STORAGE_FEATURES_COMPARISON.md](https://github.com/brngates98/pve-nimble-plugin/blob/main/docs/STORAGE_FEATURES_COMPARISON.md) | Feature comparison vs NFS, LVM, iSCSI, Ceph RBD |
 
