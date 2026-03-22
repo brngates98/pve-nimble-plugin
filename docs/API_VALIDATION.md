@@ -55,7 +55,7 @@ The Python SDK ([documentation](https://hpe-storage.github.io/nimble-python-sdk/
 | `snapshots`, `snapshots/:id` | `snapshots.py` | — |
 | `pools` | `pools.py` | |
 | `volume_collections` | `volume_collections.py` | Lookup by `name=`; plugin uses PUT `volumes/:id` with `volcoll_id` per API doc. |
-| `subnets` | `subnets.py` | Used for discovery IPs when `auto_iscsi_discovery` is enabled. |
+| `subnets` | `subnets.py` | Used for discovery IPs (default **on** for activate-time discovery unless `auto_iscsi_discovery` is **`no`**/**`0`**; subnets also feed **`map_volume`** portal lists). |
 
 **Host-side commands (not in the Python SDK):** `iscsiadm` (discovery, login), `multipath` / `multipathd`, `blockdev`, and SCSI host rescan are **Linux / open-iscsi / multipath-tools**—appropriate for a PVE storage plugin and unrelated to the Nimble HTTPS client. The `%cmd` table also lists `kpartx` and `dmsetup` for parity with the Pure plugin pattern (validated when present on the node).
 

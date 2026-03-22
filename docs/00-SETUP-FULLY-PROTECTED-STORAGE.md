@@ -84,7 +84,7 @@ You need:
 ## 2. Prepare the Nimble array
 
 - **REST API:** In the Nimble UI, ensure the management interface is reachable and the REST API is enabled (default port 5392).
-- **iSCSI subnets:** Create or confirm at least one iSCSI-enabled subnet (type **data** or **mgmt,data**) with a **discovery IP**. The plugin uses this for auto discovery when you enable `auto_iscsi_discovery`.
+- **iSCSI subnets:** Create or confirm at least one iSCSI-enabled subnet (type **data** or **mgmt,data**) with a **discovery IP**. The plugin uses this for **activate-time** iSCSI discovery by default (`auto_iscsi_discovery` defaults to **on**; set **`no`**/**`0`** to disable).
 - **User:** Ensure your API user can create volumes, initiator groups, and access control records.
 
 <details>
@@ -230,7 +230,7 @@ sudo iscsiadm -m node --login
 
 **Option B – Auto discovery (recommended)**
 
-Skip manual discovery. In [step 7](#7-add-nimble-storage-to-proxmox) add the storage with `--auto_iscsi_discovery 1`. When the storage is activated on each node, the plugin will fetch discovery IPs from the Nimble API and run discovery/login for you.
+Skip manual discovery. In [step 7](#7-add-nimble-storage-to-proxmox) add Nimble storage normally—**activate-time discovery is on by default**. When the storage is activated on each node, the plugin fetches discovery IPs from the Nimble API and runs discovery/login. Use **`auto_iscsi_discovery no`** only if you want to skip that step.
 
 ---
 
@@ -238,18 +238,7 @@ Skip manual discovery. In [step 7](#7-add-nimble-storage-to-proxmox) add the sto
 
 From **any** node (config syncs to the cluster):
 
-**With auto iSCSI discovery (recommended):**
-
-```bash
-pvesm add nimble <storage_id> \
-  --address https://<NIMBLE_MGMT_IP_OR_FQDN> \
-  --username <API_USER> \
-  --password '<API_PASSWORD>' \
-  --content images \
-  --auto_iscsi_discovery 1
-```
-
-**Without auto discovery (you did manual discovery in step 6):**
+**Default (activate-time iSCSI discovery on):**
 
 ```bash
 pvesm add nimble <storage_id> \
@@ -257,6 +246,17 @@ pvesm add nimble <storage_id> \
   --username <API_USER> \
   --password '<API_PASSWORD>' \
   --content images
+```
+
+**Disable activate-time discovery** (e.g. you rely only on manual discovery from step 6):
+
+```bash
+pvesm add nimble <storage_id> \
+  --address https://<NIMBLE_MGMT_IP_OR_FQDN> \
+  --username <API_USER> \
+  --password '<API_PASSWORD>' \
+  --content images \
+  --auto_iscsi_discovery 0
 ```
 
 Replace `<storage_id>` with a name (e.g. `nimble-prod`). The storage will appear in **Datacenter → Storage**.
@@ -368,7 +368,7 @@ Replace `<nimble>`, `<user>`, `<pass>`, `<volname>` (e.g. `vm-100-disk-0` or `my
 
 | Task | Command or location |
 |------|---------------------|
-| Add storage (with auto discovery) | `pvesm add nimble <id> --address https://... --username ... --password '...' --content images --auto_iscsi_discovery 1` |
+| Add storage | `pvesm add nimble <id> --address https://... --username ... --password '...' --content images` (activate-time iSCSI discovery **on** by default; add `--auto_iscsi_discovery 0` to disable) |
 | Edit storage | **`pvesm set`**, **`nano /etc/pve/storage.cfg`**, or cluster storage API. Custom types like `nimble` are not fully editable from the Datacenter Storage GUI in stock PVE. |
 | Check plugin version | `dpkg -l libpve-storage-nimble-perl` |
 | Debug plugin | Run commands with `NIMBLE_DEBUG=2` (see [README](../README.md#debug-logging)) |

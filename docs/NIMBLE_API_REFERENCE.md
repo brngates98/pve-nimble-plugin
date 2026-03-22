@@ -157,7 +157,7 @@ These endpoints are not used by the plugin today but are useful for automation (
 
 ---
 
-**Plugin use:** When storage option `auto_iscsi_discovery` is enabled (and for portal lists used during volume map), the plugin calls **GET v1/subnets**, **GET v1/subnets/:id** for any row missing `discovery_ip`, then prefers subnets whose **`type` contains `data`** with a non-empty **`discovery_ip`**. If that yields none, it falls back to any subnet with `discovery_ip`, then **network_interfaces**, manual **iscsi_discovery_ips**, and **iscsiadm** session IPs.
+**Plugin use:** When **`auto_iscsi_discovery`** is not disabled (default **on**; **`no`**/**`0`** turns off activate-time discovery only), and for portal lists used during volume map, the plugin calls **GET v1/subnets**, **GET v1/subnets/:id** for any row missing `discovery_ip`, then prefers subnets whose **`type` contains `data`** with a non-empty **`discovery_ip`**. If that yields none, it falls back to any subnet with `discovery_ip`, then **network_interfaces**, manual **iscsi_discovery_ips**, and **iscsiadm** session IPs.
 
 ## 10. Plugin-relevant endpoints summary
 

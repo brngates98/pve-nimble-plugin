@@ -135,9 +135,9 @@ sub properties {
       default     => 0
     },
     auto_iscsi_discovery => {
-      description => "When storage is activated, run iSCSI discovery and login using the array's discovery IPs (from Nimble subnets API). Opt-in only; default off.",
+      description => "When storage is activated, run iSCSI discovery and login using the array's discovery IPs (from Nimble subnets API). Default on; set to no/0 to disable.",
       type        => 'boolean',
-      default     => 'no'
+      default     => 'yes'
     },
     iscsi_discovery_ips => {
       description => "Comma-separated iSCSI discovery addresses (IP or hostname, optional :port). Merged with GET subnets; use when subnets returns no discovery_ip or list is wrapped differently on your firmware.",
@@ -1883,11 +1883,22 @@ sub status {
   return ( $total, $free, $used, 1 );
 }
 
+# Activate-time discovery: on by default; only no/0 disables (missing key = on for legacy configs).
+sub nimble_auto_iscsi_discovery_enabled {
+  my ($scfg) = @_;
+  return 0 unless ref($scfg) eq 'HASH';
+  my $v = $scfg->{ auto_iscsi_discovery };
+  return 1 if !defined($v);
+  my $s = "$v";
+  return 0 if $s eq '0' || $s eq 'no';
+  return 1;
+}
+
 sub activate_storage {
   my ( $class, $storeid, $scfg, $cache ) = @_;
   set_debug_from_config( $scfg );
-  # PureStoragePlugin::activate_storage only returns 1; Nimble adds optional cluster-wide iSCSI discovery when configured.
-  if ( $scfg->{ auto_iscsi_discovery } && $scfg->{ auto_iscsi_discovery } ne 'no' && $scfg->{ auto_iscsi_discovery } ne '0' ) {
+  # PureStoragePlugin::activate_storage only returns 1; Nimble runs iSCSI discovery on activate unless disabled.
+  if ( nimble_auto_iscsi_discovery_enabled($scfg) ) {
     my $ig_ok = eval { nimble_ensure_initiator_group_id( $scfg, $storeid ); 1 };
     if ( !$ig_ok ) {
       chomp( my $err = $@ );

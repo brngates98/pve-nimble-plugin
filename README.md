@@ -65,10 +65,10 @@ This plugin integrates HPE Nimble Storage arrays with Proxmox Virtual Environmen
 
 **Same outcome as manual PVE iSCSI (no duplicate storage entry needed):** In the GUI, **Datacenter → Storage → Add → iSCSI** with your Nimble **portal** (e.g. `192.168.221.120`), the volume’s **IQN** from the array, **Enabled**, and **Use LUNs directly**, then add a disk as **LUN 0** raw—that is the host-side pattern this plugin automates. Each Nimble volume has its own **per-volume IQN** with **LUN 0**. The plugin uses the REST API for the volume and ACL, runs **`iscsiadm` discovery/login** on the resolved portal list, sets **`node.startup=automatic`** for that target+portal (like **Enabled**), runs **`iscsiadm -m session --rescan`**, rescans SCSI, resolves **`/dev/disk/by-id`** by serial (raw block to the VM, like **Use LUNs directly**), and optional multipath.
 
-Either use **auto iSCSI discovery** (recommended) or run discovery manually:
+Either use **auto iSCSI discovery** (default and recommended) or run discovery manually:
 
-**Option A — Auto iSCSI discovery (opt-in)**  
-When adding the storage, set `auto_iscsi_discovery 1`. When the storage is activated, the plugin will call the Nimble subnets API to get iSCSI discovery IPs, then run `iscsiadm` discovery and login on this host. No manual discovery steps needed. Requires `open-iscsi` and an IQN in `/etc/iscsi/initiatorname.iscsi`. See [Auto iSCSI discovery (opt-in)](#auto-iscsi-discovery-opt-in).
+**Option A — Auto iSCSI discovery (default)**  
+By default, when the storage is activated, the plugin calls the Nimble subnets API for iSCSI discovery IPs, then runs `iscsiadm` discovery and login on this host. Set **`auto_iscsi_discovery no`** (or **`0`**) to turn that off. Requires `open-iscsi` and an IQN in `/etc/iscsi/initiatorname.iscsi`. See [Auto iSCSI discovery](#auto-iscsi-discovery).
 
 **Option B — Manual discovery**
 
@@ -205,13 +205,8 @@ pvesm add nimble <storage_id> \
   --password '<api_password>' \
   --content images
 
-# With auto iSCSI discovery (plugin runs discovery/login when storage is activated)
-pvesm add nimble <storage_id> \
-  --address https://<nimble_fqdn_or_ip> \
-  --username <api_user> \
-  --password '<api_password>' \
-  --content images \
-  --auto_iscsi_discovery 1
+# To disable activate-time discovery (default is on)
+# pvesm set <storage_id> --auto_iscsi_discovery 0
 
 # Or specify an existing initiator group name
 pvesm add nimble <storage_id> \
@@ -230,7 +225,7 @@ nimble: <storage_id>
   username <api_user>
   content images
   # initiator_group <name>   # optional; omit to auto-create pve-<nodename>
-  # auto_iscsi_discovery 1   # optional; run iSCSI discovery/login on activate (default: no)
+  # auto_iscsi_discovery no   # optional; default yes — run iSCSI discovery/login on activate
   # iscsi_discovery_ips 192.168.221.120,192.168.222.120   # optional; merge with GET subnets if needed
 ```
 
@@ -241,7 +236,7 @@ nimble: <storage_id>
 | username             | Nimble REST API user (stored in `storage.cfg`)                                                                                                                                                                                                                                                                                                            |
 | password             | **Proxmox does not provide a Datacenter GUI to add or edit custom storage plugins** (including `nimble`). Set it with **`pvesm add … --password`** / **`pvesm set <id> --password`** or the **cluster storage API**; it is stored in **`storage.cfg`** (cluster-replicated), like TrueNAS **`api_key`**. The plugin reads **`password` from `storage.cfg` first**, then falls back to **`/etc/pve/priv/storage/<id>.pw`**, **`.nimble.pw`**, **`priv/nimble/<id>.pw`** for legacy installs. Updates mirror into those priv files when possible. Restrict who can read **`/etc/pve/storage.cfg`** (same trust model as other in-cfg secrets).                                                                                          |
 | initiator_group      | **Optional.** If unset, the plugin **reuses** the first iSCSI initiator group (API order) that already contains this host’s IQN and has **no CHAP** on any initiator (`chapuser_id`); if none match, it creates `pve-<nodename>`. If set, the plugin uses that group by name only (you create the group and IQNs in Nimble). Volume **access** (access control records) is added on create/activate when missing. |
-| auto_iscsi_discovery | **Optional.** Set to `1` or `yes` to run iSCSI discovery and login when the **storage** is activated (early session setup). **Every VM disk map** also runs sendtargets + login against the same discovery IPs so new per-volume targets are seen—no need to rely on this flag for VM disks. Default: no.                                                                                                                                       |
+| auto_iscsi_discovery | **Optional.** Default **`yes`**: run iSCSI discovery and login when the **storage** is activated (early session setup). Set to **`no`** or **`0`** to disable. **Every VM disk map** also runs sendtargets + login against the same discovery IPs so new per-volume targets are seen—no need to rely on this flag for VM disks.                                                                                                                                       |
 | iscsi_discovery_ips | **Optional.** Comma-separated discovery portal addresses (same as `iscsiadm -m discovery -p …`). Merged with **`GET v1/subnets`**, **`GET network_interfaces`** (data/iSCSI NICs), or session-derived IPs. On **map_volume**: API/manual IPs are merged with **`iscsiadm -m node --targetname`** `node.portal` records so **all portals** log in for **multipath**; retries, then **global `node --login`** fallback (as with **auto_iscsi_discovery**) if the volume IQN still has no session (e.g. new host after migrate).                                                                                                                                       |
 | vnprefix             | Optional prefix for volume names on the array                                                                                                                                                                                                                                                                                                             |
 | pool_name            | Optional Nimble pool for new volumes                                                                                                                                                                                                                                                                                                                      |
@@ -258,9 +253,9 @@ nimble: <storage_id>
 
 **Comparison with [kolesa-team/pve-purestorage-plugin](https://github.com/kolesa-team/pve-purestorage-plugin):** Pure **`activate_volume`** calls the array API to **create a volume connection** (host ↔ LUN) *before* **`map_volume`**. **`map_volume`** builds **`/dev/disk/by-id/wwn-0x…`** from the API serial plus a fixed vendor prefix and **waits until that path exists**—it does not read **`/sys/block/*/device/serial`** (multipath **dm** nodes often lack that file). It does **not** run `iscsiadm` in `map_volume`; operators pre-discover Pure portals once ([their README](https://github.com/kolesa-team/pve-purestorage-plugin#iscsi-configuration)). This Nimble plugin has no “connection” RPC: it sets **initiator group + access_control_records**, then runs **sendtargets + login** for the volume’s **`target_name`**. Device lookup follows the same **by-id / WWN idea as Pure**: try **`wwn-0x<serial>`** and any **`by-id`** name containing the API **`serial_number`**, then fall back to sysfs serial matching. Discovery IPs: **GET subnets** / sessions / **`iscsi_discovery_ips`**.
 
-### Auto iSCSI discovery (opt-in)
+### Auto iSCSI discovery
 
-If you set **auto_iscsi_discovery 1** (or **yes**) on the storage:
+With **auto iSCSI discovery** enabled (the default; set **`auto_iscsi_discovery no`** or **`0`** to disable):
 
 1. **When** the storage is activated on a node (e.g. after adding the storage or when the node first uses it), the plugin will:
 
@@ -270,7 +265,7 @@ If you set **auto_iscsi_discovery 1** (or **yes**) on the storage:
 
 2. **Requirements:** `open-iscsi` must be installed and an IQN must be set in `/etc/iscsi/initiatorname.iscsi`. The plugin does not install or configure the initiator; it ensures the initiator group on the array, then runs discovery and login.
 
-3. **Safety:** The option is off by default. The initiator group is ensured first (so the array knows this host's IQN); if that fails, discovery is skipped. Discovery and login are additive (they do not remove or overwrite existing iSCSI nodes). If the subnets API fails or returns no IPs, or if `iscsiadm` is missing, the plugin logs a warning and does not fail storage activation.
+3. **Safety:** The initiator group is ensured first (so the array knows this host's IQN); if that fails, discovery is skipped. Discovery and login are additive (they do not remove or overwrite existing iSCSI nodes). If the subnets API fails or returns no IPs, or if `iscsiadm` is missing, the plugin logs a warning and does not fail storage activation.
 
 4. **Cluster:** On a cluster, activation runs per node; each node runs discovery/login for itself using the same Nimble subnets.
 

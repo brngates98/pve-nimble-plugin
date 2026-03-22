@@ -15,6 +15,7 @@ This plugin adds HPE Nimble Storage as a custom storage backend in Proxmox VE. I
 - **iSCSI / discovery** – **`GET subnets/:id`** when the list is summary-only; prefer subnets whose **`type` contains `data`**; **`GET network_interfaces/:id`** when **`ip_list`** is missing; **live `iscsiadm` session IPs merged first**; **`node.startup=automatic`** per target+portal; **`iscsiadm -m session --rescan`**; longer **map** wait with periodic SCSI rescan; optional sendtargets/login **retry**.
 - **`api()`** – Safer fallbacks if **`PVE::Storage::APIVER` / `APIAGE`** are unavailable.
 - **Documentation** – README troubleshooting (duplicate **`properties`** keys, multipath WWID, taint); map/discovery notes; **`docs/API_VALIDATION`**, **`NIMBLE_API_REFERENCE`**, **`AI_PROJECT_CONTEXT`** updates.
+- **Auto iSCSI discovery default on** – **`activate_storage`** runs subnet-based discovery and login unless **`auto_iscsi_discovery`** is **`no`** or **`0`**. Storages with no `auto_iscsi_discovery` line in **`storage.cfg`** are treated as **on** (same as new defaults).
 
 ---
 
@@ -24,7 +25,7 @@ This plugin adds HPE Nimble Storage as a custom storage backend in Proxmox VE. I
 - **Snapshots and clones** – VM snapshots use array snapshots (create, delete, rollback). Clone from snapshot creates a new volume via the Nimble clone API and attaches ACL + optional volume collection.
 - **Backup / restore disk images** – `raw+size` import and export (v0.0.8+); MiB-rounded allocation.
 - **Automatic initiator and ACL** – Optional pre-created initiator group, or the plugin creates a group per node (`pve-<nodename>`) using the host IQN and grants access via access control records.
-- **Optional auto iSCSI discovery** – With `auto_iscsi_discovery 1`, discovery IPs from subnets (and fallbacks) drive `iscsiadm` on storage activation.
+- **Auto iSCSI discovery (default on)** – Discovery IPs from subnets (and fallbacks) drive `iscsiadm` on storage activation unless `auto_iscsi_discovery` is `no`/`0`.
 - **Volume collections (protection plans)** – Optional `volume_collection` for array-side schedules.
 - **Multipath** – By-id / WWN-aware discovery, multipathd add/remove, taint-safe external commands.
 
@@ -74,7 +75,7 @@ nimble: <storage_id>
   password <pass>
   content images
   volume_collection pve-daily
-  auto_iscsi_discovery 1
+  # auto_iscsi_discovery is on by default; add "auto_iscsi_discovery no" to disable
 ```
 
 Other options: `initiator_group`, `pool_name`, `vnprefix`, `check_ssl`, `token_ttl`, `debug`, `iscsi_discovery_ips`. See the [README](https://github.com/brngates98/pve-nimble-plugin#configuration) for details.
@@ -93,7 +94,7 @@ Other options: `initiator_group`, `pool_name`, `vnprefix`, `check_ssl`, `token_t
 
 ## Upgrading from v0.0.8
 
-No storage config changes are required.
+No storage config changes are required. If an existing Nimble storage entry has **no** `auto_iscsi_discovery` line, **activate-time iSCSI discovery now runs** when the storage is activated; set **`auto_iscsi_discovery no`** (or **`0`**) on that storage if you want the previous “off unless set” behavior.
 
 **v0.0.9+:** After **`apt upgrade`** or **`dpkg -i`**, the package **postinst** **try-restarts** `pve-cluster`, `pvedaemon`, `pvestatd`, `pveproxy`, and `pvescheduler` when systemd is active, so the new plugin file is picked up automatically. If a unit was stopped intentionally, **`try-restart`** leaves it stopped; start it manually if needed.
 
