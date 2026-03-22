@@ -19,7 +19,7 @@ use LWP::UserAgent ();
 use HTTP::Headers  ();
 use HTTP::Request  ();
 use URI::Escape qw( uri_escape );
-use File::Basename qw( basename );
+use File::Basename qw( basename dirname );
 use Time::HiRes qw( gettimeofday sleep );
 use Cwd qw( abs_path );
 
@@ -338,27 +338,90 @@ sub nimble_serial_matches {
   return 0;
 }
 
-# Find block device path by SCSI serial (e.g. from Nimble volume serial_number).
-# Unlike Pure (fixed prefix 3624a9370), Nimble has no fixed WWN prefix in this plugin;
-# we match the API serial_number against /sys/block/*/device/serial and by-id.
-# WWID for multipathd: prefer wwn-* / scsi-3* hex id (not only symlinks named wwn-).
+# Resolve a by-id symlink (or block node) to absolute block path; extract multipath WWID from link name.
+sub nimble_resolve_by_id_entry {
+  my ( $full, $entry_name ) = @_;
+  return ( '', '' ) unless defined $full && -e $full;
+  my $abs;
+  if ( -l $full ) {
+    my $t = readlink($full);
+    return ( '', '' ) unless defined $t;
+    $abs = abs_path( dirname($full) . '/' . $t );
+  }
+  elsif ( -b $full ) {
+    $abs = $full;
+  }
+  else {
+    return ( '', '' );
+  }
+  return ( '', '' ) unless $abs && -b $abs;
+  my $wwid = '';
+  if ( $entry_name =~ /^wwn-0x([0-9a-f]+)/i ) {
+    $wwid = lc($1);
+  }
+  elsif ( $entry_name =~ /^wwn-([0-9a-f]+)/i ) {
+    $wwid = lc($1);
+  }
+  elsif ( $entry_name =~ /^scsi-3([0-9a-f]+)/i ) {
+    $wwid = lc($1);
+  }
+  return ( $abs, $wwid );
+}
+
+# Find block device path by Nimble API serial_number.
+#
+# Pure Storage plugin does not read sysfs serial: it builds /dev/disk/by-id/wwn-0x... from API data and
+# waits for -e. Nimble exposes the volume serial as the NAA/WWN body; by-id names contain that hex string,
+# but multipath dm devices often have no /sys/block/dm-*/device/serial — so scanning sysfs only fails.
+#
+# Order: (1) deterministic by-id paths like Pure; (2) any by-id name containing the serial; (3) sysfs scan.
 sub get_device_path_by_serial {
   my ( $serial ) = @_;
   die 'Error :: Volume serial is missing' unless length( $serial );
-  my $path = '/dev/disk/by-id';
-  return ( '', '' ) unless -d $path;
-  opendir( my $dh, $path ) or return ( '', '' );
+  my $sn = nimble_serial_normalize($serial);
+  return ( '', '' ) unless length($sn);
+
+  my $by_id = '/dev/disk/by-id';
+  if ( -d $by_id && $sn =~ /^[0-9a-f]{8,}$/ ) {
+    for my $name ( "wwn-0x$sn", "wwn-$sn", "scsi-3$sn" ) {
+      my $full = "$by_id/$name";
+      next unless -e $full;
+      my ( $dev, $ww ) = nimble_resolve_by_id_entry( $full, $name );
+      return ( $dev, $ww ) if length($dev) && -b $dev;
+    }
+  }
+
+  if ( -d $by_id && length($sn) >= 8 ) {
+    opendir( my $dh, $by_id ) or goto SYSFS_SCAN;
+    my @hit = grep {
+      $_ !~ /^\.\.?$/ && $_ !~ /-part\d+\z/ && index( lc($_), $sn ) >= 0;
+    } readdir($dh);
+    closedir($dh);
+    @hit = sort {
+      my $pa = ( lc($a) =~ /^wwn-0x/ );
+      my $pb = ( lc($b) =~ /^wwn-0x/ );
+      ( $pb <=> $pa ) || ( length($a) <=> length($b) );
+    } @hit;
+    for my $e (@hit) {
+      my $full = "$by_id/$e";
+      my ( $dev, $ww ) = nimble_resolve_by_id_entry( $full, $e );
+      return ( $dev, $ww ) if length($dev) && -b $dev;
+    }
+  }
+
+SYSFS_SCAN:
+  opendir( my $dh2, $by_id ) or return ( '', '' );
   my $best_path = '';
   my $wwid      = '';
-  while ( my $e = readdir( $dh ) ) {
+  while ( my $e = readdir( $dh2 ) ) {
     next if $e =~ /^\.\.?$/;
-    my $full = "$path/$e";
+    my $full = "$by_id/$e";
     next unless -l $full;
-    my $target = readlink( $full );
+    my $target = readlink($full);
     next unless defined $target;
-    my $abs = Cwd::abs_path( "$path/$target" );
+    my $abs = abs_path( dirname($full) . '/' . $target );
     next unless $abs && -b $abs;
-    my $blk      = basename( $abs );
+    my $blk      = basename($abs);
     my $ser_path = "/sys/block/$blk/device/serial";
 
     if ( -f $ser_path ) {
@@ -380,7 +443,7 @@ sub get_device_path_by_serial {
       }
     }
   }
-  closedir( $dh );
+  closedir( $dh2 );
   return ( $best_path, $wwid );
 }
 
@@ -1535,6 +1598,7 @@ sub map_volume {
   };
   eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
   scsi_scan_new( 'iscsi' );
+  eval { exec_command( [ 'udevadm', 'settle', '--timeout=30' ] ); };
   my $wait_ticks = 0;
   wait_for(
     sub {
@@ -1586,6 +1650,7 @@ sub unmap_volume {
 
 sub activate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache ) = @_;
+  # Pure plugin: API volume_connection(create) before map — Nimble has no equivalent; ACL + host iSCSI only.
   $class->nimble_ensure_volume_acl_for_current_node( $scfg, $volname, $storeid );
   $class->map_volume( $storeid, $scfg, $volname, $snapname );
   return 1;

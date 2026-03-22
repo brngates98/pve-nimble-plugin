@@ -25,7 +25,7 @@
 | **Snapshots** | Implemented | Create, delete, rollback; Nimble snapshots API + volume restore; Veeam snapshot name normalization (`veeam_` → `veeam-`) |
 | **Clone from snapshot** | Implemented | Via POST volumes with clone=true, name, base_snap_id (then ACL + optional volume_collection) |
 | **Multipath** | Implemented | Same pattern as Pure: device by serial, multipathd add/remove map, block device actions |
-| **Device discovery** | Implemented | By SCSI serial from `/sys/block/*/device/serial` and `/dev/disk/by-id`; **normalized / substring match** API `serial_number` vs sysfs; no fixed Nimble WWN prefix (Pure uses 3624a9370). |
+| **Device discovery** | Implemented | **Pure-style first:** `/dev/disk/by-id/wwn-0x<api_serial>`, then any `by-id` name containing the API `serial_number` (needed for **multipath dm** — often no sysfs `device/serial`), then sysfs serial match. |
 | **Auto iSCSI discovery** | Implemented | Opt-in `auto_iscsi_discovery` on **activate_storage**. **`map_volume`** mirrors manual PVE iSCSI (portal + per-volume IQN + LUN 0): portal list = **`iscsiadm` session IPs first**, subnets (**GET subnets/:id**), **network_interfaces/:id**, `iscsi_discovery_ips`; sendtargets + per-target login; **`node.startup=automatic`** per target+portal; **`iscsiadm -m session --rescan`**; **90s** wait + periodic SCSI rescan; device by **serial**; `multipath -v2`. |
 | **Volume import/export** | Implemented | `raw+size` for backup/restore (e.g. Veeam V13+); size rounded up to full MB for odd-sector compatibility |
 | **Debian package** | Present | `libpve-storage-nimble-perl`, debian/*, scripts/build_deb.sh |
