@@ -129,6 +129,8 @@ sudo apt install libpve-storage-nimble-perl
 
 To upgrade when a new version is released: `sudo apt update && sudo apt upgrade libpve-storage-nimble-perl`.
 
+From **v0.0.9** onward, the package **postinst** **try-restarts** `pve-cluster`, `pvedaemon`, `pvestatd`, `pveproxy`, and `pvescheduler` after install/upgrade (via `deb-systemd-invoke` or `systemctl`) so the new `NimbleStoragePlugin.pm` is loaded without a manual restart. Older packages still need `systemctl restart pvedaemon pveproxy` (or equivalent) after upgrade.
+
 The repo is updated on each release; it contains the latest package only. Enable **GitHub Pages** in the repo (Settings → Pages → Source: **GitHub Actions**) so the release workflow can publish the APT repo.
 
 #### Option B: Download the package

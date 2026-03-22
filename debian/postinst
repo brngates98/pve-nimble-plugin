@@ -1,10 +1,28 @@
 #!/bin/bash
 set -e
 
-if [ "$1" = "configure" ]; then
-  systemctl try-restart pve-cluster.service || true
-  systemctl try-restart pvedaemon.service || true
-  systemctl try-restart pvestatd.service || true
-  systemctl try-restart pveproxy.service || true
-  systemctl try-restart pvescheduler.service || true
-fi
+# After fresh install or dpkg/apt upgrade, Proxmox must reload the custom storage plugin
+# (Perl loads NimbleStoragePlugin.pm at process start). Use deb-systemd-invoke when present
+# (Debian maintainer-script integration with systemd).
+restart_pve_stack() {
+  local cmd
+  if command -v deb-systemd-invoke >/dev/null 2>&1; then
+    cmd=(deb-systemd-invoke)
+  else
+    cmd=(systemctl)
+  fi
+  # Typical dependency order: cluster → API/stat → UI/scheduler
+  "${cmd[@]}" try-restart pve-cluster.service 2>/dev/null || true
+  "${cmd[@]}" try-restart pvedaemon.service 2>/dev/null || true
+  "${cmd[@]}" try-restart pvestatd.service 2>/dev/null || true
+  "${cmd[@]}" try-restart pveproxy.service 2>/dev/null || true
+  "${cmd[@]}" try-restart pvescheduler.service 2>/dev/null || true
+}
+
+case "$1" in
+  configure)
+    if [ -d /run/systemd/system ]; then
+      restart_pve_stack
+    fi
+    ;;
+esac
