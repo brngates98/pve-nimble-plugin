@@ -260,7 +260,7 @@ If you set **auto_iscsi_discovery 1** (or **yes**) on the storage:
 1. **When** the storage is activated on a node (e.g. after adding the storage or when the node first uses it), the plugin will:
 
    - **Ensure the initiator group exists** on the Nimble array (same logic as when creating volumes): if `initiator_group` is set in storage config, that group must exist; otherwise the plugin creates or finds a group named `pve-<nodename>` using this host's IQN from `/etc/iscsi/initiatorname.iscsi`. If this step fails (e.g. no IQN), auto discovery is skipped and a warning is logged.
-   - Call the Nimble REST API **GET v1/subnets** to obtain iSCSI discovery IPs (subnets with `allow_iscsi` or type containing `data`).
+   - Call **GET v1/subnets** and, when the list is summary-only, **GET v1/subnets/:id** for each row; use subnets whose **`type` contains `data`** and set **`discovery_ip`** as discovery portals (then fallbacks if none).
    - Run on this host: `iscsiadm -m discovery -t sendtargets -p <ip>` for each discovery IP, then set `node.startup` to `automatic`, then run `iscsiadm -m node --login`.
 
 2. **Requirements:** `open-iscsi` must be installed and an IQN must be set in `/etc/iscsi/initiatorname.iscsi`. The plugin does not install or configure the initiator; it ensures the initiator group on the array, then runs discovery and login.

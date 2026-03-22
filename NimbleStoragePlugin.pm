@@ -543,6 +543,30 @@ sub nimble_data_as_list {
   return [];
 }
 
+# GET subnets often returns summary rows ({ id, name } only). Full discovery_ip / type need GET subnets/:id.
+sub nimble_fetch_subnet_by_id {
+  my ( $scfg, $storeid, $subnet_id ) = @_;
+  return undef if !defined $subnet_id || $subnet_id eq '';
+  my $r = nimble_api_call( $scfg, 'GET', "subnets/$subnet_id", undef, $storeid );
+  my $d = $r->{ data };
+  return ref( $d ) eq 'HASH' ? $d : undef;
+}
+
+sub nimble_hydrate_subnet_summaries {
+  my ( $scfg, $storeid, $list ) = @_;
+  return unless ref( $list ) eq 'ARRAY';
+  for my $sub ( @$list ) {
+    next unless ref( $sub ) eq 'HASH';
+    my $id = $sub->{ id };
+    next if !$id;
+    my $dip = $sub->{ discovery_ip };
+    next if defined $dip && $dip ne '';
+    my $full = nimble_fetch_subnet_by_id( $scfg, $storeid, $id );
+    next unless $full && ref( $full ) eq 'HASH';
+    %$sub = ( %$sub, %$full );
+  }
+}
+
 sub nimble_parse_manual_discovery_ips {
   my ($scfg) = @_;
   my $s = $scfg->{ iscsi_discovery_ips };
@@ -582,6 +606,7 @@ sub get_nimble_iscsi_discovery_ips {
     my $res  = nimble_api_call( $scfg, 'GET', 'subnets', undef, $storeid );
     my $list = nimble_data_as_list( $res->{ data } );
     if (@$list) {
+      nimble_hydrate_subnet_summaries( $scfg, $storeid, $list );
       my %seen;
       my $collect = sub {
         my ( $strict ) = @_;
@@ -589,9 +614,8 @@ sub get_nimble_iscsi_discovery_ips {
         for my $sub ( @$list ) {
           next unless ref($sub) eq 'HASH';
           if ($strict) {
-            my $type  = $sub->{ type }   // '';
-            my $allow = $sub->{ allow_iscsi };
-            next unless $type =~ /data/i || ( $allow && $allow ne '0' && $allow ne '' );
+            my $type = $sub->{ type } // '';
+            next unless $type =~ /data/i;
           }
           my $ip = $sub->{ discovery_ip };
           next unless defined $ip && $ip =~ m/^\S+$/ && length($ip) <= 253 && !$seen{$ip}++;
@@ -1349,7 +1373,7 @@ sub activate_storage {
     } else {
       my @ips = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
       if ( !@ips ) {
-        warn "Warning :: No iSCSI discovery IPs returned by array for storage \"$storeid\"; skipping discovery. Check Nimble subnets (allow_iscsi or type data).\n";
+        warn "Warning :: No iSCSI discovery IPs returned by array for storage \"$storeid\"; skipping discovery. Check Nimble subnets (GET subnets + subnets/:id; type should include data for preferred portals).\n";
       } else {
         run_iscsi_discovery_and_login( $storeid, $scfg, \@ips );
       }
