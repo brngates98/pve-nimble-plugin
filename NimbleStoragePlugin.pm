@@ -424,7 +424,7 @@ sub nimble_untaint_iscsiadm_scalar {
   return '' unless defined $v && length $v;
   $v =~ s/^\s+|\s+$//g;
   return '' if $v eq '';
-  return $1 if $v =~ /^([A-Za-z0-9.\[\]:,_+-]+)$/ && length($1) <= 512;
+  return $1 if $v =~ /^([A-Za-z0-9.\[\]:,_=+-]+)$/ && length($1) <= 512;
   return '';
 }
 
@@ -1086,14 +1086,31 @@ sub nimble_iscsiadm_path {
   return -x $iscsiadm ? $iscsiadm : '/sbin/iscsiadm';
 }
 
-# True if an active session lists this target IQN (authoritative after login attempts).
+# True if an active session lists this target IQN. Uses run_command (no shell). After --login, the
+# session line can appear slightly later — $extra_tries is extra polls (0.5s apart) after the first miss.
 sub nimble_iscsi_target_in_sessions {
-  my ($target_iqn) = @_;
+  my ( $target_iqn, $extra_tries ) = @_;
   return 0 if !length($target_iqn);
+  $extra_tries //= 0;
   my $iscsiadm = nimble_iscsiadm_path();
   return 0 unless -x $iscsiadm;
-  my $out = `"$iscsiadm" -m session 2>/dev/null` // '';
-  return 1 if index( lc($out), lc($target_iqn) ) >= 0;
+  my $needle = lc($target_iqn);
+  $extra_tries = 0 if $extra_tries < 0;
+  my $attempts = 1 + $extra_tries;
+  for my $i ( 1 .. $attempts ) {
+    my $out = '';
+    eval {
+      run_command(
+        [ $iscsiadm, '-m', 'session' ],
+        outfunc => sub { $out .= shift; },
+        errfunc => sub { },
+        timeout => 15,
+        quiet   => 1
+      );
+    };
+    return 1 if length($out) && index( lc($out), $needle ) >= 0;
+    select( undef, undef, undef, 0.5 ) if $i < $attempts;
+  }
   return 0;
 }
 
@@ -1181,7 +1198,7 @@ sub nimble_iscsi_login_target_on_portals {
     }
     nimble_iscsi_node_set_startup_automatic( $iqn, $portal );
   }
-  if ( !nimble_iscsi_target_in_sessions($iqn) && !$suppress_no_session_warn ) {
+  if ( !nimble_iscsi_target_in_sessions( $iqn, 12 ) && !$suppress_no_session_warn ) {
     warn "Warning :: No active iSCSI session for volume target \"$iqn\" after portal logins; "
       . "check ACL on the array, routing/firewall from this host to data iSCSI portals (Nimble discovery_ip from subnets API), and open-iscsi.\n";
   }
@@ -1990,27 +2007,28 @@ sub map_volume {
     my @portals  = nimble_iscsi_merge_portal_list( $target_iqn, \@base_dip );
     if (@portals) {
       for my $round ( 1 .. 6 ) {
-        last if nimble_iscsi_target_in_sessions($target_iqn);
+        last if nimble_iscsi_target_in_sessions( $target_iqn, 6 );
         sleep(3) if $round > 1;
         @portals = nimble_iscsi_merge_portal_list( $target_iqn, \@base_dip );
         iscsi_sendtargets_on_ips( \@portals );
         @portals = nimble_iscsi_merge_portal_list( $target_iqn, \@base_dip );
         nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@portals, $round < 6 );
       }
-      if ( !nimble_iscsi_target_in_sessions($target_iqn) ) {
+      if ( !nimble_iscsi_target_in_sessions( $target_iqn, 6 ) ) {
         @portals = nimble_iscsi_merge_portal_list( $target_iqn, \@base_dip );
         nimble_iscsi_global_node_login( \@portals );
         sleep(2);
         @portals = nimble_iscsi_merge_portal_list( $target_iqn, \@base_dip );
         nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@portals, 1 );
       }
-      if ( !nimble_iscsi_target_in_sessions($target_iqn) ) {
+      if ( !nimble_iscsi_target_in_sessions( $target_iqn, 6 ) ) {
         my $adm = nimble_iscsiadm_path();
         if ( -x $adm ) {
-          eval { run_command( [ $adm, '-m', 'node', '-T', $target_iqn, '--login' ], timeout => 90, quiet => 1 ); };
+          my $ti = nimble_untaint_iscsiadm_scalar($target_iqn);
+          eval { run_command( [ $adm, '-m', 'node', '-T', $ti, '--login' ], timeout => 90, quiet => 1 ); } if length $ti;
         }
       }
-      if ( !nimble_iscsi_target_in_sessions($target_iqn) ) {
+      if ( !nimble_iscsi_target_in_sessions( $target_iqn, 12 ) ) {
         nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@portals, 0 );
       }
     }
@@ -2018,16 +2036,19 @@ sub map_volume {
       nimble_iscsi_login_target_on_all_recorded_portals($target_iqn);
       my $adm = nimble_iscsiadm_path();
       if ( -x $adm ) {
-        eval {
-          run_command(
-            [
-              $adm, '-m', 'node', '-T', $target_iqn,
-              '--op', 'update', '-n', 'node.startup', '-v', 'automatic',
-            ],
-            timeout => 10,
-            quiet   => 1
-          );
-        };
+        my $ti = nimble_untaint_iscsiadm_scalar($target_iqn);
+        if ( length $ti ) {
+          eval {
+            run_command(
+              [
+                $adm, '-m', 'node', '-T', $ti,
+                '--op', 'update', '-n', 'node.startup', '-v', 'automatic',
+              ],
+              timeout => 10,
+              quiet   => 1
+            );
+          };
+        }
       }
     }
   }
