@@ -1527,8 +1527,13 @@ sub nimble_ensure_volume_acl_for_current_node {
   return 1 unless $vol_id;
   my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
   return 1 if nimble_volume_has_acl_for_ig( $scfg, $vol_id, $ig_id, $storeid );
-  print "Info :: Volume \"$volname\" granted Nimble access (initiator group ACL).\n"
-    if nimble_post_access_control_record_idempotent( $scfg, $vol_id, $ig_id, $storeid );
+  if ( nimble_post_access_control_record_idempotent( $scfg, $vol_id, $ig_id, $storeid ) ) {
+    print "Info :: Volume \"$volname\" granted Nimble access (initiator group ACL).\n";
+    # Nimble propagates new ACLs to its iSCSI target asynchronously.  Without a pause, map_volume's
+    # first login attempts fire before the LUN is presented, producing spurious "no iSCSI session"
+    # warnings during live migration (the destination node always needs a fresh ACL).
+    sleep(3);
+  }
   return 1;
 }
 
