@@ -62,9 +62,10 @@ sub set_debug_from_config {
 
 ### Configuration
 sub api {
-  my $tested_apiver = 12;
-  my $apiver        = $PVE::Storage::APIVER;
-  my $apiage        = $PVE::Storage::APIAGE;
+  # PVE::Storage::APIVER / APIAGE are `use constant` (subs), not package scalars — do not use $PVE::Storage::APIVER.
+  my $tested_apiver = 13;
+  my $apiver        = PVE::Storage::APIVER;
+  my $apiage        = PVE::Storage::APIAGE;
   if ( $apiver >= 2 and $apiver <= $tested_apiver ) {
     return $apiver;
   }
@@ -91,14 +92,9 @@ sub properties {
       description => "HPE Nimble array management IP or DNS name.",
       type        => 'string'
     },
-    username => {
-      description => "Nimble API username.",
-      type        => 'string'
-    },
-    password => {
-      description => "Nimble API password.",
-      type        => 'string'
-    },
+    # Do not declare username/password here: PVE::SectionConfig registers property
+    # names globally (e.g. RBD defines username, CIFS defines password). Nimble only
+    # lists them in options() — same pattern as ESXi/PBS (see pve-storage).
     initiator_group => {
       description => "Initiator group name (optional). If unset, a group is created automatically using this host's iSCSI IQN.",
       type        => 'string'
