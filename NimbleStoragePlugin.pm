@@ -90,7 +90,9 @@ sub plugindata {
     # Sensitive: not written into storage.cfg by pvesm/API; on_add_hook / on_update_hook receive %param and write priv files.
     # (Standard PVE has no Datacenter GUI to add/edit custom storage types—use pvesm, cluster API, or manual files.)
     # Include legacy alias used by some configs / tooling.
-    'sensitive-properties' => { password => 1, nimble_password => 1 },
+    # Only `password` here — extra keys (e.g. nimble_password) must also appear in properties(),
+    # or PVE dies loading storage.cfg: "undefined property '…'" (SectionConfig.pm).
+    'sensitive-properties' => { password => 1 },
   };
 }
 
@@ -152,7 +154,6 @@ sub options {
     address   => { fixed => 1 },
     username  => { fixed => 1 },
     password  => { optional => 1 },
-    nimble_password => { optional => 1 },
     initiator_group => { optional => 1 },
 
     vnprefix  => { optional => 1 },
@@ -230,7 +231,7 @@ sub nimble_delete_password_file {
 
 sub on_add_hook {
   my ( $class, $storeid, $scfg, %sensitive ) = @_;
-  my $pw = $sensitive{ password } // $sensitive{ nimble_password };
+  my $pw = $sensitive{ password };
   die "missing password\n" if !defined($pw) || $pw eq '';
   nimble_set_password( $storeid, $pw );
   return;
@@ -238,8 +239,8 @@ sub on_add_hook {
 
 sub on_update_hook {
   my ( $class, $storeid, $scfg, %sensitive ) = @_;
-  return if !exists( $sensitive{ password } ) && !exists( $sensitive{ nimble_password } );
-  my $pw = $sensitive{ password } // $sensitive{ nimble_password };
+  return if !exists( $sensitive{ password } );
+  my $pw = $sensitive{ password };
   if ( defined($pw) && $pw ne '' ) {
     nimble_set_password( $storeid, $pw );
   }
@@ -262,7 +263,7 @@ sub nimble_api_credentials {
   my ( $scfg, $storeid ) = @_;
   my $user = $scfg->{ username } // $scfg->{ nimble_user };
   die "Error :: username not set\n" if !defined($user) || $user eq '';
-  my $pass = $scfg->{ password } // $scfg->{ nimble_password };
+  my $pass = $scfg->{ password };
   if ( !defined($pass) || $pass eq '' ) {
     $pass = nimble_read_password_file($storeid) if defined $storeid && $storeid ne '';
   }
