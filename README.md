@@ -425,6 +425,7 @@ If you encounter issues while using the plugin, consider the following steps.
 | **API connection / timeout / TLS errors**  | Check `address` (use `https://` and correct host or IP), firewall (port 5392), and `check_ssl` (set to 0 or omit if using self-signed certs). Test with the [API connectivity](#api-connectivity) curl example.               |
 | **Storage shows but VM disk create fails** | Enable debug (see below) and check token cache: `ls -la /etc/pve/priv/nimble/`.                                                                                                                                               |
 | **Multipath not used**                     | Ensure multipathd is running, `/etc/multipath.conf` has Nimble in `blacklist_exceptions` (and a `devices` block if needed), then `multipathd reconfigure`.                                                                    |
+| **pvedaemon won’t start: duplicate property `username` / `password`** | The plugin on disk is wrong or an old paste: those keys must **not** be in `properties()` (they clash with global PVE schema). They belong only in `options()`. Install the **full** `NimbleStoragePlugin.pm` from this repo or the package—do not merge by hand. Then `perl -c /usr/share/perl5/PVE/Storage/Custom/NimbleStoragePlugin.pm` and `systemctl restart pvedaemon pveproxy`. |
 
 ### Debug logging
 

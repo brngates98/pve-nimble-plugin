@@ -66,8 +66,10 @@ sub api {
   # PVE::Storage::APIVER / APIAGE are `use constant` (subs), not package scalars — do not use $PVE::Storage::APIVER.
   # Call with (); bareword form trips strict subs under perl 5.36+ (e.g. CI Docker bookworm).
   my $tested_apiver = 13;
-  my $apiver        = PVE::Storage::APIVER();
-  my $apiage        = PVE::Storage::APIAGE();
+  my $apiver        = eval { PVE::Storage::APIVER() };
+  my $apiage        = eval { PVE::Storage::APIAGE() };
+  $apiver = $tested_apiver if !defined($apiver) || $apiver !~ /^\d+$/;
+  $apiage = 0              if !defined($apiage) || $apiage !~ /^\d+$/;
   if ( $apiver >= 2 and $apiver <= $tested_apiver ) {
     return $apiver;
   }
