@@ -1086,23 +1086,6 @@ sub nimble_iscsiadm_path {
   return -x $iscsiadm ? $iscsiadm : '/sbin/iscsiadm';
 }
 
-# Stdout from `iscsiadm -m session -T <iqn>` (open-iscsi lists only that target when a session exists).
-# Exit status may be non-zero when there is no session; we only trust non-empty stdout with transport line.
-sub nimble_iscsi_session_stdout_for_targetname {
-  my ( $iscsiadm, $iqn ) = @_;
-  my $iqn_safe = nimble_untaint_iscsiadm_scalar($iqn);
-  return '' unless length $iqn_safe && -x $iscsiadm;
-  my $out = '';
-  eval {
-    open my $ph, '-|', $iscsiadm, '-m', 'session', '-T', $iqn_safe or die "open iscsiadm session -T";
-    local $/;
-    $out = <$ph> // '';
-    close $ph;
-  };
-  return '' if $@;
-  return $out;
-}
-
 sub nimble_iscsi_compact_lc {
   my ($s) = @_;
   return '' unless defined $s;
@@ -1111,8 +1094,9 @@ sub nimble_iscsi_compact_lc {
   return $t;
 }
 
-# True if an active session exists for this IQN. Prefer `session -T` (matches open-iscsi behavior on the
-# CLI); fall back to full `session` dump with whitespace stripped (avoids missing IQN if output wraps).
+# True if an active session exists for this IQN. Uses only `iscsiadm -m session` and matches the IQN in
+# output (compact + plain). Do not use `-m session -T <iqn>`: on common open-iscsi builds `-T`/`--targetname`
+# is for **node** mode, not session mode, and produces "option '-' is not allowed/supported" spam.
 # $extra_tries: extra polls (0.5s apart) after the first miss (post-login race).
 sub nimble_iscsi_target_in_sessions {
   my ( $target_iqn, $extra_tries ) = @_;
@@ -1126,11 +1110,6 @@ sub nimble_iscsi_target_in_sessions {
   $extra_tries = 0 if $extra_tries < 0;
   my $attempts = 1 + $extra_tries;
   for my $i ( 1 .. $attempts ) {
-    my $per_tgt = nimble_iscsi_session_stdout_for_targetname( $iscsiadm, $iqn_safe );
-    if ( length $per_tgt ) {
-      return 1 if $per_tgt =~ /\b(tcp|iser)\s*:/i;
-      return 1 if index( nimble_iscsi_compact_lc($per_tgt), $needle_compact ) >= 0;
-    }
     my $out = '';
     eval {
       run_command(
