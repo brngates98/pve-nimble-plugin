@@ -626,14 +626,40 @@ sub nimble_ensure_initiator_group_id {
   return $id;
 }
 
+# True if Nimble reports this ACL already exists (HTTP 409 / SM_eexist, etc.).
+sub nimble_acr_error_is_duplicate {
+  my ($err) = @_;
+  return 0 if !defined $err;
+  my $e = "$err";
+  return $e =~ /SM_eexist|SM_http_conflict|Object exists|\b409\b|already exists|due to a conflict/i;
+}
+
+# POST access_control_records; treat "already exists" as success (idempotent).
+# Returns 1 if a new record was created, 0 if the array reported duplicate / conflict.
+sub nimble_post_access_control_record_idempotent {
+  my ( $scfg, $vol_id, $ig_id, $storeid ) = @_;
+  eval {
+    nimble_api_call( $scfg, 'POST', 'access_control_records', { vol_id => $vol_id, initiator_group_id => $ig_id }, $storeid );
+  };
+  if ( my $err = $@ ) {
+    return 0 if nimble_acr_error_is_duplicate($err);
+    die $err;
+  }
+  return 1;
+}
+
 # Check if volume already has an access_control_record for the given initiator group.
 sub nimble_volume_has_acl_for_ig {
   my ( $scfg, $vol_id, $ig_id, $storeid ) = @_;
+  return 0 if !defined $vol_id || !defined $ig_id;
   my $r    = nimble_api_call( $scfg, 'GET', 'access_control_records', undef, $storeid );
   my $list = nimble_data_as_list( $r->{ data } );
   for my $acr ( @$list ) {
     next unless ref($acr) eq 'HASH';
-    return 1 if ( "$acr->{ vol_id }" eq "$vol_id" && "$acr->{ initiator_group_id }" eq "$ig_id" );
+    my $a_vid = $acr->{ vol_id };
+    my $a_ig  = $acr->{ initiator_group_id };
+    next unless defined $a_vid && defined $a_ig;
+    return 1 if "$a_vid" eq "$vol_id" && "$a_ig" eq "$ig_id";
   }
   return 0;
 }
@@ -648,16 +674,8 @@ sub nimble_ensure_volume_acl_for_current_node {
   my $ig_id = eval { nimble_ensure_initiator_group_id( $scfg, $storeid ) };
   return 1 unless $ig_id;
   return 1 if nimble_volume_has_acl_for_ig( $scfg, $vol_id, $ig_id, $storeid );
-  eval {
-    nimble_api_call( $scfg, 'POST', 'access_control_records', { vol_id => $vol_id, initiator_group_id => $ig_id }, $storeid );
-  };
-  if ( my $err = $@ ) {
-    if ( $err =~ /already exists|duplicate|already has access/i ) {
-      return 1;
-    }
-    die $err;
-  }
-  print "Info :: Volume \"$volname\" granted access to this host's initiator group (for migration).\n";
+  print "Info :: Volume \"$volname\" granted access to this host's initiator group (for migration).\n"
+    if nimble_post_access_control_record_idempotent( $scfg, $vol_id, $ig_id, $storeid );
   return 1;
 }
 
@@ -751,7 +769,7 @@ sub nimble_create_volume {
   my $serial = $vol->{ serial_number } or die "Error :: No serial_number in create response\n";
   print "Info :: Volume \"$volname\" created (serial=$serial).\n";
   my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
-  nimble_api_call( $scfg, 'POST', 'access_control_records', { vol_id => $vol->{ id }, initiator_group_id => $ig_id }, $storeid );
+  nimble_post_access_control_record_idempotent( $scfg, $vol->{ id }, $ig_id, $storeid );
   if ( $scfg->{ volume_collection } ) {
     my $volcoll_id = nimble_get_volume_collection_id( $scfg, $scfg->{ volume_collection }, $storeid );
     if ( $volcoll_id ) {
@@ -858,7 +876,7 @@ sub nimble_clone_from_snapshot {
   my $vol = $r->{ data } || $r;
   my $vol_id = $vol->{ id } or die "Error :: Clone did not return volume id.\n";
   my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
-  nimble_api_call( $scfg, 'POST', 'access_control_records', { vol_id => $vol_id, initiator_group_id => $ig_id }, $storeid );
+  nimble_post_access_control_record_idempotent( $scfg, $vol_id, $ig_id, $storeid );
   if ( $scfg->{ volume_collection } ) {
     my $volcoll_id = nimble_get_volume_collection_id( $scfg, $scfg->{ volume_collection }, $storeid );
     if ( $volcoll_id ) {
