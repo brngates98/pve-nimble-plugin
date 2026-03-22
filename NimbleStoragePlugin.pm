@@ -357,8 +357,8 @@ sub nimble_untaint_multipath_wwid {
   return '';
 }
 
-# multipath -l / multipathd use the WWID from dm-uuid-mpath-* (e.g. 2aedb...), not always the 32-char NAA
-# body alone. wwn-0xaedb... (32 hex) maps to mpath id 2aedb... per Linux scsi_id / multipath convention.
+# multipath -l / multipathd WWID often matches dm-uuid-mpath-* / scsi-* with a leading type nibble (e.g. 2)
+# before the 32-hex NAA; wwn-0x<32 hex> may omit that leading digit — see nimble_multipath_wwid_from_by_id_basename.
 sub nimble_multipath_wwid_from_by_id_basename {
   my ($entry_name) = @_;
   return '' unless defined $entry_name && length $entry_name;
