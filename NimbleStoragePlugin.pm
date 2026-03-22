@@ -140,7 +140,7 @@ sub properties {
       default     => 'yes'
     },
     iscsi_discovery_ips => {
-      description => "Comma-separated iSCSI discovery addresses (IP or hostname, optional :port). Merged with GET subnets; use when subnets returns no discovery_ip or list is wrapped differently on your firmware.",
+      description => "Optional extra iSCSI discovery portals (comma-separated; host or host:port). Merged after Nimble GET subnets + GET subnets/:id (authoritative). Use for additional paths or non-standard layouts.",
       type        => 'string',
     },
     storeid => {
@@ -811,7 +811,8 @@ sub nimble_data_as_list {
   return [];
 }
 
-# GET subnets often returns summary rows ({ id, name } only). Full discovery_ip / type need GET subnets/:id.
+# GET subnets/:id returns full subnet (type, discovery_ip, etc.). Always merge into list rows so discovery
+# uses the same fields the API documents—no reliance on list view being summary or full.
 sub nimble_fetch_subnet_by_id {
   my ( $scfg, $storeid, $subnet_id ) = @_;
   return undef if !defined $subnet_id || $subnet_id eq '';
@@ -827,9 +828,7 @@ sub nimble_hydrate_subnet_summaries {
     next unless ref( $sub ) eq 'HASH';
     my $id = $sub->{ id };
     next if !$id;
-    my $dip = $sub->{ discovery_ip };
-    next if defined $dip && $dip ne '';
-    my $full = nimble_fetch_subnet_by_id( $scfg, $storeid, $id );
+    my $full = eval { nimble_fetch_subnet_by_id( $scfg, $storeid, $id ) };
     next unless $full && ref( $full ) eq 'HASH';
     %$sub = ( %$sub, %$full );
   }
@@ -874,8 +873,8 @@ sub nimble_parse_manual_discovery_ips {
   return @out;
 }
 
-# When subnets API yields nothing, reuse host IPs from active iSCSI sessions (same portals you already use for Nimble).
-# Mirrors the Pure plugin model: the host is expected to already have array connectivity; Pure achieves LUN visibility via API "connections" instead.
+# Last-resort supplement only: IPs from existing tcp sessions on this host. Subnets API order is authoritative
+# in get_nimble_iscsi_discovery_ips (API first, then this). Not a substitute for GET subnets + subnets/:id.
 sub get_iscsi_discovery_ips_from_running_sessions {
   my @ips;
   my %seen;
@@ -890,10 +889,10 @@ sub get_iscsi_discovery_ips_from_running_sessions {
   return @ips;
 }
 
-### Discovery IPs: GET subnets (unwrap items), then optional iscsi_discovery_ips from storage config.
+### Discovery IPs: GET subnets, GET subnets/:id per row (authoritative), optional iscsi_discovery_ips, then session supplement.
 sub get_nimble_iscsi_discovery_ips {
   my ( $scfg, $storeid ) = @_;
-  my @session_first = get_iscsi_discovery_ips_from_running_sessions();
+  my @session_supplement = get_iscsi_discovery_ips_from_running_sessions();
   my @ips;
   eval {
     my $res  = nimble_api_call( $scfg, 'GET', 'subnets', undef, $storeid );
@@ -911,7 +910,10 @@ sub get_nimble_iscsi_discovery_ips {
             next unless $type =~ /data/i;
           }
           my $ip = $sub->{ discovery_ip };
-          next unless defined $ip && $ip =~ m/^\S+$/ && length($ip) <= 253 && !$seen{$ip}++;
+          next unless defined $ip;
+          $ip =~ s/^\s+|\s+$//g;
+          next if $ip eq '';
+          next unless $ip =~ m/^\S+$/ && length($ip) <= 253 && !$seen{$ip}++;
           push @out, $ip;
         }
         return @out;
@@ -969,15 +971,19 @@ sub get_nimble_iscsi_discovery_ips {
   for my $m ( nimble_parse_manual_discovery_ips($scfg) ) {
     push @ips, $m if !$seen_ip{$m}++;
   }
-  my $from_config = @ips;
+  my $from_api_or_manual = @ips;
   my %seen_ord;
   my @merged;
-  for my $p ( @session_first, @ips ) {
+  for my $p ( @ips ) {
     next unless defined $p && $p =~ m/^\S+$/ && length($p) <= 253;
     push @merged, $p if !$seen_ord{$p}++;
   }
-  if ( !$from_config && @session_first ) {
-    print "Info :: Using iSCSI portal IP(s) from existing sessions (subnets API returned none): @merged\n";
+  for my $p ( @session_supplement ) {
+    next unless defined $p && $p =~ m/^\S+$/ && length($p) <= 253;
+    push @merged, $p if !$seen_ord{$p}++;
+  }
+  if ( $DEBUG >= 1 && !$from_api_or_manual && @session_supplement ) {
+    print "Debug :: No discovery IPs from subnets/API fallbacks; using active session portal IP(s): @merged\n";
   }
   return @merged;
 }
@@ -1157,7 +1163,7 @@ sub nimble_iscsi_login_target_on_portals {
   }
   if ( !nimble_iscsi_target_in_sessions($target_iqn) && !$suppress_no_session_warn ) {
     warn "Warning :: No active iSCSI session for volume target \"$target_iqn\" after portal logins; "
-      . "check ACL, paths, and discovery_ip / iscsi_discovery_ips.\n";
+      . "check ACL on the array, routing/firewall from this host to data iSCSI portals (Nimble discovery_ip from subnets API), and open-iscsi.\n";
   }
 }
 
@@ -1919,7 +1925,7 @@ sub activate_storage {
     } else {
       my @ips = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
       if ( !@ips ) {
-        warn "Warning :: No iSCSI discovery IPs returned by array for storage \"$storeid\"; skipping discovery. Check Nimble subnets (GET subnets + subnets/:id; type should include data for preferred portals).\n";
+        warn "Warning :: No iSCSI discovery portals from Nimble API for storage \"$storeid\" (GET v1/subnets plus GET v1/subnets/:id per subnet; prefer subnets whose type includes data and discovery_ip is set). Skipping discovery. Check HTTPS/API access from this host and subnet configuration on the array.\n";
       } else {
         run_iscsi_discovery_and_login( $storeid, $scfg, \@ips );
       }
@@ -1951,8 +1957,7 @@ sub map_volume {
   my $target_iqn  = $volume->{ target_name } // '';
   my @dip = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
   if ( !@dip ) {
-    warn "Warning :: No iSCSI discovery IPs (Nimble subnets API, iscsi_discovery_ips, or active sessions) for storage \"$storeid\"; "
-      . "set iscsi_discovery_ips or ensure iscsiadm sessions exist to this array.\n";
+    warn "Warning :: No iSCSI discovery portals for storage \"$storeid\" after Nimble API resolution (GET v1/subnets + GET v1/subnets/:id per subnet, then optional fallbacks). Check API connectivity from this host and data subnets with discovery_ip; optional iscsi_discovery_ips only adds extra portals.\n";
   }
   # Per-volume IQN on every portal: merge Nimble/API IPs with open-iscsi node.portal records (multipath).
   # Retry + global node --login fallback (same as activate_storage) for cold migration targets.

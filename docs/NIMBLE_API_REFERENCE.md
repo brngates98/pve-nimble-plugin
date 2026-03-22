@@ -130,7 +130,7 @@ Other sets in full docs: active_directory_memberships, alarms, application_serve
 
 ## 9.1 Networking (management and iSCSI discovery IPs)
 
-These endpoints are not used by the plugin today but are useful for automation (e.g. auto iSCSI discovery) or for displaying management vs discovery IPs.
+The plugin uses **subnets** (and optional **network_interfaces** fallback) to build iSCSI discovery portal lists. **network_interfaces** is also useful for displaying management vs data IPs.
 
 **GET v1/network_interfaces** and **GET v1/network_interfaces/:id**
 
@@ -141,9 +141,9 @@ These endpoints are not used by the plugin today but are useful for automation (
 
 **GET v1/subnets** and **GET v1/subnets/:id**
 
-- **List response (data):** May be **summary rows** (`id`, `name` only) on some firmware; use **GET v1/subnets/:id** for full fields.
+- **List response (data):** May be **summary rows** (`id`, `name` only); the plugin always merges **GET v1/subnets/:id** for each listed subnet so **`discovery_ip`** and **`type`** come from the documented object shape.
 - **Key fields:** `id`, `name`, **`type`** (e.g. `'mgmt'`, `'data'`, `'mgmt,data'`), **`discovery_ip`** (address used for iSCSI discovery on this subnet), **`allow_iscsi`**, `network`, `netmask`, `vlan_id`, `mtu`, `failover`, `netzone_type`, `creation_time`, `last_modified`.
-- For **iSCSI discovery IPs:** GET subnets (and **GET subnets/:id** if the list lacks `discovery_ip`); use each subnet’s **`discovery_ip`** where **`type` contains `data`** (e.g. `mgmt,data`) for `iscsiadm -m discovery -t sendtargets -p <discovery_ip>`. The plugin’s **fallback** pass uses any subnet that has a `discovery_ip` if none match `type` ~ data.
+- For **iSCSI discovery IPs:** Prefer each subnet’s **`discovery_ip`** where **`type` contains `data`** for `iscsiadm -m discovery -t sendtargets -p <discovery_ip>`. If none match, use any subnet with a non-empty **`discovery_ip`**.
 - For **management:** The management IP is the one you already use for the API (the `address` in storage config). To list it from the API, use subnets with `type` containing `'mgmt'` (and use the subnet’s `discovery_ip` or similar, if documented) or use **network_interfaces** and pick the interface whose `nic_type` indicates management.
 - **Normal response:** 200.
 
@@ -151,13 +151,13 @@ These endpoints are not used by the plugin today but are useful for automation (
 
 | Goal | API call | Use |
 |------|----------|-----|
-| iSCSI discovery IPs | GET v1/subnets, GET v1/subnets/:id | Prefer `type` containing `data` + `discovery_ip`; list may need per-id GET for full fields. |
+| iSCSI discovery IPs | GET v1/subnets, GET v1/subnets/:id | Plugin merges **GET subnets/:id** for every subnet row, then prefers `type` containing `data` + `discovery_ip`. |
 | All interface IPs (mgmt + data) | GET v1/network_interfaces | Use `ip_list` and `nic_type` per interface to show management vs discovery/data. |
 | Management IP | Already known | It’s the `address` you use for the API. Optionally confirm via subnets (type mgmt) or network_interfaces. |
 
 ---
 
-**Plugin use:** When **`auto_iscsi_discovery`** is not disabled (default **on**; **`no`**/**`0`** turns off activate-time discovery only), and for portal lists used during volume map, the plugin calls **GET v1/subnets**, **GET v1/subnets/:id** for any row missing `discovery_ip`, then prefers subnets whose **`type` contains `data`** with a non-empty **`discovery_ip`**. If that yields none, it falls back to any subnet with `discovery_ip`, then **network_interfaces**, manual **iscsi_discovery_ips**, and **iscsiadm** session IPs.
+**Plugin use:** For **`activate_storage`** (unless **`auto_iscsi_discovery`** is **`no`**/**`0`**) and for **`map_volume`**, discovery portals are built from **GET v1/subnets**, then **GET v1/subnets/:id** for **each** subnet (merged into the list row), then **`discovery_ip`** values are collected—first subnets whose **`type` contains `data`**, then any subnet with **`discovery_ip`**. If still empty: **GET network_interfaces** (+ **:id** when needed), optional **`iscsi_discovery_ips`** from storage config, and finally IPs parsed from existing **tcp** `iscsiadm` sessions on the host (last resort, appended after API-derived portals).
 
 ## 10. Plugin-relevant endpoints summary
 

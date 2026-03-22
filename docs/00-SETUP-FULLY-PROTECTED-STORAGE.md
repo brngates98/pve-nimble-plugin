@@ -215,11 +215,11 @@ devices {
 
 ## 6. iSCSI discovery
 
-You can do discovery **manually** once per node, or let the plugin do it when you add storage (**auto discovery**).
+**Default:** The plugin reads discovery portals from the Nimble REST API (**GET v1/subnets** and **GET v1/subnets/:id** for each subnet) and runs **`iscsiadm` discovery/login** for you on activate and when mapping disks—no need to pre-discover by hand.
 
-**Option A – Manual (once per node)**
+**Option A – Manual (optional, legacy / special cases only)**
 
-Run on each node (use each Nimble iSCSI discovery IP):
+If you turned off plugin discovery, run on each node (use each Nimble iSCSI discovery IP):
 
 ```bash
 sudo iscsiadm -m discovery -t sendtargets -p <NIMBLE_DISCOVERY_IP_1>

@@ -41,7 +41,7 @@ This plugin adds HPE Nimble Storage as a custom storage backend in Proxmox VE. I
 | **Clone from snapshot** | New volume from snapshot (POST volumes with clone=true); then ACL + optional volume_collection |
 | **Import / export** | `raw+size` format for disk backup/restore (v0.0.8+); MiB-rounded allocation |
 | **Multipath** | By-id + WWID forms; multipathd add/remove; safe under Perl `-T` |
-| **Auto iSCSI discovery** | Subnets (+ per-id), network interfaces (+ per-id), session IPs, optional `iscsi_discovery_ips` |
+| **Auto iSCSI discovery** | GET subnets + **GET subnets/:id for every subnet** (authoritative portals), then optional fallbacks, optional `iscsi_discovery_ips`, session IPs last |
 | **Token cache** | Session token cached under `/etc/pve/priv/nimble/<storeid>.json` (cluster-safe) |
 | **VM migration** | Ensure-ACL on activate + robust device wait; works for live migration and move disk |
 | **APT upgrade** | postinst try-restarts core PVE services (v0.0.9+) |
