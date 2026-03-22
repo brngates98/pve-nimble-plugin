@@ -553,6 +553,22 @@ sub nimble_parse_manual_discovery_ips {
   return @out;
 }
 
+# When subnets API yields nothing, reuse host IPs from active iSCSI sessions (same portals you already use for Nimble).
+# Mirrors the Pure plugin model: the host is expected to already have array connectivity; Pure achieves LUN visibility via API "connections" instead.
+sub get_iscsi_discovery_ips_from_running_sessions {
+  my @ips;
+  my %seen;
+  my $iscsiadm = '/usr/sbin/iscsiadm';
+  $iscsiadm = '/sbin/iscsiadm' if !-x $iscsiadm;
+  return () unless -x $iscsiadm;
+  my $out = `"$iscsiadm" -m session 2>/dev/null` // '';
+  while ( $out =~ /^\s*tcp:\s*\[\d+\]\s+(\d{1,3}(?:\.\d{1,3}){3}):(\d+)/gm ) {
+    my $host = $1;
+    push @ips, $host if !$seen{$host}++;
+  }
+  return @ips;
+}
+
 ### Discovery IPs: GET subnets (unwrap items), then optional iscsi_discovery_ips from storage config.
 sub get_nimble_iscsi_discovery_ips {
   my ( $scfg, $storeid ) = @_;
@@ -594,6 +610,12 @@ sub get_nimble_iscsi_discovery_ips {
   for my $m ( nimble_parse_manual_discovery_ips($scfg) ) {
     push @ips, $m if !$seen_ip{$m}++;
   }
+  if ( !@ips ) {
+    for my $h ( get_iscsi_discovery_ips_from_running_sessions() ) {
+      push @ips, $h if !$seen_ip{$h}++;
+    }
+    print "Info :: Using iSCSI portal IP(s) from existing sessions (subnets API returned none): @ips\n" if @ips;
+  }
   return @ips;
 }
 
@@ -601,6 +623,16 @@ sub nimble_iscsi_portal {
   my ($ip) = @_;
   return $ip if $ip =~ /:\d+$/;
   return "$ip:3260";
+}
+
+# Login to target on all node records (open-iscsi), when portals are unknown but discovery already ran elsewhere.
+sub nimble_iscsi_login_target_on_all_recorded_portals {
+  my ($target_iqn) = @_;
+  return unless length($target_iqn) && $target_iqn =~ m/^iqn\./i;
+  my $iscsiadm = '/usr/sbin/iscsiadm';
+  $iscsiadm = '/sbin/iscsiadm' if !-x $iscsiadm;
+  return unless -x $iscsiadm;
+  eval { run_command( [ $iscsiadm, '-m', 'node', '-T', $target_iqn, '--login' ], timeout => 90 ); };
 }
 
 # Nimble volume-scoped targets (per-LUN IQN in target_name) need discovery + explicit login on each portal.
@@ -1278,15 +1310,20 @@ sub map_volume {
   die "Error :: Volume \"$volname\" not found (cannot map).\n" unless $volume && $volume->{ serial };
   my $serial      = $volume->{ serial };
   my $target_iqn  = $volume->{ target_name } // '';
-  my @dip         = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
+  my @dip = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
   if ( !@dip ) {
-    warn "Warning :: No iSCSI discovery IPs from Nimble subnets API for storage \"$storeid\"; "
-      . "volume mapping may fail until subnets expose discovery_ip (data/allow_iscsi) or you run discovery manually.\n";
+    warn "Warning :: No iSCSI discovery IPs (Nimble subnets API, iscsi_discovery_ips, or active sessions) for storage \"$storeid\"; "
+      . "set iscsi_discovery_ips or ensure iscsiadm sessions exist to this array.\n";
   }
-  # Group targets + all nodes, then per-volume IQN (target_name) on each portal — required for Nimble volume targets.
+  # Pure Storage uses API volume->host "connections" before map; Nimble uses ACL + host iscsi. We discover/login here.
   run_iscsi_discovery_and_login( $storeid, $scfg, \@dip ) if @dip;
   if ( length($target_iqn) ) {
-    nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@dip ) if @dip;
+    if (@dip) {
+      nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@dip );
+    }
+    else {
+      nimble_iscsi_login_target_on_all_recorded_portals($target_iqn);
+    }
   }
   else {
     warn "Warning :: Volume \"$volname\" has no target_name (iSCSI IQN) from Nimble API; "
