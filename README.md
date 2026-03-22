@@ -585,7 +585,7 @@ This plugin is based on the [pve-purestorage-plugin](https://github.com/kolesa-t
 
 - **Auth:** Nimble uses username/password → `POST /v1/tokens` → `X-Auth-Token`; Pure uses API token → login → `x-auth-token`.
 - **Volumes:** Nimble uses `POST/GET/DELETE/PUT /v1/volumes` (size in MB); Pure uses its own volume and connection APIs.
-- **ACL:** Nimble uses initiator groups + `access_control_records` (vol_id + initiator_group_id); Pure uses host/volume connections.
+- **ACL / connect–disconnect:** Same call order as Pure: **`nimble_volume_connection(1)`** before map, **`nimble_volume_connection(0)`** after unmap on deactivate, and remove **all** ACLs for the volume in **`nimble_remove_volume`** before destroy. The Nimble API uses `access_control_records` (vol + initiator group) instead of Pure’s host/volume connections; disconnect removes the ACL for **this storage’s** resolved initiator group (see `nimble_resolve_initiator_group_id_no_create`).
 - **Snapshots:** Nimble `POST /v1/snapshots` (vol_id, name); Pure uses volume-snapshots and suffix naming.
 
 ## Project context (contributors / AI)

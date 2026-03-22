@@ -244,7 +244,16 @@ sub nimble_api_credentials {
   die "Error :: username not set\n" if !defined($user) || $user eq '';
   my $pass = $scfg->{ password } // $scfg->{ nimble_password };
   if ( !defined($pass) || $pass eq '' ) {
-    $pass = nimble_read_password_file($storeid) if defined $storeid;
+    $pass = nimble_read_password_file($storeid) if defined $storeid && $storeid ne '';
+  }
+  # Some PVE workers pass a redacted $scfg (no password) but include the storage id under another key.
+  if ( (!defined($pass) || $pass eq '') && ref($scfg) eq 'HASH' ) {
+    for my $k (qw( storage storagename )) {
+      my $sid = $scfg->{ $k };
+      next unless defined $sid && $sid ne '';
+      $pass = nimble_read_password_file($sid);
+      last if defined $pass && $pass ne '';
+    }
   }
   die "Error :: password not set (use pvesm --password or password file)\n" if !defined($pass) || $pass eq '';
   return ( $user, $pass );
@@ -546,6 +555,67 @@ sub nimble_multipath_active_wwid {
     return $w if $out ne '';
   }
   return '';
+}
+
+# Same as PureStoragePlugin: remove LVM/partition DM stacks above a multipath map before array-side delete.
+sub cleanup_lvm_on_device {
+  my ($wwid) = @_;
+  return 0 if !length($wwid);
+  my $qww = quotemeta($wwid);
+  my @dm_devices;
+  eval {
+    run_command(
+      [ get_command_path('dmsetup'), 'ls' ],
+      outfunc => sub {
+        my $line = shift;
+        if ( $line =~ /^(\S+)\s+\(/ ) {
+          push @dm_devices, $1;
+        }
+      }
+    );
+  };
+  return 0 if $@;
+  my @lvm_to_remove;
+  for my $dm (@dm_devices) {
+    next if $dm =~ /^${qww}(-part\d+)?$/;
+    my $deps = '';
+    eval {
+      run_command(
+        [ get_command_path('dmsetup'), 'deps', '-o', 'devname', $dm ],
+        outfunc => sub { $deps .= shift; },
+        errfunc => sub { }
+      );
+    };
+    push @lvm_to_remove, $dm if $deps =~ /$qww/;
+  }
+  my $cleaned = 0;
+  for my $lvm ( reverse sort @lvm_to_remove ) {
+    my $removed = 0;
+    eval { run_command( [ get_command_path('dmsetup'), 'remove', $lvm ], errfunc => sub { } ); $removed = 1; };
+    if ( !$removed ) {
+      eval { run_command( [ get_command_path('dmsetup'), 'remove', '--force', $lvm ], errfunc => sub { } ); $removed = 1; };
+    }
+    $cleaned++ if $removed;
+    warn "Warning :: Failed to remove LVM device $lvm\n" unless $removed;
+  }
+  return $cleaned;
+}
+
+sub cleanup_partitions_on_device {
+  my ($wwid) = @_;
+  return 0 if !length($wwid);
+  my $qww = quotemeta($wwid);
+  my $cleaned = 0;
+  my $dm_path = '/dev/mapper/' . $wwid;
+  eval { run_command( [ get_command_path('kpartx'), '-d', $dm_path ], errfunc => sub { } ); $cleaned++; };
+  opendir( my $dh, '/dev/mapper' ) or return $cleaned;
+  my @partitions = grep { /^${qww}-part\d+$/ } readdir($dh);
+  closedir($dh);
+  for my $part ( reverse sort @partitions ) {
+    eval { run_command( [ get_command_path('dmsetup'), 'remove', '--force', $part ], errfunc => sub { } ); $cleaned++; };
+    warn "Warning :: Failed to remove partition $part\n" if $@;
+  }
+  return $cleaned;
 }
 
 sub wait_for {
@@ -1115,7 +1185,32 @@ sub nimble_get_initiator_group_id {
   die "Error :: Initiator group \"$name\" not found on Nimble array.\n";
 }
 
-# Resolve initiator group ID: use config name if set, else reuse existing group containing this IQN, else pve-<nodename>.
+# Resolve initiator group ID without POST (for disconnect / deactivate). Returns undef if none exists yet.
+sub nimble_resolve_initiator_group_id_no_create {
+  my ( $scfg, $storeid ) = @_;
+  my $ig_name = $scfg->{ initiator_group };
+  if ( defined $ig_name && $ig_name ne '' ) {
+    my $id = eval { nimble_get_initiator_group_id( $scfg, $ig_name, $storeid ) };
+    return $id if defined $id && $id ne '' && !$@;
+    return undef;
+  }
+  my $iqn = nimble_get_local_iscsi_iqn();
+  return undef unless $iqn;
+  my $reuse = nimble_find_initiator_group_id_for_local_iqn( $scfg, $iqn, $storeid );
+  return $reuse if $reuse;
+  my $nodename = PVE::INotify::nodename();
+  my $want = "pve-$nodename";
+  my $enc  = uri_escape($want);
+  my $r    = eval { nimble_api_call( $scfg, 'GET', "initiator_groups?name=$enc", undef, $storeid ) };
+  return undef unless $r;
+  my $list = nimble_data_as_list( $r->{ data } );
+  for my $g ( @$list ) {
+    return $g->{ id } if ref($g) eq 'HASH' && ( $g->{ name } // '' ) eq $want;
+  }
+  return undef;
+}
+
+# Resolve initiator group ID: use config name if set, else reuse existing group containing this IQN, else pve-<nodename> (create if missing).
 sub nimble_ensure_initiator_group_id {
   my ( $scfg, $storeid ) = @_;
   my $ig_name = $scfg->{ initiator_group };
@@ -1125,8 +1220,8 @@ sub nimble_ensure_initiator_group_id {
   my $iqn = nimble_get_local_iscsi_iqn();
   die "Error :: initiator_group not set and could not read a valid IQN from /etc/iscsi/initiatorname.iscsi (install open-iscsi; need an uncommented line InitiatorName=iqn...., or set initiator_group to an existing Nimble group).\n"
     unless $iqn;
-  my $reuse = nimble_find_initiator_group_id_for_local_iqn( $scfg, $iqn, $storeid );
-  return $reuse if $reuse;
+  my $existing = nimble_resolve_initiator_group_id_no_create( $scfg, $storeid );
+  return $existing if $existing;
   my $nodename = PVE::INotify::nodename();
   $ig_name = "pve-$nodename";
   my $enc  = uri_escape( $ig_name );
@@ -1184,6 +1279,28 @@ sub nimble_volume_has_acl_for_ig {
     return 1 if "$a_vid" eq "$vol_id" && "$a_ig" eq "$ig_id";
   }
   return 0;
+}
+
+# Parallel to PureStoragePlugin::purestorage_volume_connection: $mode true = connect (POST), false = disconnect (DELETE).
+# Nimble maps host access via access_control_records for this storage's initiator group (same ig as activate).
+sub nimble_volume_connection {
+  my ( $class, $storeid, $scfg, $volname, $mode ) = @_;
+  if ($mode) {
+    return $class->nimble_ensure_volume_acl_for_current_node( $scfg, $volname, $storeid );
+  }
+  my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
+  return 1 unless $vol_id;
+  my $ig_id = nimble_resolve_initiator_group_id_no_create( $scfg, $storeid );
+  return 1 unless defined $ig_id && $ig_id ne '';
+  my $r = eval { nimble_api_call( $scfg, 'GET', 'access_control_records', undef, $storeid ) };
+  return 1 unless $r;
+  my $list = nimble_data_as_list( $r->{ data } );
+  for my $acr ( @$list ) {
+    next unless ref($acr) eq 'HASH' && defined $acr->{ id };
+    next unless ( $acr->{ vol_id } // '' ) eq $vol_id && ( $acr->{ initiator_group_id } // '' ) eq $ig_id;
+    eval { nimble_api_call( $scfg, 'DELETE', "access_control_records/" . $acr->{ id }, undef, $storeid ); };
+  }
+  return 1;
 }
 
 # Ensure Nimble has an access_control_record linking this volume to the storage initiator group
@@ -1339,11 +1456,79 @@ sub nimble_create_volume {
   return 1;
 }
 
-sub nimble_delete_volume {
+# Nimble-specific: offline + child snapshots before DELETE (Pure destroy does not need this step).
+sub nimble_delete_snapshots_for_volume_id {
+  my ( $scfg, $vol_id, $storeid ) = @_;
+  return unless defined $vol_id;
+  my $r    = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) };
+  return unless $r;
+  my $list = nimble_data_as_list( $r->{ data } );
+  for my $s ( @$list ) {
+    next unless ref($s) eq 'HASH' && defined $s->{ id };
+    next unless ( $s->{ vol_id } // '' ) eq $vol_id;
+    eval { nimble_api_call( $scfg, 'DELETE', "snapshots/" . $s->{ id }, undef, $storeid ); };
+  }
+}
+
+sub nimble_delete_access_control_records_for_volume_id {
+  my ( $scfg, $vol_id, $storeid ) = @_;
+  return unless defined $vol_id;
+  my $r    = eval { nimble_api_call( $scfg, 'GET', 'access_control_records', undef, $storeid ) };
+  return unless $r;
+  my $list = nimble_data_as_list( $r->{ data } );
+  for my $acr ( @$list ) {
+    next unless ref($acr) eq 'HASH' && defined $acr->{ id };
+    next unless ( $acr->{ vol_id } // '' ) eq $vol_id;
+    eval { nimble_api_call( $scfg, 'DELETE', "access_control_records/" . $acr->{ id }, undef, $storeid ); };
+  }
+}
+
+sub nimble_offline_volume_and_delete_snapshots {
+  my ( $scfg, $vol_id, $storeid ) = @_;
+  return unless defined $vol_id;
+  my $d = eval { nimble_api_call( $scfg, 'GET', "volumes/$vol_id", undef, $storeid ) };
+  if ( $d && ref( $d->{ data } ) eq 'HASH' && $d->{ data }->{ online } ) {
+    eval {
+      nimble_api_call( $scfg, 'PUT', "volumes/$vol_id", { online => JSON::XS::false }, $storeid );
+    };
+  }
+  nimble_delete_snapshots_for_volume_id( $scfg, $vol_id, $storeid );
+}
+
+# Same order as PureStoragePlugin::purestorage_remove_volume: local DM cleanup → disconnect all hosts on
+# the array → destroy. Nimble: multipath/LVM/part cleanup, DELETE every access_control_record for the
+# volume, offline + snapshots, then DELETE volume.
+sub nimble_remove_volume {
   my ( $class, $scfg, $volname, $storeid ) = @_;
   my ( $vol_id, $vol ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   die "Error :: Volume \"$volname\" not found\n" unless $vol_id;
-  nimble_api_call( $scfg, 'DELETE', "volumes/$vol_id", undef, $storeid );
+
+  my ( $path, $wwid ) = $class->get_device_path_wwid( $scfg, $volname, $storeid );
+  my $wwid_safe = nimble_untaint_multipath_wwid($wwid);
+  if ( length($wwid_safe) && -e "/dev/mapper/$wwid_safe" ) {
+    cleanup_lvm_on_device($wwid_safe);
+    cleanup_partitions_on_device($wwid_safe);
+    if ( multipath_check($wwid) ) {
+      eval { exec_command( [ get_command_path('multipath'), '-f', $wwid_safe ], -1 ); };
+    }
+  }
+
+  nimble_delete_access_control_records_for_volume_id( $scfg, $vol_id, $storeid );
+  nimble_offline_volume_and_delete_snapshots( $scfg, $vol_id, $storeid );
+
+  eval { nimble_api_call( $scfg, 'DELETE', "volumes/$vol_id", undef, $storeid ); 1 }
+    or do {
+      my $e = $@ || '';
+      if ( $e =~ /\b409\b/ || $e =~ /SM_http_conflict/ || $e =~ /SM_eperm/ ) {
+        sleep(2);
+        nimble_delete_access_control_records_for_volume_id( $scfg, $vol_id, $storeid );
+        nimble_offline_volume_and_delete_snapshots( $scfg, $vol_id, $storeid );
+        nimble_api_call( $scfg, 'DELETE', "volumes/$vol_id", undef, $storeid );
+      }
+      else {
+        die $e;
+      }
+    };
   print "Info :: Volume \"$volname\" deleted.\n";
   return 1;
 }
@@ -1493,18 +1678,32 @@ sub parse_volname {
   die "Error :: Invalid volume name ($volname).\n";
 }
 
+# Optional $storeid matches Pure-style paths that omit it; also checks $scfg keys used by some PVE call sites.
+sub nimble_effective_storeid {
+  my ( $scfg, $storeid ) = @_;
+  return $storeid if defined $storeid && $storeid ne '';
+  return undef unless ref($scfg) eq 'HASH';
+  for my $k (qw( storage storagename storeid )) {
+    my $v = $scfg->{ $k };
+    return $v if defined $v && $v ne '';
+  }
+  return undef;
+}
+
 sub get_device_path_wwid {
   my ( $class, $scfg, $volname, $storeid ) = @_;
-  my $volume = $class->nimble_get_volume_info( $scfg, $volname, $storeid );
+  my $sid = nimble_effective_storeid( $scfg, $storeid );
+  my $volume = $class->nimble_get_volume_info( $scfg, $volname, $sid );
   return ( '', '' ) unless $volume && $volume->{ serial };
   return get_device_path_by_serial( $volume->{ serial } );
 }
 
 sub filesystem_path {
-  my ( $class, $scfg, $volname, $snapname ) = @_;
+  my ( $class, $scfg, $volname, $snapname, $storeid ) = @_;
   die "Error :: filesystem_path: snapshot not implemented ($snapname)\n" if defined( $snapname );
   my ( $vtype, undef, $vmid ) = $class->parse_volname( $volname );
-  my ( $path, $wwid ) = $class->get_device_path_wwid( $scfg, $volname, undef );
+  my $sid          = nimble_effective_storeid( $scfg, $storeid );
+  my ( $path, $wwid ) = $class->get_device_path_wwid( $scfg, $volname, $sid );
   return wantarray ? ( "", "", "", "" ) : "" unless length( $path );
   $path = nimble_untaint_dev_path($path) || $path;
   return wantarray ? ( $path, $vmid, $vtype, $wwid ) : $path;
@@ -1534,7 +1733,7 @@ sub alloc_image {
 sub free_image {
   my ( $class, $storeid, $scfg, $volname, $isBase ) = @_;
   $class->deactivate_volume( $storeid, $scfg, $volname );
-  $class->nimble_delete_volume( $scfg, $volname, $storeid );
+  $class->nimble_remove_volume( $scfg, $volname, $storeid );
   return undef;
 }
 
@@ -1578,6 +1777,7 @@ sub status {
 sub activate_storage {
   my ( $class, $storeid, $scfg, $cache ) = @_;
   set_debug_from_config( $scfg );
+  # PureStoragePlugin::activate_storage only returns 1; Nimble adds optional cluster-wide iSCSI discovery when configured.
   if ( $scfg->{ auto_iscsi_discovery } && $scfg->{ auto_iscsi_discovery } ne 'no' && $scfg->{ auto_iscsi_discovery } ne '0' ) {
     my $ig_ok = eval { nimble_ensure_initiator_group_id( $scfg, $storeid ); 1 };
     if ( !$ig_ok ) {
@@ -1609,7 +1809,8 @@ sub volume_size_info {
 }
 
 sub map_volume {
-  my ( $class, $storeid, $scfg, $volname, $snapname ) = @_;
+  my ( $class, $storeid, $scfg, $volname, $snapname, $hints ) = @_;
+  # Signature aligned with PureStoragePlugin::map_volume; $hints unused (Nimble iSCSI path is fixed).
   # $storeid is required for nimble_api_credentials (priv .pw path) and token cache.
   my $volume = $class->nimble_get_volume_info( $scfg, $volname, $storeid );
   die "Error :: Volume \"$volname\" not found (cannot map).\n" unless $volume && $volume->{ serial };
@@ -1725,16 +1926,16 @@ sub unmap_volume {
 }
 
 sub activate_volume {
-  my ( $class, $storeid, $scfg, $volname, $snapname, $cache ) = @_;
-  # Pure plugin: API volume_connection(create) before map — Nimble has no equivalent; ACL + host iSCSI only.
-  $class->nimble_ensure_volume_acl_for_current_node( $scfg, $volname, $storeid );
-  $class->map_volume( $storeid, $scfg, $volname, $snapname );
+  my ( $class, $storeid, $scfg, $volname, $snapname, $cache, $hints ) = @_;
+  $class->nimble_volume_connection( $storeid, $scfg, $volname, 1 );
+  $class->map_volume( $storeid, $scfg, $volname, $snapname, $hints );
   return 1;
 }
 
 sub deactivate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache ) = @_;
   $class->unmap_volume( $storeid, $scfg, $volname, $snapname );
+  $class->nimble_volume_connection( $storeid, $scfg, $volname, 0 );
   print "Info :: Volume \"$volname\" deactivated.\n";
   return 1;
 }
@@ -1747,7 +1948,13 @@ sub volume_resize {
 sub rename_volume {
   my ( $class, $scfg, $storeid, $source_volname, $target_vmid, $target_volname ) = @_;
   die "Error :: not implemented in storage plugin \"$class\".\n" if $class->can( 'api' ) && $class->api() < 10;
-  $target_volname = $class->find_free_diskname( $storeid, $scfg, $target_vmid ) unless length( $target_volname );
+  if ( length( $target_volname ) ) {
+    my $exists = $class->nimble_get_volume_info( $scfg, $target_volname, $storeid );
+    die "Error :: target volume '$target_volname' already exists\n" if $exists;
+  }
+  else {
+    $target_volname = $class->find_free_diskname( $storeid, $scfg, $target_vmid );
+  }
   $class->unmap_volume( $storeid, $scfg, $source_volname );
   $class->nimble_rename_volume( $scfg, $storeid, $source_volname, $target_volname );
   return "$storeid:$target_volname";
@@ -1829,7 +2036,7 @@ sub volume_import {
   $class->nimble_create_volume( $scfg, $volname, $size_alloc_bytes, $storeid );
   eval {
     $class->activate_volume( $storeid, $scfg, $volname, undef, {} );
-    my ( $path, undef, undef, undef ) = $class->filesystem_path( $scfg, $volname, undef );
+    my ( $path, undef, undef, undef ) = $class->filesystem_path( $scfg, $volname, undef, $storeid );
     die "Error :: volume_import: device path not available.\n" if !length( $path ) || !-b $path;
     open( my $dev, '>:raw', $path ) or die "Error :: volume_import: cannot open device $path: $!\n";
     my $chunk = 1024 * 1024;
@@ -1847,7 +2054,7 @@ sub volume_import {
   };
   if ( $@ ) {
     eval { $class->deactivate_volume( $storeid, $scfg, $volname, undef, {} ); };
-    eval { $class->nimble_delete_volume( $scfg, $volname, $storeid ); };
+    eval { $class->nimble_remove_volume( $scfg, $volname, $storeid ); };
     die $@;
   }
   return "$storeid:$volname";
@@ -1863,7 +2070,7 @@ sub volume_export {
 
   $class->activate_volume( $storeid, $scfg, $volname, undef, {} );
   eval {
-    my ( $path, undef, undef, undef ) = $class->filesystem_path( $scfg, $volname, undef );
+    my ( $path, undef, undef, undef ) = $class->filesystem_path( $scfg, $volname, undef, $storeid );
     die "Error :: volume_export: device path not available.\n" if !length( $path ) || !-b $path;
     print $fh pack( 'Q<', $size_bytes );
     open( my $dev, '<:raw', $path ) or die "Error :: volume_export: cannot open device $path: $!\n";
@@ -1885,6 +2092,12 @@ sub volume_export {
     die $@;
   }
   return 1;
+}
+
+# Same hook name as PureStoragePlugin (no-op here; password updates use on_update_hook).
+sub on_update_hook_full {
+  my ( $class, $storeid, $scfg, $updated_props, $deleted_props ) = @_;
+  return;
 }
 
 1;
