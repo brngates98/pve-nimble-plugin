@@ -18,13 +18,15 @@
 | Area | Status | Notes |
 |------|--------|--------|
 | **Core plugin** | Implemented | Create/delete/resize/rename volumes, list, status, activate/deactivate, map/unmap |
+| **list_images / detach** | Fixed | `list_images` now honors PVE’s `vollist` and `vmid` like RBD: explicit volids (e.g. `unusedN:` in qemu config) are listed for reattach; without `vollist`, results filter by `vmid`. Previously ignoring `vollist` made detached disks “vanish” in the GUI. |
+| **ACL on activate (initiator_group set)** | Fixed | `nimble_ensure_volume_acl_for_current_node` used to return immediately when `initiator_group` was set, so **no** access_control_record was created; LUN never presented → timeout waiting for disk. Now ACL is ensured for the configured group as well as for auto `pve-<nodename>`. |
 | **Auth** | Implemented | Username/password → POST /v1/tokens → session token; cached under `/etc/pve/priv/nimble/<storeid>.json` |
-| **ACL / initiator** | Implemented | **initiator_group** is optional. If set, plugin uses that Nimble initiator group. If unset, plugin reads local IQN from `/etc/iscsi/initiatorname.iscsi`, creates/finds a group named `pve-<nodename>` with that IQN, and uses it for **access_control_records** (vol_id + initiator_group_id). |
+| **ACL / initiator** | Implemented | **initiator_group** optional: if set, that group by name; if unset, **reuse** first iSCSI group containing this host’s IQN (API order, skip any group with CHAP/`chapuser_id` on initiators), else create `pve-<nodename>`. **access_control_records** on create/activate. |
 | **Snapshots** | Implemented | Create, delete, rollback; Nimble snapshots API + volume restore; Veeam snapshot name normalization (`veeam_` → `veeam-`) |
 | **Clone from snapshot** | Implemented | Via POST volumes with clone=true, name, base_snap_id (then ACL + optional volume_collection) |
 | **Multipath** | Implemented | Same pattern as Pure: device by serial, multipathd add/remove map, block device actions |
 | **Device discovery** | Implemented | By SCSI serial from `/sys/block/*/device/serial` and `/dev/disk/by-id`; no fixed Nimble WWN prefix (Pure uses 3624a9370); Nimble prefix not documented/used here |
-| **Auto iSCSI discovery** | Implemented | Opt-in: `auto_iscsi_discovery` (default no). On activate_storage, plugin first ensures initiator group exists (nimble_ensure_initiator_group_id); then GET subnets, collects discovery IPs (allow_iscsi or type data), runs iscsiadm discovery + node startup automatic + login. If initiator group cannot be ensured (e.g. no IQN), discovery is skipped. Never fails storage activation; warns on failure. |
+| **Auto iSCSI discovery** | Implemented | Opt-in `auto_iscsi_discovery` on **activate_storage** (warm sessions). **`map_volume`** always runs sendtargets + login against subnet discovery IPs when the API returns IPs, so each new Nimble volume target is logged in without relying on the storage flag. |
 | **Volume import/export** | Implemented | `raw+size` for backup/restore (e.g. Veeam V13+); size rounded up to full MB for odd-sector compatibility |
 | **Debian package** | Present | `libpve-storage-nimble-perl`, debian/*, scripts/build_deb.sh |
 | **CI (GitHub Actions)** | Present | checks, lint (Perl + Markdown), tests, release (tag → build .deb → gh-release) |

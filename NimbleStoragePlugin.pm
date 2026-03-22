@@ -584,6 +584,108 @@ sub nimble_get_local_iscsi_iqn {
   return undef;
 }
 
+# True if Nimble chapuser_id on an initiator is set (plugin avoids CHAP groups for auto selection).
+sub nimble_chapuser_id_truthy {
+  my ($v) = @_;
+  return 0 if !defined $v || $v eq '' || $v eq '0';
+  return 1;
+}
+
+# True if inline iscsi_initiators on a group object includes CHAP.
+sub nimble_initiator_group_inline_has_chap {
+  my ($g) = @_;
+  return 0 unless ref($g) eq 'HASH';
+  my $inits = $g->{ iscsi_initiators };
+  return 0 unless ref($inits) eq 'ARRAY';
+  for my $i ( @$inits ) {
+    next unless ref($i) eq 'HASH';
+    return 1 if nimble_chapuser_id_truthy( $i->{ chapuser_id } );
+  }
+  return 0;
+}
+
+sub nimble_fetch_initiator_group {
+  my ( $scfg, $id, $storeid ) = @_;
+  return undef if !defined $id || $id eq '';
+  my $r = nimble_api_call( $scfg, 'GET', "initiator_groups/$id", undef, $storeid );
+  my $g = $r->{ data } || $r;
+  return ref($g) eq 'HASH' ? $g : undef;
+}
+
+# Build per-group flags from GET initiators (authoritative when present): any CHAP in group, IQN membership.
+sub nimble_initiator_group_flags_from_initiators_list {
+  my ( $init_rows, $host_iqn_lc ) = @_;
+  my ( %chap, %match );
+  for my $row ( @$init_rows ) {
+    next unless ref($row) eq 'HASH';
+    next unless lc( $row->{ access_protocol } // '' ) eq 'iscsi';
+    my $gid = $row->{ initiator_group_id };
+    next unless defined $gid;
+    my $gk = "$gid";
+    $chap{ $gk } = 1 if nimble_chapuser_id_truthy( $row->{ chapuser_id } );
+    my $iq = $row->{ iqn };
+    if ( defined $iq && $iq ne '*' && $iq ne '' && lc($iq) eq $host_iqn_lc ) {
+      $match{ $gk } = 1;
+    }
+  }
+  return ( \%chap, \%match );
+}
+
+# When initiator_group is unset: prefer an existing iSCSI group that already lists this host's IQN
+# (first in API order). Skip groups that use CHAP on any initiator. If none match, create pve-<nodename>.
+sub nimble_find_initiator_group_id_for_local_iqn {
+  my ( $scfg, $host_iqn, $storeid ) = @_;
+  my $host_lc = lc($host_iqn);
+  my $r         = nimble_api_call( $scfg, 'GET', 'initiator_groups', undef, $storeid );
+  my $groups    = nimble_data_as_list( $r->{ data } );
+  my $used_api  = 0;
+  my $chap_map  = {};
+  my $match_map = {};
+  eval {
+    my $ir    = nimble_api_call( $scfg, 'GET', 'initiators', undef, $storeid );
+    my $ilist = nimble_data_as_list( $ir->{ data } );
+    ( $chap_map, $match_map ) = nimble_initiator_group_flags_from_initiators_list( $ilist, $host_lc );
+    $used_api = 1;
+  };
+  if ($used_api) {
+    for my $g ( @$groups ) {
+      next unless ref($g) eq 'HASH';
+      next unless lc( $g->{ access_protocol } // '' ) eq 'iscsi';
+      my $id = $g->{ id };
+      next unless defined $id;
+      my $gk = "$id";
+      next if $chap_map->{ $gk };
+      if ( $match_map->{ $gk } ) {
+        print "Info :: Using existing Nimble initiator group \"$g->{name}\" (this host IQN is a member; CHAP groups skipped).\n";
+        return $id;
+      }
+    }
+  }
+  # Inline / detail pass: covers arrays without a useful initiators list, or IQN visible only on the group object.
+  for my $g ( @$groups ) {
+    next unless ref($g) eq 'HASH';
+    next unless lc( $g->{ access_protocol } // '' ) eq 'iscsi';
+    my $det = $g;
+    my $in  = $g->{ iscsi_initiators };
+    if ( ref($in) ne 'ARRAY' || !@$in ) {
+      $det = nimble_fetch_initiator_group( $scfg, $g->{ id }, $storeid ) // $g;
+    }
+    next if nimble_initiator_group_inline_has_chap($det);
+    $in = $det->{ iscsi_initiators };
+    next unless ref($in) eq 'ARRAY';
+    for my $i ( @$in ) {
+      next unless ref($i) eq 'HASH';
+      my $iq = $i->{ iqn };
+      next if !defined $iq || $iq eq '*' || $iq eq '';
+      if ( lc($iq) eq $host_lc ) {
+        print "Info :: Using existing Nimble initiator group \"$det->{name}\" (this host IQN is a member; CHAP groups skipped).\n";
+        return $det->{ id };
+      }
+    }
+  }
+  return undef;
+}
+
 sub nimble_get_initiator_group_id {
   my ( $scfg, $name, $storeid ) = @_;
   my $enc  = uri_escape( $name );
@@ -595,7 +697,7 @@ sub nimble_get_initiator_group_id {
   die "Error :: Initiator group \"$name\" not found on Nimble array.\n";
 }
 
-# Resolve initiator group ID: use config name if set, else auto-create/find by PVE nodename + local IQN.
+# Resolve initiator group ID: use config name if set, else reuse existing group containing this IQN, else pve-<nodename>.
 sub nimble_ensure_initiator_group_id {
   my ( $scfg, $storeid ) = @_;
   my $ig_name = $scfg->{ initiator_group };
@@ -605,6 +707,8 @@ sub nimble_ensure_initiator_group_id {
   my $iqn = nimble_get_local_iscsi_iqn();
   die "Error :: initiator_group not set and could not read a valid IQN from /etc/iscsi/initiatorname.iscsi (install open-iscsi; need an uncommented line InitiatorName=iqn...., or set initiator_group to an existing Nimble group).\n"
     unless $iqn;
+  my $reuse = nimble_find_initiator_group_id_for_local_iqn( $scfg, $iqn, $storeid );
+  return $reuse if $reuse;
   my $nodename = PVE::INotify::nodename();
   $ig_name = "pve-$nodename";
   my $enc  = uri_escape( $ig_name );
@@ -664,17 +768,16 @@ sub nimble_volume_has_acl_for_ig {
   return 0;
 }
 
-# When initiator_group is not set (per-node groups), ensure the current node's initiator group
-# has access to the volume so that migration works (target node can activate and get ACL).
+# Ensure Nimble has an access_control_record linking this volume to the storage initiator group
+# (configured initiator_group name, or auto pve-<nodename>). Without that ACL, the array will
+# not present the LUN and map_volume times out waiting for the device.
 sub nimble_ensure_volume_acl_for_current_node {
   my ( $class, $scfg, $volname, $storeid ) = @_;
-  return 1 if defined $scfg->{ initiator_group } && $scfg->{ initiator_group } ne '';
   my ( $vol_id, $vol ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   return 1 unless $vol_id;
-  my $ig_id = eval { nimble_ensure_initiator_group_id( $scfg, $storeid ) };
-  return 1 unless $ig_id;
+  my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
   return 1 if nimble_volume_has_acl_for_ig( $scfg, $vol_id, $ig_id, $storeid );
-  print "Info :: Volume \"$volname\" granted access to this host's initiator group (for migration).\n"
+  print "Info :: Volume \"$volname\" granted Nimble access (initiator group ACL).\n"
     if nimble_post_access_control_record_idempotent( $scfg, $vol_id, $ig_id, $storeid );
   return 1;
 }
@@ -727,9 +830,7 @@ sub nimble_get_volume_id {
 }
 
 sub nimble_list_volumes {
-  my ( $class, $scfg, $vmid, $storeid ) = @_;
-  $vmid = '*' unless defined $vmid;
-  my $filter = "vm-$vmid-disk-*,vm-$vmid-cloudinit,vm-$vmid-state-*";
+  my ( $class, $scfg, $vmid, $storeid, $vollist ) = @_;
   my $prefix = nimble_name_prefix( $scfg );
   my $r      = nimble_api_call( $scfg, 'GET', 'volumes', undef, $storeid );
   my $list   = nimble_data_as_list( $r->{ data } );
@@ -751,6 +852,15 @@ sub nimble_list_volumes {
         volid  => $storeid ? "$storeid:$volname" : $volname,
         format => 'raw'
       };
+  }
+  # Match PVE::Storage::RBDPlugin::list_images: if vollist is passed (even []), only return those
+  # volids; else filter by vmid. Empty vollist => no rows (same as RBD if ($vollist) branch).
+  if ( defined($vollist) && ref($vollist) eq 'ARRAY' ) {
+    my %want = map { $_ => 1 } @$vollist;
+    @volumes = grep { $want{ $_->{ volid } } } @volumes;
+  }
+  elsif ( defined $vmid ) {
+    @volumes = grep { defined $_->{ vmid } && "$_->{ vmid }" eq "$vmid" } @volumes;
   }
   return \@volumes;
 }
@@ -1003,7 +1113,7 @@ sub free_image {
 sub list_images {
   my ( $class, $storeid, $scfg, $vmid, $vollist, $cache ) = @_;
   set_debug_from_config( $scfg );
-  return $class->nimble_list_volumes( $scfg, $vmid, $storeid );
+  return $class->nimble_list_volumes( $scfg, $vmid, $storeid, $vollist );
 }
 
 sub status {
@@ -1066,6 +1176,10 @@ sub map_volume {
   my $volume = $class->nimble_get_volume_info( $scfg, $volname, $storeid );
   die "Error :: Volume \"$volname\" not found (cannot map).\n" unless $volume && $volume->{ serial };
   my $serial = $volume->{ serial };
+  # Each Nimble volume has its own target IQN; sendtargets + login must run when mapping, not only
+  # at activate_storage (otherwise new disks never get an iSCSI session and SCSI scan finds nothing).
+  my @dip = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
+  run_iscsi_discovery_and_login( $storeid, $scfg, \@dip ) if @dip;
   scsi_scan_new( 'iscsi' );
   wait_for(
     sub {
