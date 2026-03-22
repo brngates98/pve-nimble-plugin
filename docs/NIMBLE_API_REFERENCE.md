@@ -82,7 +82,7 @@ Other sets in full docs: active_directory_memberships, alarms, application_serve
 **Create — POST v1/volumes**
 
 - **Request (data):** `name` (mandatory), `size` (mandatory for create, MB), optional `description`, `perfpolicy_id`, `reserve`, `warn_level`, `limit`, `snap_*`, `online`, `pool_id`, `read_only`, `block_size`, `clone`, `base_snap_id`, `agent_type`, `cache_pinned`, `encryption_cipher`, `app_uuid`, `folder_id`, `metadata`, etc. Plugin uses `pool_name` (accepted in practice); API doc lists `pool_id`.
-- **Response (data):** `id`, `name`, `full_name`, `size`, `serial_number`, `pool_name`, `pool_id`, `creation_time`, `last_modified`, etc.
+- **Response (data):** `id`, `name`, `full_name`, `size`, `serial_number`, **`target_name`** (iSCSI IQN or FC WWNN for the volume target), `pool_name`, `pool_id`, `creation_time`, `last_modified`, etc.
 - **Normal response:** 201, 202.
 
 **Restore — POST v1/volumes/id/actions/restore**

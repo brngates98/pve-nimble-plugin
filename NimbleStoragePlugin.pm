@@ -309,6 +309,7 @@ sub nimble_volname {
 # Find block device path by SCSI serial (e.g. from Nimble volume serial_number).
 # Unlike Pure (fixed prefix 3624a9370), Nimble has no fixed WWN prefix in this plugin;
 # we match the API serial_number against /sys/block/*/device/serial and by-id.
+# WWID for multipathd: prefer wwn-* / scsi-3* hex id (not only symlinks named wwn-).
 sub get_device_path_by_serial {
   my ( $serial ) = @_;
   die 'Error :: Volume serial is missing' unless length( $serial );
@@ -333,9 +334,16 @@ sub get_device_path_by_serial {
       if ( defined $dev_serial && $dev_serial =~ /^\s*(.+?)\s*$/ ) {
         $dev_serial = $1;
         if ( $dev_serial eq $serial || $dev_serial =~ /\Q$serial\E/ ) {
-          $best_path = $abs;
-          $wwid      = $e if $e =~ /^wwn-/;    # prefer WWN for multipath
-          last;
+          $best_path = $abs unless length($best_path);
+          if ( $e =~ /^wwn-0x([0-9a-f]+)/i ) {
+            $wwid = lc($1);
+          }
+          elsif ( $e =~ /^wwn-([0-9a-f]+)/i && !length($wwid) ) {
+            $wwid = lc($1);
+          }
+          elsif ( $e =~ /^scsi-3([0-9a-f]+)/i && !length($wwid) ) {
+            $wwid = lc($1);
+          }
         }
       }
     }
@@ -519,23 +527,36 @@ sub nimble_data_as_list {
   return [];
 }
 
-### Auto iSCSI discovery (opt-in): get discovery IPs from Nimble subnets API
+### Discovery IPs from Nimble subnets API (strict: data / allow_iscsi; fallback: any discovery_ip)
 sub get_nimble_iscsi_discovery_ips {
   my ( $scfg, $storeid ) = @_;
   my @ips;
   eval {
     my $res  = nimble_api_call( $scfg, 'GET', 'subnets', undef, $storeid );
     my $list = nimble_data_as_list( $res->{ data } );
-    return () unless @$list;
-    my %seen;
-    for my $sub ( @$list ) {
-      next unless ref($sub) eq 'HASH';
-      my $type  = $sub->{ type }   // '';
-      my $allow = $sub->{ allow_iscsi };
-      next unless $type =~ /data/i || ( $allow && $allow ne '0' && $allow ne '' );
-      my $ip = $sub->{ discovery_ip };
-      next unless defined $ip && $ip =~ m/^\S+$/ && !$seen{$ip}++;
-      push @ips, $ip;
+    if (@$list) {
+      my %seen;
+      my $collect = sub {
+        my ( $strict ) = @_;
+        my @out;
+        for my $sub ( @$list ) {
+          next unless ref($sub) eq 'HASH';
+          if ($strict) {
+            my $type  = $sub->{ type }   // '';
+            my $allow = $sub->{ allow_iscsi };
+            next unless $type =~ /data/i || ( $allow && $allow ne '0' && $allow ne '' );
+          }
+          my $ip = $sub->{ discovery_ip };
+          next unless defined $ip && $ip =~ m/^\S+$/ && length($ip) <= 253 && !$seen{$ip}++;
+          push @out, $ip;
+        }
+        return @out;
+      };
+      @ips = $collect->(1);
+      @ips = $collect->(0) if !@ips;
+    }
+    else {
+      @ips = ();
     }
   };
   if ( $@ ) {
@@ -544,6 +565,40 @@ sub get_nimble_iscsi_discovery_ips {
     return ();
   }
   return @ips;
+}
+
+sub nimble_iscsi_portal {
+  my ($ip) = @_;
+  return $ip if $ip =~ /:\d+$/;
+  return "$ip:3260";
+}
+
+# Nimble volume-scoped targets (per-LUN IQN in target_name) need discovery + explicit login on each portal.
+sub nimble_iscsi_login_target_on_portals {
+  my ( $storeid, $target_iqn, $ips_ref ) = @_;
+  return unless length( $target_iqn ) && $target_iqn =~ m/^iqn\./i;
+  return unless ref($ips_ref) eq 'ARRAY' && @$ips_ref;
+  my $iscsiadm = '/usr/sbin/iscsiadm';
+  $iscsiadm = '/sbin/iscsiadm' if !-x $iscsiadm;
+  return unless -x $iscsiadm;
+  my $any_ok = 0;
+  for my $ip ( @$ips_ref ) {
+    next unless defined $ip && $ip =~ m/^\S+$/;
+    my $portal = nimble_iscsi_portal($ip);
+    eval { run_command( [ $iscsiadm, '-m', 'discovery', '-t', 'sendtargets', '-p', $ip ], timeout => 15 ); };
+    if ( $@ && $DEBUG >= 1 ) { chomp( my $e = $@ ); print "Debug :: discovery $ip before target login: $e\n"; }
+    eval {
+      run_command(
+        [ $iscsiadm, '-m', 'node', '-T', $target_iqn, '-p', $portal, '--login' ],
+        timeout => 45
+      );
+      $any_ok = 1;
+    };
+    if ( $@ && $DEBUG >= 1 ) { chomp( my $e = $@ ); print "Debug :: iscsi login $target_iqn @ $portal: $e\n"; }
+  }
+  warn "Warning :: iSCSI login for volume target \"$target_iqn\" did not succeed on any discovery portal; "
+    . "check subnets, ACL, and that the volume uses an iSCSI volume target.\n"
+    if !$any_ok;
 }
 
 ### Run iscsiadm discovery and login; never die (for optional auto-discovery)
@@ -818,12 +873,17 @@ sub nimble_get_volume_id {
   }
   return ( undef, undef ) unless $vol;
 
-  # List/search responses often omit serial_number; map_volume needs it for /sys scan.
-  if ( !length( $vol->{ serial_number } // '' ) && defined $vol->{ id } ) {
-    $r = nimble_api_call( $scfg, 'GET', "volumes/$vol->{ id }", undef, $storeid );
-    my $full = $r->{ data } || $r;
-    if ( ref($full) eq 'HASH' && length( $full->{ serial_number } // '' ) ) {
-      $vol = $full;
+  # List/search often omit serial_number and target_name (per-volume iSCSI IQN); map_volume needs both.
+  if ( defined $vol->{ id } ) {
+    my $need_serial = !length( $vol->{ serial_number } // '' );
+    my $need_target = !length( $vol->{ target_name } // '' );
+    if ( $need_serial || $need_target ) {
+      $r = nimble_api_call( $scfg, 'GET', "volumes/$vol->{ id }", undef, $storeid );
+      my $full = $r->{ data } || $r;
+      if ( ref($full) eq 'HASH' ) {
+        $vol->{ serial_number } = $full->{ serial_number } if length( $full->{ serial_number } // '' );
+        $vol->{ target_name }    = $full->{ target_name } if length( $full->{ target_name } // '' );
+      }
     }
   }
   return ( $vol->{ id }, $vol );
@@ -873,13 +933,14 @@ sub nimble_get_volume_info {
   my $prefix     = nimble_name_prefix( $scfg );
   $array_name = substr( $array_name, length( $prefix ) ) if length( $prefix );
   return {
-    name   => $array_name,
-    serial => $vol->{ serial_number },
-    size   => ( $vol->{ size } || 0 ) * 1024 * 1024,
-    used   => ( $vol->{ vol_usage_compressed_bytes } || $vol->{ size } || 0 ) * 1024 * 1024,
-    ctime  => $vol->{ creation_time } || 0,
-    volid  => $storeid ? "$storeid:$array_name" : $array_name,
-    format => 'raw'
+    name         => $array_name,
+    serial       => $vol->{ serial_number },
+    target_name  => $vol->{ target_name } // '',
+    size         => ( $vol->{ size } || 0 ) * 1024 * 1024,
+    used         => ( $vol->{ vol_usage_compressed_bytes } || $vol->{ size } || 0 ) * 1024 * 1024,
+    ctime        => $vol->{ creation_time } || 0,
+    volid        => $storeid ? "$storeid:$array_name" : $array_name,
+    format       => 'raw'
   };
 }
 
@@ -1118,22 +1179,32 @@ sub list_images {
 
 sub status {
   my ( $class, $storeid, $scfg, $cache ) = @_;
-  my $r     = nimble_api_call( $scfg, 'GET', 'pools', undef, $storeid );
-  my $list  = nimble_data_as_list( $r->{ data } );
-  my $total = 0;
-  my $used  = 0;
-  for my $p ( @$list ) {
-    $total += ( $p->{ capacity } || 0 );
-    if ( $p->{ usage_valid } && defined $p->{ usage } ) {
-      # API: usage is NsBytes (number); some versions return nested { compressed_usage, uncompressed_usage }
-      my $u = $p->{ usage };
-      $used += ( ref($u) eq 'HASH' )
-        ? ( $u->{ compressed_usage } || $u->{ uncompressed_usage } || 0 )
-        : ( 0 + $u );
+  set_debug_from_config( $scfg );
+  my ( $total, $used ) = ( 0, 0 );
+  eval {
+    my $r    = nimble_api_call( $scfg, 'GET', 'pools', undef, $storeid );
+    my $list = nimble_data_as_list( $r->{ data } );
+    for my $p ( @$list ) {
+      $total += ( $p->{ capacity } || 0 );
+      if ( $p->{ usage_valid } && defined $p->{ usage } ) {
+        # API: usage is NsBytes (number); some versions return nested { compressed_usage, uncompressed_usage }
+        my $u = $p->{ usage };
+        $used += ( ref($u) eq 'HASH' )
+          ? ( $u->{ compressed_usage } || $u->{ uncompressed_usage } || 0 )
+          : ( 0 + $u );
+      }
     }
+    1;
+  };
+  if ( my $err = $@ ) {
+    chomp($err);
+    warn "Warning :: Nimble storage \"$storeid\" status (pools API): $err\n";
+    # Avoid GUI "unknown" from a hard die; report inactive with minimal placeholder totals.
+    return ( 1, 0, 0, 0 );
   }
   $total = 1 if $total <= 0;
   my $free = $total - $used;
+  $free = 0 if $free < 0;
   return ( $total, $free, $used, 1 );
 }
 
@@ -1175,11 +1246,23 @@ sub map_volume {
   # $storeid is required for nimble_api_credentials (priv .pw path) and token cache.
   my $volume = $class->nimble_get_volume_info( $scfg, $volname, $storeid );
   die "Error :: Volume \"$volname\" not found (cannot map).\n" unless $volume && $volume->{ serial };
-  my $serial = $volume->{ serial };
-  # Each Nimble volume has its own target IQN; sendtargets + login must run when mapping, not only
-  # at activate_storage (otherwise new disks never get an iSCSI session and SCSI scan finds nothing).
-  my @dip = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
+  my $serial      = $volume->{ serial };
+  my $target_iqn  = $volume->{ target_name } // '';
+  my @dip         = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
+  if ( !@dip ) {
+    warn "Warning :: No iSCSI discovery IPs from Nimble subnets API for storage \"$storeid\"; "
+      . "volume mapping may fail until subnets expose discovery_ip (data/allow_iscsi) or you run discovery manually.\n";
+  }
+  # Group targets + all nodes, then per-volume IQN (target_name) on each portal — required for Nimble volume targets.
   run_iscsi_discovery_and_login( $storeid, $scfg, \@dip ) if @dip;
+  if ( length($target_iqn) ) {
+    nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@dip ) if @dip;
+  }
+  else {
+    warn "Warning :: Volume \"$volname\" has no target_name (iSCSI IQN) from Nimble API; "
+      . "only generic node login was attempted.\n";
+  }
+  eval { exec_command( [ get_command_path('multipath'), '-v2' ], timeout => 60 ); };
   scsi_scan_new( 'iscsi' );
   wait_for(
     sub {
@@ -1187,7 +1270,7 @@ sub map_volume {
       return length($p) && -e $p;
     },
     "volume \"$volname\" to appear",
-    30
+    45
   );
   my ( $path, $wwid ) = get_device_path_by_serial( $serial );
   die "Error :: Volume \"$volname\" device did not appear after rescan.\n" unless length($path) && -b $path;
@@ -1195,6 +1278,15 @@ sub map_volume {
     exec_command( [ 'multipathd', 'add', 'map', $wwid ] );
     my $mp_ready = sub { return multipath_check( $wwid ) };
     wait_for( $mp_ready, "multipath for \"$volname\"", 30 );
+  }
+  elsif ( !length($wwid) ) {
+    eval { exec_command( [ get_command_path('multipath'), '-v2' ], timeout => 60 ); };
+    ( $path, $wwid ) = get_device_path_by_serial( $serial );
+    if ( length( $wwid ) && !multipath_check( $wwid ) ) {
+      exec_command( [ 'multipathd', 'add', 'map', $wwid ] );
+      my $mp_ready = sub { return multipath_check( $wwid ) };
+      wait_for( $mp_ready, "multipath for \"$volname\"", 30 );
+    }
   }
   return $path;
 }

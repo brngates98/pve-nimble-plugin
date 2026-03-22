@@ -26,7 +26,7 @@
 | **Clone from snapshot** | Implemented | Via POST volumes with clone=true, name, base_snap_id (then ACL + optional volume_collection) |
 | **Multipath** | Implemented | Same pattern as Pure: device by serial, multipathd add/remove map, block device actions |
 | **Device discovery** | Implemented | By SCSI serial from `/sys/block/*/device/serial` and `/dev/disk/by-id`; no fixed Nimble WWN prefix (Pure uses 3624a9370); Nimble prefix not documented/used here |
-| **Auto iSCSI discovery** | Implemented | Opt-in `auto_iscsi_discovery` on **activate_storage** (warm sessions). **`map_volume`** always runs sendtargets + login against subnet discovery IPs when the API returns IPs, so each new Nimble volume target is logged in without relying on the storage flag. |
+| **Auto iSCSI discovery** | Implemented | Opt-in `auto_iscsi_discovery` on **activate_storage**. **`map_volume`**: subnet discovery IPs (strict data/allow_iscsi, else any `discovery_ip`), generic sendtargets + `node --login`, then **`GET volumes/:id` `target_name`** (per-LUN IQN) + `iscsiadm -m node -T … -p ip:3260 --login` on each portal; `multipath -v2` before/after scan; WWID from `wwn-` / `scsi-3` by-id. |
 | **Volume import/export** | Implemented | `raw+size` for backup/restore (e.g. Veeam V13+); size rounded up to full MB for odd-sector compatibility |
 | **Debian package** | Present | `libpve-storage-nimble-perl`, debian/*, scripts/build_deb.sh |
 | **CI (GitHub Actions)** | Present | checks, lint (Perl + Markdown), tests, release (tag → build .deb → gh-release) |
