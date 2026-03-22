@@ -76,7 +76,7 @@ pve-nimble-plugin/
 
 - **Auth:** Nimble = username/password → session_token; Pure = API token → login → x-auth-token (`token` property — avoids clashing with globally registered `password`).
 - **PVE property registry:** Storage plugin keys in `sub properties` are registered **globally** in `PVE::SectionConfig`. **Do not** re-declare `username` or `password` in Nimble’s `properties()` — RBD already defines `username`, CIFS defines `password`. Duplicates cause `duplicate property 'username'/'password'` and prevent `pvedaemon` / `pveproxy` from starting. Keep `username`/`password` only in `sub options` (same idea as ESXi/PBS in `pve-storage`).
-- **`sub api`:** Use `PVE::Storage::APIVER` and `PVE::Storage::APIAGE` as bare constants (they are `use constant`), not `$PVE::Storage::APIVER` (wrong — uninitialized, warnings).
+- **`sub api`:** Use `PVE::Storage::APIVER()` and `PVE::Storage::APIAGE()` with parentheses and `use PVE::Storage ();` — they are `use constant` subs, not `$PVE::Storage::APIVER` (wrong — uninitialized). Bareword `PVE::Storage::APIVER` without `()` fails **strict subs** on Perl 5.36+ (e.g. CI bookworm `perl -c`).
 - **ACL:** Nimble = initiator groups + access_control_records (vol_id, initiator_group_id); Pure = host/volume “connections.”
 - **API shape:** Nimble = `/v1/` JSON with `data` arrays; Pure = custom filter/params and `items`.
 - **Cache:** Nimble = one file per storage (`<storeid>.json`); Pure = per-array (`<storeid>_arrayN.json`) for Active Cluster.

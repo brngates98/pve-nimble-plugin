@@ -11,6 +11,7 @@ use File::Path ();
 use PVE::JSONSchema ();
 use PVE::Tools qw( file_read_firstline run_command );
 use PVE::INotify         ();
+use PVE::Storage         ();
 use PVE::Storage::Plugin ();
 
 use JSON::XS qw( decode_json encode_json );
@@ -63,9 +64,10 @@ sub set_debug_from_config {
 ### Configuration
 sub api {
   # PVE::Storage::APIVER / APIAGE are `use constant` (subs), not package scalars — do not use $PVE::Storage::APIVER.
+  # Call with (); bareword form trips strict subs under perl 5.36+ (e.g. CI Docker bookworm).
   my $tested_apiver = 13;
-  my $apiver        = PVE::Storage::APIVER;
-  my $apiage        = PVE::Storage::APIAGE;
+  my $apiver        = PVE::Storage::APIVER();
+  my $apiage        = PVE::Storage::APIAGE();
   if ( $apiver >= 2 and $apiver <= $tested_apiver ) {
     return $apiver;
   }
