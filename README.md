@@ -39,7 +39,7 @@ This plugin integrates HPE Nimble Storage arrays with Proxmox Virtual Environmen
 
    ```bash
    pvesm add nimble <storage_id> --address https://<nimble>:5392 \
-     --nimble-user <user> --nimble-password '<password>' --content images
+     --username <user> --password '<password>' --content images
    ```
 
 3. In the Proxmox UI: **Datacenter → Storage** — your Nimble storage should appear. Create a VM and add a disk from this storage to use it.
@@ -193,27 +193,27 @@ Add storage via CLI (no GUI for custom types):
 
 ```bash
 # Minimal: initiator group is created automatically from this host's IQN
-# Use nimble-user / nimble-password (not username/password — those names are reserved
-# globally by other PVE storage types). Legacy --username / --password are still accepted.
+# Like ESXi: `password` is sensitive — pvesm stores it in /etc/pve/priv/nimble/<storage_id>.pw
+# (not in storage.cfg). Use underscores in option names if you pass other flags (e.g. --auto_iscsi_discovery).
 pvesm add nimble <storage_id> \
   --address https://<nimble_fqdn_or_ip> \
-  --nimble-user <api_user> \
-  --nimble-password '<api_password>' \
+  --username <api_user> \
+  --password '<api_password>' \
   --content images
 
 # With auto iSCSI discovery (plugin runs discovery/login when storage is activated)
 pvesm add nimble <storage_id> \
   --address https://<nimble_fqdn_or_ip> \
-  --nimble-user <api_user> \
-  --nimble-password '<api_password>' \
+  --username <api_user> \
+  --password '<api_password>' \
   --content images \
   --auto_iscsi_discovery 1
 
 # Or specify an existing initiator group name
 pvesm add nimble <storage_id> \
   --address https://<nimble_fqdn_or_ip> \
-  --nimble-user <api_user> \
-  --nimble-password '<api_password>' \
+  --username <api_user> \
+  --password '<api_password>' \
   --initiator_group <initiator_group_name> \
   --content images
 ```
@@ -223,8 +223,7 @@ Or edit `/etc/pve/storage.cfg`:
 ```text
 nimble: <storage_id>
   address https://<nimble_fqdn_or_ip>
-  nimble_user <api_user>
-  nimble_password <api_password>
+  username <api_user>
   content images
   # initiator_group <name>   # optional; omit to auto-create pve-<nodename>
   # auto_iscsi_discovery 1   # optional; run iSCSI discovery/login on activate (default: no)
@@ -234,9 +233,8 @@ nimble: <storage_id>
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | storage_id           | Name shown in Proxmox Storage list                                                                                                                                                                                                                                                                                                                        |
 | address              | Nimble management URL (e.g. `https://nimble.example.com`). Port 5392 is used by default if omitted.                                                                                                                                                                                                                                                       |
-| nimble_user          | Nimble REST API user                                                                                                                                                                                                                                                                                                                                      |
-| nimble_password      | Nimble REST API password                                                                                                                                                                                                                                                                                                                                  |
-| username / password  | **Legacy only** — still read if present; prefer `nimble_user` / `nimble_password` in new configs                                                                                                                                                                                                                                                            |
+| username             | Nimble REST API user (stored in `storage.cfg`)                                                                                                                                                                                                                                                                                                            |
+| password             | When set via GUI / `pvesm --password`, stored in **`/etc/pve/priv/nimble/<storage_id>.pw`** (not in `storage.cfg`), same idea as ESXi/PBS. You can still put `password` in `storage.cfg` if you manage the node by hand; the plugin reads that or the `.pw` file.                                                                                          |
 | initiator_group      | **Optional.** Nimble initiator group name. If unset, the plugin creates per-node groups `pve-<nodename>` and ensures the current node has access when a volume is activated (so migration works). If set, the plugin uses that group only (it does not create it or add IQNs—create the group in Nimble and add all nodes’ IQNs for cluster-wide access). |
 | auto_iscsi_discovery | **Optional.** Set to `1` or `yes` to run iSCSI discovery and login when the storage is activated. The plugin gets discovery IPs from the Nimble subnets API and runs `iscsiadm` on this host. Default: no (opt-in).                                                                                                                                       |
 | vnprefix             | Optional prefix for volume names on the array                                                                                                                                                                                                                                                                                                             |

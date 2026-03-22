@@ -85,7 +85,8 @@ sub plugindata {
   return {
     content => [ { images => 1, none => 1 }, { images => 1 } ],
     format  => [ { raw    => 1 },            "raw" ],
-    'sensitive-properties' => { nimble_password => 1, password => 1 },
+    # Like ESXi/PBS: `password` is not in $config during check_config; pvesm passes it via on_add_hook %sensitive.
+    'sensitive-properties' => { password => 1 },
   };
 }
 
@@ -95,16 +96,8 @@ sub properties {
       description => "HPE Nimble array management IP or DNS name.",
       type        => 'string'
     },
-    # Globally unique names (RBD/CIFS already register username/password). pvesm/GUI
-    # only expose options that appear in this plugin's properties().
-    nimble_user => {
-      description => "Nimble REST API user (legacy: username).",
-      type        => 'string'
-    },
-    nimble_password => {
-      description => "Nimble REST API password (legacy: password).",
-      type        => 'string'
-    },
+    # Do not redeclare username/password here (RBD/CIFS own those names globally). List them in options()
+    # only — same pattern as ESXi. Password is sensitive: stored under /etc/pve/priv/nimble/<storeid>.pw via on_add_hook.
     initiator_group => {
       description => "Initiator group name (optional). If unset, a group is created automatically using this host's iSCSI IQN.",
       type        => 'string'
@@ -148,11 +141,9 @@ sub properties {
 
 sub options {
   return {
-    address            => { fixed    => 1 },
-    nimble_user        => { fixed    => 1 },
-    nimble_password    => { fixed    => 1 },
-    username           => { optional => 1 },
-    password           => { optional => 1 },
+    address   => { fixed => 1 },
+    username  => { fixed => 1 },
+    password  => { optional => 1 },
     initiator_group => { optional => 1 },
 
     vnprefix  => { optional => 1 },
@@ -172,21 +163,83 @@ sub options {
 sub check_config {
   my ( $class, $sectionId, $config, $create, $skipSchemaCheck ) = @_;
 
-  # Accept legacy storage.cfg / pvesm --username/--password before required-option check.
-  if ( defined $config->{ username } && length( $config->{ username } ) ) {
-    $config->{ nimble_user } //= $config->{ username };
-  }
-  if ( defined $config->{ password } ) {
-    $config->{ nimble_password } //= $config->{ password };
+  # Brief interim configs may have used nimble_user without username.
+  if ( defined $config->{ nimble_user } && length( $config->{ nimble_user } ) ) {
+    $config->{ username } //= $config->{ nimble_user };
   }
 
   return $class->SUPER::check_config( $sectionId, $config, $create, $skipSchemaCheck );
 }
 
+sub nimble_password_file {
+  my ($storeid) = @_;
+  return "/etc/pve/priv/nimble/${storeid}.pw";
+}
+
+sub nimble_set_password {
+  my ( $storeid, $password ) = @_;
+  my $dir = '/etc/pve/priv/nimble';
+  if ( !-d $dir ) {
+    eval { File::Path::make_path( $dir, { mode => 0700 } ); };
+    die "Error :: cannot create $dir: $@\n" if $@ || !-d $dir;
+  }
+  PVE::Tools::file_set_contents( nimble_password_file($storeid), "$password\n", 0600, 1 );
+}
+
+sub nimble_read_password_file {
+  my ($storeid) = @_;
+  my $f = nimble_password_file($storeid);
+  return undef unless -f $f;
+  my $c = PVE::Tools::file_get_contents($f);
+  return undef unless defined $c;
+  chomp $c;
+  return length($c) ? $c : undef;
+}
+
+sub nimble_delete_password_file {
+  my ($storeid) = @_;
+  my $f = nimble_password_file($storeid);
+  unlink $f if -e $f;
+}
+
+sub on_add_hook {
+  my ( $class, $storeid, $scfg, %sensitive ) = @_;
+  my $pw = $sensitive{ password };
+  die "missing password\n" if !defined($pw) || $pw eq '';
+  nimble_set_password( $storeid, $pw );
+  return;
+}
+
+sub on_update_hook {
+  my ( $class, $storeid, $scfg, %sensitive ) = @_;
+  return if !exists( $sensitive{ password } );
+  if ( defined( $sensitive{ password } ) && $sensitive{ password } ne '' ) {
+    nimble_set_password( $storeid, $sensitive{ password } );
+  }
+  else {
+    nimble_delete_password_file($storeid);
+  }
+  return;
+}
+
+sub on_delete_hook {
+  my ( $class, $storeid, $scfg ) = @_;
+  nimble_delete_password_file($storeid);
+  if ( my $p = get_token_cache_path($storeid) ) {
+    unlink $p if -e $p;
+  }
+  return;
+}
+
 sub nimble_api_credentials {
-  my ($scfg) = @_;
-  my $user = $scfg->{ nimble_user } // $scfg->{ username };
-  my $pass = $scfg->{ nimble_password } // $scfg->{ password };
+  my ( $scfg, $storeid ) = @_;
+  my $user = $scfg->{ username } // $scfg->{ nimble_user };
+  die "Error :: username not set\n" if !defined($user) || $user eq '';
+  my $pass = $scfg->{ password } // $scfg->{ nimble_password };
+  if ( !defined($pass) || $pass eq '' ) {
+    $pass = nimble_read_password_file($storeid) if defined $storeid;
+  }
+  die "Error :: password not set (use pvesm --password or password file)\n" if !defined($pass) || $pass eq '';
   return ( $user, $pass );
 }
 
@@ -424,7 +477,7 @@ sub nimble_api_call {
     my $req = HTTP::Request->new( 'POST', $login_url );
     $req->header( 'Content-Type' => 'application/json' );
     # HPE Perl sample: request body is { "data": { "username", "password" } }; response has session_token under "data"
-    my ( $api_user, $api_pass ) = nimble_api_credentials($scfg);
+    my ( $api_user, $api_pass ) = nimble_api_credentials( $scfg, $storeid );
     $req->content( encode_json( { data => { username => $api_user, password => $api_pass } } ) );
     my $res = $ua->request( $req );
     die "Error :: Nimble login failed: " . $res->status_line . "\n" . ( $res->decoded_content // '' ) . "\n" unless $res->is_success;
