@@ -119,7 +119,7 @@ The plugin follows this convention: it sends all POST/PUT bodies as `{ data => $
 
 All plugin API usage has been checked against `docs/NIMBLE_API_REFERENCE.md`:
 
-- **Paths:** tokens, initiator_groups, initiators (not used; initiator_groups accepts iscsi_initiators inline), volumes, volumes/:id, volumes/:id/actions/restore, access_control_records, access_control_records/:id, snapshots, snapshots/:id, pools, volume_collections, subnets, subnets/:id, network_interfaces, network_interfaces/:id.
+- **Paths:** **tokens** (POST `…/v1/tokens` only; handled inside `nimble_api_call` before other methods—callers never pass `'POST', 'tokens'` as a path), initiator_groups, **initiators** (GET — used with GET initiator_groups to classify CHAP and IQN membership when picking a reusable group), volumes, volumes/:id, volumes/:id/actions/restore, access_control_records, access_control_records/:id, snapshots, snapshots/:id, pools, volume_collections, subnets, subnets/:id, network_interfaces, network_interfaces/:id.
 - **Methods:** POST (tokens, initiator_groups, volumes, access_control_records, snapshots), GET (all list/read), PUT (volumes/:id for size, name, volcoll_id, **online**), DELETE (volumes/:id, snapshots/:id, access_control_records/:id).
 - **Request bodies:** All POST/PUT bodies are sent as `{ data => $body }`; GET/DELETE use no body.
 - **Clone vs restore:** Restore = POST volumes/:id/actions/restore (overwrite existing volume). Clone = POST volumes with clone=true, name, base_snap_id (new volume). Plugin uses both correctly.
@@ -146,7 +146,11 @@ Conclusion: Proxmox-side flow matches Pure where the model applies: activate →
 - **Response handling:** All list/read responses that are iterated now use `nimble_data_as_list()` so that both array and single-object `data` from the API are handled.
 - **volume_size_info:** Uses `nimble_get_volume_info`; returns size/used; `used` from `vol_usage_compressed_bytes` or `size` fallback. Consistent with API.
 - **Error handling:** 401 triggers token cache clear and one retry; API errors die with message; ensure-ACL treats “already exists”/“duplicate” as success.
-- **Migration:** Ensure-ACL on activate (per-node initiator_group only) plus serial-based wait in map_volume ensures the target node can activate after live migration.
+- **Migration:** Ensure-ACL on activate (per-node initiator_group only) plus serial-based wait in map_volume ensures the target node can activate after live migration. **Shared-storage live migrate** does not create a new volume or snapshot on the array for the disk: the same Nimble volume/LUN is mapped on the target host over iSCSI (Pure does the same logical thing via API “connections” + pre-discovered portals; neither plugin clones the disk for a normal HA migrate).
+
+### Code inventory (`nimble_api_call` and login)
+
+Every HTTPS object-set call goes through `nimble_api_call` with `v1/` paths above; **POST tokens** uses the same JSON envelope but `LWP` posts to `$base/v1/tokens` inside `nimble_api_call` before other requests. **iSCSI** (`iscsiadm`) is host-side only — not Nimble REST — and is documented in the host-side paragraph of this file.
 
 ---
 

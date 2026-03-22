@@ -253,6 +253,8 @@ nimble: <storage_id>
 
 **Comparison with [kolesa-team/pve-purestorage-plugin](https://github.com/kolesa-team/pve-purestorage-plugin):** Pure **`activate_volume`** calls the array API to **create a volume connection** (host ↔ LUN) *before* **`map_volume`**. **`map_volume`** builds **`/dev/disk/by-id/wwn-0x…`** from the API serial plus a fixed vendor prefix and **waits until that path exists**—it does not read **`/sys/block/*/device/serial`** (multipath **dm** nodes often lack that file). It does **not** run `iscsiadm` in `map_volume`; operators pre-discover Pure portals once ([their README](https://github.com/kolesa-team/pve-purestorage-plugin#iscsi-configuration)). This Nimble plugin has no “connection” RPC: it sets **initiator group + access_control_records**, then runs **sendtargets + login** for the volume’s **`target_name`**. Device lookup follows the same **by-id / WWN idea as Pure**: try **`wwn-0x<serial>`** and any **`by-id`** name containing the API **`serial_number`**, then fall back to sysfs serial matching. Discovery IPs: **GET subnets** / sessions / **`iscsi_discovery_ips`**.
 
+**Live migration vs “new volume”:** With **shared** Nimble storage, migrate **does not** clone or snapshot the disk on the array—the VM keeps using the **same** volume; the **target** node must **iSCSI login** and see the block device. That matches Pure’s model (same LUN, host attachment differs). **Moving** a disk **from LVM into** Nimble is a **copy** into a **new** volume (different code path); success there only proves API + one-node iSCSI, not migrate-time **map_volume** on another node.
+
 ### Auto iSCSI discovery
 
 With **auto iSCSI discovery** enabled (the default; set **`auto_iscsi_discovery no`** or **`0`** to disable):
@@ -435,6 +437,8 @@ If you encounter issues while using the plugin, consider the following steps.
 ### Debug logging
 
 The plugin writes debug output to syslog; you can view it in Proxmox logs.
+
+**Where migrate / `map_volume` messages actually appear:** `warn` / `print` from a storage plugin often show up in the **task log** for that job (Datacenter → **Task History** → open the failed migrate), or under **`/var/log/pve/tasks/`** (recent files in the `active` / finished task paths). They are **not** guaranteed to appear in **`journalctl -u pvedaemon`** on the target host, so an empty `journalctl … | grep` is normal. To catch live output during a migrate, run on the **target** node: **`journalctl -u pvedaemon -f`** (and/or **`journalctl -f`**) while you start the migrate, or open the task in the GUI and read the log panel.
 
 **Enable debug logging:**
 
