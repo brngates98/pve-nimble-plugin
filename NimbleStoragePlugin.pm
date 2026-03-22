@@ -934,8 +934,8 @@ sub parse_volname {
 }
 
 sub get_device_path_wwid {
-  my ( $class, $scfg, $volname ) = @_;
-  my $volume = $class->nimble_get_volume_info( $scfg, $volname, undef );
+  my ( $class, $scfg, $volname, $storeid ) = @_;
+  my $volume = $class->nimble_get_volume_info( $scfg, $volname, $storeid );
   return ( '', '' ) unless $volume && $volume->{ serial };
   return get_device_path_by_serial( $volume->{ serial } );
 }
@@ -944,7 +944,7 @@ sub filesystem_path {
   my ( $class, $scfg, $volname, $snapname ) = @_;
   die "Error :: filesystem_path: snapshot not implemented ($snapname)\n" if defined( $snapname );
   my ( $vtype, undef, $vmid ) = $class->parse_volname( $volname );
-  my ( $path, $wwid ) = $class->get_device_path_wwid( $scfg, $volname );
+  my ( $path, $wwid ) = $class->get_device_path_wwid( $scfg, $volname, undef );
   return wantarray ? ( "", "", "", "" ) : "" unless length( $path );
   return wantarray ? ( $path, $vmid, $vtype, $wwid ) : $path;
 }
@@ -1039,7 +1039,8 @@ sub volume_size_info {
 
 sub map_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname ) = @_;
-  my $volume = $class->nimble_get_volume_info( $scfg, $volname, undef );
+  # $storeid is required for nimble_api_credentials (priv .pw path) and token cache.
+  my $volume = $class->nimble_get_volume_info( $scfg, $volname, $storeid );
   die "Error :: Volume \"$volname\" not found (cannot map).\n" unless $volume && $volume->{ serial };
   my $serial = $volume->{ serial };
   scsi_scan_new( 'iscsi' );
@@ -1063,7 +1064,7 @@ sub map_volume {
 
 sub unmap_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname ) = @_;
-  my ( $path, $wwid ) = $class->get_device_path_wwid( $scfg, $volname );
+  my ( $path, $wwid ) = $class->get_device_path_wwid( $scfg, $volname, $storeid );
   return 0 unless length( $path ) && -b $path;
   my ( $device_path, @slaves ) = block_device_slaves( $path );
   exec_command( ['sync'] );
