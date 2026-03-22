@@ -146,6 +146,11 @@ sub properties {
       description => "Comma-separated iSCSI discovery addresses (IP or hostname, optional :port). Merged with GET subnets; use when subnets returns no discovery_ip or list is wrapped differently on your firmware.",
       type        => 'string',
     },
+    storeid => {
+      description => "Proxmox storage ID (storage.cfg section name). Auto-set by the plugin to match the section name so workers can resolve priv/password and token paths when the explicit storeid argument is omitted (cluster import/migration). Do not change manually.",
+      type        => 'string',
+      optional    => 1,
+    },
   };
 }
 
@@ -164,6 +169,7 @@ sub options {
     debug     => { optional => 1 },
     auto_iscsi_discovery => { optional => 1 },
     iscsi_discovery_ips  => { optional => 1 },
+    storeid   => { optional => 1 },
     nodes     => { optional => 1 },
     disable   => { optional => 1 },
     content   => { optional => 1 },
@@ -179,7 +185,14 @@ sub check_config {
     $config->{ username } //= $config->{ nimble_user };
   }
 
-  return $class->SUPER::check_config( $sectionId, $config, $create, $skipSchemaCheck );
+  my $opts = $class->SUPER::check_config( $sectionId, $config, $create, $skipSchemaCheck );
+  # TrueNAS-style: keep section id on $scfg (storage_config omits the key name from the hash body).
+  # Ensures nimble_effective_storeid finds a store id for priv files / token cache when PVE passes
+  # only $scfg (e.g. some worker paths).
+  if ( ref($opts) eq 'HASH' && defined $sectionId && $sectionId ne '' ) {
+    $opts->{ storeid } = $sectionId;
+  }
+  return $opts;
 }
 
 # Password file layout matches PVE core plugins with sensitive `password` (same path as ESXiPlugin /
@@ -267,7 +280,9 @@ sub nimble_effective_storeid {
   my ( $scfg, $storeid ) = @_;
   return $storeid if defined $storeid && $storeid ne '';
   return undef unless ref($scfg) eq 'HASH';
-  for my $k (qw( storage storagename storeid name id cfgkey section )) {
+  # Injected in check_config (TrueNAS-style); authoritative when present.
+  return $scfg->{ storeid } if defined $scfg->{ storeid } && $scfg->{ storeid } ne '';
+  for my $k (qw( storage storagename name id cfgkey section )) {
     my $v = $scfg->{ $k };
     return $v if defined $v && $v ne '';
   }
