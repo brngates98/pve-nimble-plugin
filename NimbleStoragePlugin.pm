@@ -136,6 +136,10 @@ sub properties {
       type        => 'boolean',
       default     => 'no'
     },
+    iscsi_discovery_ips => {
+      description => "Comma-separated iSCSI discovery addresses (IP or hostname, optional :port). Merged with GET subnets; use when subnets returns no discovery_ip or list is wrapped differently on your firmware.",
+      type        => 'string',
+    },
   };
 }
 
@@ -153,6 +157,7 @@ sub options {
     token_ttl => { optional => 1 },
     debug     => { optional => 1 },
     auto_iscsi_discovery => { optional => 1 },
+    iscsi_discovery_ips  => { optional => 1 },
     nodes     => { optional => 1 },
     disable   => { optional => 1 },
     content   => { optional => 1 },
@@ -268,6 +273,7 @@ sub get_command_path {
   return $cmd->{ $name };
 }
 
+# ($command, $dm, %param) — always pass numeric $dm before run_command options (e.g. timeout => 60).
 sub exec_command {
   my ( $command, $dm, %param ) = @_;
   $dm //= 1;
@@ -518,16 +524,36 @@ sub nimble_api_call {
   return length( $content ) ? decode_json( $content ) : {};
 }
 
-# Normalize API list response: HPE can return data as array or single object.
+# Normalize API list response: HPE can return data as array, { items => [...] }, or single object.
 sub nimble_data_as_list {
   my ( $raw ) = @_;
   return [] unless defined $raw;
   return $raw if ref($raw) eq 'ARRAY';
-  return [ $raw ] if ref($raw) eq 'HASH' && defined $raw->{ id };
+  if ( ref($raw) eq 'HASH' ) {
+    if ( defined $raw->{ items } && ref( $raw->{ items } ) eq 'ARRAY' ) {
+      return $raw->{ items };
+    }
+    return [ $raw ] if defined $raw->{ id };
+  }
   return [];
 }
 
-### Discovery IPs from Nimble subnets API (strict: data / allow_iscsi; fallback: any discovery_ip)
+sub nimble_parse_manual_discovery_ips {
+  my ($scfg) = @_;
+  my $s = $scfg->{ iscsi_discovery_ips };
+  return () if !defined $s || $s eq '';
+  my @out;
+  my %seen;
+  for my $chunk ( split /,/, $s ) {
+    $chunk =~ s/^\s+|\s+$//g;
+    next if $chunk eq '';
+    next if length($chunk) > 253;
+    push @out, $chunk if !$seen{$chunk}++;
+  }
+  return @out;
+}
+
+### Discovery IPs: GET subnets (unwrap items), then optional iscsi_discovery_ips from storage config.
 sub get_nimble_iscsi_discovery_ips {
   my ( $scfg, $storeid ) = @_;
   my @ips;
@@ -562,7 +588,11 @@ sub get_nimble_iscsi_discovery_ips {
   if ( $@ ) {
     chomp( my $api_err = $@ );
     warn "Warning :: Could not get iSCSI discovery IPs from Nimble subnets API: $api_err\n";
-    return ();
+    @ips = ();
+  }
+  my %seen_ip = map { $_ => 1 } @ips;
+  for my $m ( nimble_parse_manual_discovery_ips($scfg) ) {
+    push @ips, $m if !$seen_ip{$m}++;
   }
   return @ips;
 }
@@ -1262,7 +1292,7 @@ sub map_volume {
     warn "Warning :: Volume \"$volname\" has no target_name (iSCSI IQN) from Nimble API; "
       . "only generic node login was attempted.\n";
   }
-  eval { exec_command( [ get_command_path('multipath'), '-v2' ], timeout => 60 ); };
+  eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
   scsi_scan_new( 'iscsi' );
   wait_for(
     sub {
@@ -1280,7 +1310,7 @@ sub map_volume {
     wait_for( $mp_ready, "multipath for \"$volname\"", 30 );
   }
   elsif ( !length($wwid) ) {
-    eval { exec_command( [ get_command_path('multipath'), '-v2' ], timeout => 60 ); };
+    eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
     ( $path, $wwid ) = get_device_path_by_serial( $serial );
     if ( length( $wwid ) && !multipath_check( $wwid ) ) {
       exec_command( [ 'multipathd', 'add', 'map', $wwid ] );
