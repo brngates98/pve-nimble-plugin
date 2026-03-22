@@ -9,7 +9,7 @@ use IO::File   ();
 use File::Path ();
 
 use PVE::JSONSchema ();
-use PVE::Tools qw( file_read_firstline run_command );
+use PVE::Tools qw( file_get_contents file_read_firstline run_command );
 use PVE::INotify         ();
 use PVE::Storage         ();
 use PVE::Storage::Plugin ();
@@ -570,11 +570,17 @@ sub run_iscsi_discovery_and_login {
 sub nimble_get_local_iscsi_iqn {
   my $path = '/etc/iscsi/initiatorname.iscsi';
   return undef unless -r $path;
-  my $line = file_read_firstline( $path );
-  return undef unless defined $line && $line =~ m/^\s*InitiatorName\s*=\s*(.+)\s*$/;
-  my $iqn = $1;
-  $iqn =~ s/^\s+|\s+$//g;
-  return $iqn if length( $iqn ) && $iqn =~ m/^iqn\./;
+  # Do not use only the first line: open-iscsi ships comment lines (## / #) before InitiatorName=.
+  my $content = eval { file_get_contents($path) };
+  return undef if !defined $content || $content eq '';
+  for my $line ( split /\r?\n/, $content ) {
+    next if $line =~ m/^\s*#/;
+    next if $line =~ m/^\s*$/;
+    next unless $line =~ m/^\s*InitiatorName\s*=\s*(\S+)/;
+    my $iqn = $1;
+    $iqn =~ s/^["']|["']$//g;
+    return $iqn if length($iqn) && $iqn =~ m/^iqn\./;
+  }
   return undef;
 }
 
@@ -597,7 +603,7 @@ sub nimble_ensure_initiator_group_id {
     return nimble_get_initiator_group_id( $scfg, $ig_name, $storeid );
   }
   my $iqn = nimble_get_local_iscsi_iqn();
-  die "Error :: initiator_group not set and could not read local iSCSI IQN (install open-iscsi and configure /etc/iscsi/initiatorname.iscsi).\n"
+  die "Error :: initiator_group not set and could not read a valid IQN from /etc/iscsi/initiatorname.iscsi (install open-iscsi; need an uncommented line InitiatorName=iqn...., or set initiator_group to an existing Nimble group).\n"
     unless $iqn;
   my $nodename = PVE::INotify::nodename();
   $ig_name = "pve-$nodename";
