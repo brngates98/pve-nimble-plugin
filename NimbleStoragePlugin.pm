@@ -2078,6 +2078,16 @@ sub map_volume {
         }
       }
       if ( !nimble_iscsi_target_in_sessions( $target_iqn, 12 ) ) {
+        # Session not yet visible in iscsiadm listing, but login may have succeeded on some portals
+        # (Nimble multi-controller: only the owning controller serves the IQN; other portals return
+        # exit 21 / no node record, which is expected).  Do a quick SCSI rescan + serial check so
+        # that nimble_iscsi_login_target_on_portals' $device_already gate can suppress a false-positive
+        # "no session" warning when the session IS established and the LUN just needs a scan to appear.
+        eval {
+          my $adm = nimble_iscsiadm_path();
+          run_command( [ $adm, '-m', 'session', '--rescan' ], timeout => 30, quiet => 1 ) if -x $adm;
+        };
+        scsi_scan_new('iscsi');
         nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@portals, 0, $serial );
       }
     }
