@@ -132,9 +132,9 @@ Other sets in full docs: active_directory_memberships, alarms, application_serve
 
 These endpoints are not used by the plugin today but are useful for automation (e.g. auto iSCSI discovery) or for displaying management vs discovery IPs.
 
-**GET v1/network_interfaces**
+**GET v1/network_interfaces** and **GET v1/network_interfaces/:id**
 
-- **Response (data):** Array of per-array network interfaces.
+- **List response (data):** May be **summary rows** (`id`, `name`, …) without **`ip_list`**; use **GET v1/network_interfaces/:id** for full fields.
 - **Key fields:** `id`, `name`, **`ip_list`** (list of IPs on this interface), **`nic_type`** (interface role/type), `controller_id`, `controller_name`, `link_status`, `link_speed`, `mac`, `mtu`, `slot`, `port`, `array_id`, `array_name_or_serial`.
 - Use `nic_type` and `ip_list` to identify management vs data/iSCSI interfaces (exact `nic_type` values are array/OS-dependent; see Nimble CLI `ip --list` for Type: management, discovery, data, support).
 - **Normal response:** 200.

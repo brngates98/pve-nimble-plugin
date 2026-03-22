@@ -63,6 +63,8 @@ This plugin integrates HPE Nimble Storage arrays with Proxmox Virtual Environmen
 
 ### iSCSI on Proxmox
 
+**Same outcome as manual PVE iSCSI (no duplicate storage entry needed):** In the GUI, **Datacenter → Storage → Add → iSCSI** with your Nimble **portal** (e.g. `192.168.221.120`), the volume’s **IQN** from the array, **Enabled**, and **Use LUNs directly**, then add a disk as **LUN 0** raw—that is the host-side pattern this plugin automates. Each Nimble volume has its own **per-volume IQN** with **LUN 0**. The plugin uses the REST API for the volume and ACL, runs **`iscsiadm` discovery/login** on the resolved portal list, sets **`node.startup=automatic`** for that target+portal (like **Enabled**), runs **`iscsiadm -m session --rescan`**, rescans SCSI, resolves **`/dev/disk/by-id`** by serial (raw block to the VM, like **Use LUNs directly**), and optional multipath.
+
 Either use **auto iSCSI discovery** (recommended) or run discovery manually:
 
 **Option A — Auto iSCSI discovery (opt-in)**  

@@ -314,6 +314,30 @@ sub nimble_volname {
   return $name;
 }
 
+# Trim / de-space / casefold for comparing API serial_number to sysfs VPD serial.
+sub nimble_serial_normalize {
+  my ($s) = @_;
+  return '' unless defined $s;
+  $s =~ s/^\s+|\s+$//g;
+  $s =~ s/\s+//g;
+  return lc $s;
+}
+
+# True if Nimble API serial matches kernel-reported SCSI unit serial (spacing/case quirks).
+sub nimble_serial_matches {
+  my ( $api, $kernel ) = @_;
+  return 0 if !length( $api ) || !length( $kernel );
+  my $a = nimble_serial_normalize($api);
+  my $b = nimble_serial_normalize($kernel);
+  return 0 if !length($a) || !length($b);
+  return 1 if $a eq $b;
+  return 1 if $kernel =~ /\Q$api\E/i;
+  my $min = length($a) < length($b) ? length($a) : length($b);
+  return 0 if $min < 8;
+  return 1 if index( $b, $a ) >= 0 || index( $a, $b ) >= 0;
+  return 0;
+}
+
 # Find block device path by SCSI serial (e.g. from Nimble volume serial_number).
 # Unlike Pure (fixed prefix 3624a9370), Nimble has no fixed WWN prefix in this plugin;
 # we match the API serial_number against /sys/block/*/device/serial and by-id.
@@ -341,7 +365,7 @@ sub get_device_path_by_serial {
       my $dev_serial = file_read_firstline( $ser_path );
       if ( defined $dev_serial && $dev_serial =~ /^\s*(.+?)\s*$/ ) {
         $dev_serial = $1;
-        if ( $dev_serial eq $serial || $dev_serial =~ /\Q$serial\E/ ) {
+        if ( nimble_serial_matches( $serial, $dev_serial ) ) {
           $best_path = $abs unless length($best_path);
           if ( $e =~ /^wwn-0x([0-9a-f]+)/i ) {
             $wwid = lc($1);
@@ -567,6 +591,30 @@ sub nimble_hydrate_subnet_summaries {
   }
 }
 
+# List GET network_interfaces is often summary-only; ip_list / nic_type need GET network_interfaces/:id.
+sub nimble_fetch_network_interface_by_id {
+  my ( $scfg, $storeid, $if_id ) = @_;
+  return undef if !defined $if_id || $if_id eq '';
+  my $r = nimble_api_call( $scfg, 'GET', "network_interfaces/$if_id", undef, $storeid );
+  my $d = $r->{ data };
+  return ref( $d ) eq 'HASH' ? $d : undef;
+}
+
+sub nimble_hydrate_network_interface_summaries {
+  my ( $scfg, $storeid, $list ) = @_;
+  return unless ref( $list ) eq 'ARRAY';
+  for my $ni ( @$list ) {
+    next unless ref( $ni ) eq 'HASH';
+    my $id = $ni->{ id };
+    next if !$id;
+    my $ipl = $ni->{ ip_list };
+    next if ref( $ipl ) eq 'ARRAY' && @$ipl;
+    my $full = nimble_fetch_network_interface_by_id( $scfg, $storeid, $id );
+    next unless $full && ref( $full ) eq 'HASH';
+    %$ni = ( %$ni, %$full );
+  }
+}
+
 sub nimble_parse_manual_discovery_ips {
   my ($scfg) = @_;
   my $s = $scfg->{ iscsi_discovery_ips };
@@ -601,6 +649,7 @@ sub get_iscsi_discovery_ips_from_running_sessions {
 ### Discovery IPs: GET subnets (unwrap items), then optional iscsi_discovery_ips from storage config.
 sub get_nimble_iscsi_discovery_ips {
   my ( $scfg, $storeid ) = @_;
+  my @session_first = get_iscsi_discovery_ips_from_running_sessions();
   my @ips;
   eval {
     my $res  = nimble_api_call( $scfg, 'GET', 'subnets', undef, $storeid );
@@ -640,18 +689,32 @@ sub get_nimble_iscsi_discovery_ips {
     eval {
       my $r2   = nimble_api_call( $scfg, 'GET', 'network_interfaces', undef, $storeid );
       my $nifs = nimble_data_as_list( $r2->{ data } );
-      for my $ni ( @$nifs ) {
-        next unless ref($ni) eq 'HASH';
-        my $nt = $ni->{ nic_type } // '';
-        next unless $nt =~ /data|iscsi|discovery/i;
-        my $ipl = $ni->{ ip_list };
-        next unless ref($ipl) eq 'ARRAY';
-        for my $e ( @$ipl ) {
-          my $s = ref($e) eq 'HASH' ? ( $e->{ ip } // $e->{ label } // '' ) : "$e";
-          $s =~ s/\/\d+\z//;
-          next unless $s =~ /^(\d{1,3}(?:\.\d{1,3}){3})$/;
-          push @ips, $1 if !$seen_ip{$1}++;
+      nimble_hydrate_network_interface_summaries( $scfg, $storeid, $nifs );
+      my $gather_nif_ips = sub {
+        my ( $strict_nic_type ) = @_;
+        my @found;
+        my %seen_local;
+        for my $ni ( @$nifs ) {
+          next unless ref($ni) eq 'HASH';
+          my $nt = $ni->{ nic_type } // '';
+          if ($strict_nic_type) {
+            next unless $nt =~ /data|iscsi|discovery/i;
+          }
+          my $ipl = $ni->{ ip_list };
+          next unless ref($ipl) eq 'ARRAY';
+          for my $e ( @$ipl ) {
+            my $s = ref($e) eq 'HASH' ? ( $e->{ ip } // $e->{ label } // '' ) : "$e";
+            $s =~ s/\/\d+\z//;
+            next unless $s =~ /^(\d{1,3}(?:\.\d{1,3}){3})$/;
+            push @found, $1 if !$seen_local{$1}++;
+          }
         }
+        return @found;
+      };
+      my @nif_ips = $gather_nif_ips->(1);
+      @nif_ips = $gather_nif_ips->(0) if !@nif_ips;
+      for my $x (@nif_ips) {
+        push @ips, $x if !$seen_ip{$x}++;
       }
     };
     if ( $@ && $DEBUG >= 1 ) {
@@ -662,13 +725,17 @@ sub get_nimble_iscsi_discovery_ips {
   for my $m ( nimble_parse_manual_discovery_ips($scfg) ) {
     push @ips, $m if !$seen_ip{$m}++;
   }
-  if ( !@ips ) {
-    for my $h ( get_iscsi_discovery_ips_from_running_sessions() ) {
-      push @ips, $h if !$seen_ip{$h}++;
-    }
-    print "Info :: Using iSCSI portal IP(s) from existing sessions (subnets API returned none): @ips\n" if @ips;
+  my $from_config = @ips;
+  my %seen_ord;
+  my @merged;
+  for my $p ( @session_first, @ips ) {
+    next unless defined $p && $p =~ m/^\S+$/ && length($p) <= 253;
+    push @merged, $p if !$seen_ord{$p}++;
   }
-  return @ips;
+  if ( !$from_config && @session_first ) {
+    print "Info :: Using iSCSI portal IP(s) from existing sessions (subnets API returned none): @merged\n";
+  }
+  return @merged;
 }
 
 sub nimble_iscsi_portal {
@@ -726,7 +793,26 @@ sub nimble_iscsi_login_target_on_all_recorded_portals {
   };
 }
 
+# Same as PVE Datacenter → Add → iSCSI: "Enabled" (persist login across reboots) for this target+portal.
+sub nimble_iscsi_node_set_startup_automatic {
+  my ( $target_iqn, $portal ) = @_;
+  return unless length( $target_iqn ) && length( $portal );
+  my $iscsiadm = nimble_iscsiadm_path();
+  return unless -x $iscsiadm;
+  eval {
+    run_command(
+      [
+        $iscsiadm, '-m', 'node', '-T', $target_iqn, '-p', $portal,
+        '--op', 'update', '-n', 'node.startup', '-v', 'automatic',
+      ],
+      timeout => 10,
+      quiet   => 1
+    );
+  };
+}
+
 # After iscsi_sendtargets_on_ips: login this volume IQN on each portal (no per-IP rediscovery; no global node --login).
+# Mirrors manual PVE iSCSI: portal + per-volume Nimble IQN + "Use LUNs directly" (Nimble exposes LUN 0 on that IQN).
 sub nimble_iscsi_login_target_on_portals {
   my ( $storeid, $target_iqn, $ips_ref ) = @_;
   return unless length( $target_iqn ) && $target_iqn =~ m/^iqn\./i;
@@ -747,6 +833,7 @@ sub nimble_iscsi_login_target_on_portals {
       chomp( my $e = $@ );
       print "Debug :: iscsi login $target_iqn @ $portal: $e\n";
     }
+    nimble_iscsi_node_set_startup_automatic( $target_iqn, $portal );
   }
   if ( !nimble_iscsi_target_in_sessions($target_iqn) ) {
     warn "Warning :: No active iSCSI session for volume target \"$target_iqn\" after portal logins; "
@@ -1412,9 +1499,26 @@ sub map_volume {
   if ( length($target_iqn) ) {
     if (@dip) {
       nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@dip );
+      if ( !nimble_iscsi_target_in_sessions($target_iqn) ) {
+        iscsi_sendtargets_on_ips( \@dip );
+        nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@dip );
+      }
     }
     else {
       nimble_iscsi_login_target_on_all_recorded_portals($target_iqn);
+      my $adm = nimble_iscsiadm_path();
+      if ( -x $adm ) {
+        eval {
+          run_command(
+            [
+              $adm, '-m', 'node', '-T', $target_iqn,
+              '--op', 'update', '-n', 'node.startup', '-v', 'automatic',
+            ],
+            timeout => 10,
+            quiet   => 1
+          );
+        };
+      }
     }
   }
   else {
@@ -1424,18 +1528,28 @@ sub map_volume {
       eval { run_command( [ $adm, '-m', 'node', '--login' ], timeout => 90, quiet => 1 ); } if -x $adm;
     }
   }
+  # Like the GUI after attaching a LUN: rescan active iSCSI sessions so new LUNs appear without waiting only on sysfs scan.
+  eval {
+    my $adm = nimble_iscsiadm_path();
+    run_command( [ $adm, '-m', 'session', '--rescan' ], timeout => 120, quiet => 1 ) if -x $adm;
+  };
   eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
   scsi_scan_new( 'iscsi' );
+  my $wait_ticks = 0;
   wait_for(
     sub {
+      ++$wait_ticks;
+      if ( $wait_ticks % 100 == 0 ) {
+        eval { scsi_scan_new('iscsi'); };
+      }
       my ( $p, $w ) = get_device_path_by_serial( $serial );
       return length($p) && -e $p;
     },
-    "volume \"$volname\" to appear",
-    45
+    "volume \"$volname\" to appear (API serial " . $serial . "; check iscsiadm -m session and ACL)",
+    90
   );
   my ( $path, $wwid ) = get_device_path_by_serial( $serial );
-  die "Error :: Volume \"$volname\" device did not appear after rescan.\n" unless length($path) && -b $path;
+  die "Error :: Volume \"$volname\" device did not appear after rescan (serial $serial).\n" unless length($path) && -b $path;
   if ( length( $wwid ) && !multipath_check( $wwid ) ) {
     exec_command( [ 'multipathd', 'add', 'map', $wwid ] );
     my $mp_ready = sub { return multipath_check( $wwid ) };
