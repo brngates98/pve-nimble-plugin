@@ -87,12 +87,9 @@ sub plugindata {
   return {
     content => [ { images => 1, none => 1 }, { images => 1 } ],
     format  => [ { raw    => 1 },            "raw" ],
-    # Sensitive: not written into storage.cfg by pvesm/API; on_add_hook / on_update_hook receive %param and write priv files.
-    # (Standard PVE has no Datacenter GUI to add/edit custom storage types—use pvesm, cluster API, or manual files.)
-    # Include legacy alias used by some configs / tooling.
-    # Only `password` here — extra keys (e.g. nimble_password) must also appear in properties(),
-    # or PVE dies loading storage.cfg: "undefined property '…'" (SectionConfig.pm).
-    'sensitive-properties' => { password => 1 },
+    # Like TrueNAS (api_key) / Pure (token): `password` is a normal option stored in storage.cfg (pmxcfs).
+    # Session tokens still cache under /etc/pve/priv/nimble/. Legacy: priv .pw files and hooks mirror on update.
+    'sensitive-properties' => {},
   };
 }
 
@@ -102,8 +99,8 @@ sub properties {
       description => "HPE Nimble array management IP or DNS name.",
       type        => 'string'
     },
-    # Do not redeclare username/password here (RBD/CIFS own those names globally). List them in options()
-    # only — same pattern as ESXi/CIFS. Password is sensitive: hooks write /etc/pve/priv/storage/<id>.pw (canonical) plus legacy mirrors.
+    # Do not redeclare username/password here (RBD/CIFS own those names globally). List them in options().
+    # Password is stored in storage.cfg (cluster-replicated), like TrueNAS api_key; priv .pw remains optional legacy + mirror.
     initiator_group => {
       description => "Initiator group name (optional). If unset, a group is created automatically using this host's iSCSI IQN.",
       type        => 'string'
@@ -247,20 +244,31 @@ sub nimble_delete_password_file {
 sub on_add_hook {
   my ( $class, $storeid, $scfg, %sensitive ) = @_;
   my $pw = $sensitive{ password };
-  die "missing password\n" if !defined($pw) || $pw eq '';
-  nimble_set_password( $storeid, $pw );
+  $pw = $scfg->{ password } if ( !defined($pw) || $pw eq '' ) && ref($scfg) eq 'HASH';
+  nimble_set_password( $storeid, $pw ) if defined($pw) && $pw ne '';
   return;
 }
 
 sub on_update_hook {
-  my ( $class, $storeid, $scfg, %sensitive ) = @_;
-  return if !exists( $sensitive{ password } );
-  my $pw = $sensitive{ password };
-  if ( defined($pw) && $pw ne '' ) {
-    nimble_set_password( $storeid, $pw );
+  my ( $class, $storeid, $opts, %sensitive ) = @_;
+  $opts //= {};
+  if ( exists $sensitive{ password } ) {
+    my $pw = $sensitive{ password };
+    if ( defined($pw) && $pw ne '' ) {
+      nimble_set_password( $storeid, $pw );
+    }
+    else {
+      nimble_delete_password_file($storeid);
+    }
   }
-  else {
-    nimble_delete_password_file($storeid);
+  elsif ( exists $opts->{ password } ) {
+    my $pw = $opts->{ password };
+    if ( defined($pw) && $pw ne '' ) {
+      nimble_set_password( $storeid, $pw );
+    }
+    else {
+      nimble_delete_password_file($storeid);
+    }
   }
   return;
 }
@@ -2139,9 +2147,36 @@ sub volume_export {
   return 1;
 }
 
-# Same hook name as PureStoragePlugin (no-op here; password updates use on_update_hook).
+# PVE::API2::Storage::Config: on_update_hook_full($storeid, $scfg, $opts, $delete, $sensitive)
+# Mirror password to priv .pw when operators still rely on file-based secrets; cfg is authoritative for API.
 sub on_update_hook_full {
-  my ( $class, $storeid, $scfg, $updated_props, $deleted_props ) = @_;
+  my ( $class, $storeid, $scfg, $opts, $delete, $sensitive ) = @_;
+  $opts      //= {};
+  $delete    //= [];
+  $sensitive //= {};
+  my %del = map { $_ => 1 } @$delete;
+
+  if ( exists $opts->{ password } ) {
+    my $pw = $opts->{ password };
+    if ( defined($pw) && $pw ne '' ) {
+      nimble_set_password( $storeid, $pw );
+    }
+    else {
+      nimble_delete_password_file($storeid);
+    }
+  }
+  elsif ( $del{ password } ) {
+    nimble_delete_password_file($storeid);
+  }
+  elsif ( exists $sensitive->{ password } ) {
+    my $pw = $sensitive->{ password };
+    if ( defined($pw) && $pw ne '' ) {
+      nimble_set_password( $storeid, $pw );
+    }
+    else {
+      nimble_delete_password_file($storeid);
+    }
+  }
   return;
 }
 
