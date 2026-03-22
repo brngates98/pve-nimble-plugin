@@ -87,8 +87,10 @@ sub plugindata {
   return {
     content => [ { images => 1, none => 1 }, { images => 1 } ],
     format  => [ { raw    => 1 },            "raw" ],
-    # Like ESXi/PBS: `password` is not in $config during check_config; pvesm passes it via on_add_hook %sensitive.
-    'sensitive-properties' => { password => 1 },
+    # Sensitive: not written into storage.cfg by pvesm/API; on_add_hook / on_update_hook receive %param and write priv files.
+    # (Standard PVE has no Datacenter GUI to add/edit custom storage types—use pvesm, cluster API, or manual files.)
+    # Include legacy alias used by some configs / tooling.
+    'sensitive-properties' => { password => 1, nimble_password => 1 },
   };
 }
 
@@ -99,7 +101,7 @@ sub properties {
       type        => 'string'
     },
     # Do not redeclare username/password here (RBD/CIFS own those names globally). List them in options()
-    # only — same pattern as ESXi. Password is sensitive: stored under /etc/pve/priv/nimble/<storeid>.pw via on_add_hook.
+    # only — same pattern as ESXi. Password is sensitive: hooks write /etc/pve/priv/storage/ (and legacy priv/nimble/).
     initiator_group => {
       description => "Initiator group name (optional). If unset, a group is created automatically using this host's iSCSI IQN.",
       type        => 'string'
@@ -150,6 +152,7 @@ sub options {
     address   => { fixed => 1 },
     username  => { fixed => 1 },
     password  => { optional => 1 },
+    nimble_password => { optional => 1 },
     initiator_group => { optional => 1 },
 
     vnprefix  => { optional => 1 },
@@ -178,40 +181,56 @@ sub check_config {
   return $class->SUPER::check_config( $sectionId, $config, $create, $skipSchemaCheck );
 }
 
-sub nimble_password_file {
+# Proxmox stores storage secrets under /etc/pve/priv/storage/ (pmxcfs-replicated like the rest of /etc/pve).
+# We also keep /etc/pve/priv/nimble/<id>.pw for backward compatibility with existing clusters.
+sub nimble_password_file_paths {
   my ($storeid) = @_;
-  return "/etc/pve/priv/nimble/${storeid}.pw";
+  return () if !defined $storeid || $storeid eq '';
+  return (
+    "/etc/pve/priv/storage/${storeid}.nimble.pw",
+    "/etc/pve/priv/nimble/${storeid}.pw",
+  );
+}
+
+sub nimble_password_ensure_parent_dirs {
+  for my $dir ( '/etc/pve/priv/storage', '/etc/pve/priv/nimble' ) {
+    next if -d $dir;
+    eval { File::Path::make_path( $dir, { mode => 0700 } ); };
+    die "Error :: cannot create $dir: $@\n" if $@ || !-d $dir;
+  }
 }
 
 sub nimble_set_password {
   my ( $storeid, $password ) = @_;
-  my $dir = '/etc/pve/priv/nimble';
-  if ( !-d $dir ) {
-    eval { File::Path::make_path( $dir, { mode => 0700 } ); };
-    die "Error :: cannot create $dir: $@\n" if $@ || !-d $dir;
+  nimble_password_ensure_parent_dirs();
+  for my $f ( nimble_password_file_paths($storeid) ) {
+    PVE::Tools::file_set_contents( $f, "$password\n", 0600, 1 );
   }
-  PVE::Tools::file_set_contents( nimble_password_file($storeid), "$password\n", 0600, 1 );
 }
 
 sub nimble_read_password_file {
   my ($storeid) = @_;
-  my $f = nimble_password_file($storeid);
-  return undef unless -f $f;
-  my $c = PVE::Tools::file_get_contents($f);
-  return undef unless defined $c;
-  chomp $c;
-  return length($c) ? $c : undef;
+  return undef if !defined $storeid || $storeid eq '';
+  for my $f ( nimble_password_file_paths($storeid) ) {
+    next unless -f $f;
+    my $c = PVE::Tools::file_get_contents($f);
+    next unless defined $c;
+    chomp $c;
+    return $c if length $c;
+  }
+  return undef;
 }
 
 sub nimble_delete_password_file {
   my ($storeid) = @_;
-  my $f = nimble_password_file($storeid);
-  unlink $f if -e $f;
+  for my $f ( nimble_password_file_paths($storeid) ) {
+    unlink $f if -e $f;
+  }
 }
 
 sub on_add_hook {
   my ( $class, $storeid, $scfg, %sensitive ) = @_;
-  my $pw = $sensitive{ password };
+  my $pw = $sensitive{ password } // $sensitive{ nimble_password };
   die "missing password\n" if !defined($pw) || $pw eq '';
   nimble_set_password( $storeid, $pw );
   return;
@@ -219,9 +238,10 @@ sub on_add_hook {
 
 sub on_update_hook {
   my ( $class, $storeid, $scfg, %sensitive ) = @_;
-  return if !exists( $sensitive{ password } );
-  if ( defined( $sensitive{ password } ) && $sensitive{ password } ne '' ) {
-    nimble_set_password( $storeid, $sensitive{ password } );
+  return if !exists( $sensitive{ password } ) && !exists( $sensitive{ nimble_password } );
+  my $pw = $sensitive{ password } // $sensitive{ nimble_password };
+  if ( defined($pw) && $pw ne '' ) {
+    nimble_set_password( $storeid, $pw );
   }
   else {
     nimble_delete_password_file($storeid);
@@ -248,7 +268,7 @@ sub nimble_api_credentials {
   }
   # Some PVE workers pass a redacted $scfg (no password) but include the storage id under another key.
   if ( (!defined($pass) || $pass eq '') && ref($scfg) eq 'HASH' ) {
-    for my $k (qw( storage storagename )) {
+    for my $k (qw( storage storagename storeid name id )) {
       my $sid = $scfg->{ $k };
       next unless defined $sid && $sid ne '';
       $pass = nimble_read_password_file($sid);
@@ -1683,7 +1703,7 @@ sub nimble_effective_storeid {
   my ( $scfg, $storeid ) = @_;
   return $storeid if defined $storeid && $storeid ne '';
   return undef unless ref($scfg) eq 'HASH';
-  for my $k (qw( storage storagename storeid )) {
+  for my $k (qw( storage storagename storeid name id )) {
     my $v = $scfg->{ $k };
     return $v if defined $v && $v ne '';
   }

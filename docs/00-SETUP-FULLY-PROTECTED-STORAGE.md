@@ -369,7 +369,7 @@ Replace `<nimble>`, `<user>`, `<pass>`, `<volname>` (e.g. `vm-100-disk-0` or `my
 | Task | Command or location |
 |------|---------------------|
 | Add storage (with auto discovery) | `pvesm add nimble <id> --address https://... --username ... --password '...' --content images --auto_iscsi_discovery 1` |
-| Edit storage | `nano /etc/pve/storage.cfg` or Proxmox UI (Datacenter → Storage → Edit) |
+| Edit storage | **`pvesm set`**, **`nano /etc/pve/storage.cfg`**, or cluster storage API. Custom types like `nimble` are not fully editable from the Datacenter Storage GUI in stock PVE. |
 | Check plugin version | `dpkg -l libpve-storage-nimble-perl` |
 | Debug plugin | Run commands with `NIMBLE_DEBUG=2` (see [README](../README.md#debug-logging)) |
 | iSCSI sessions | `sudo iscsiadm -m session` |
