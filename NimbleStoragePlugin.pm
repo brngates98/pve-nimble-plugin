@@ -103,7 +103,7 @@ sub properties {
       type        => 'string'
     },
     # Do not redeclare username/password here (RBD/CIFS own those names globally). List them in options()
-    # only — same pattern as ESXi. Password is sensitive: hooks write /etc/pve/priv/storage/ (and legacy priv/nimble/).
+    # only — same pattern as ESXi/CIFS. Password is sensitive: hooks write /etc/pve/priv/storage/<id>.pw (canonical) plus legacy mirrors.
     initiator_group => {
       description => "Initiator group name (optional). If unset, a group is created automatically using this host's iSCSI IQN.",
       type        => 'string'
@@ -182,12 +182,14 @@ sub check_config {
   return $class->SUPER::check_config( $sectionId, $config, $create, $skipSchemaCheck );
 }
 
-# Proxmox stores storage secrets under /etc/pve/priv/storage/ (pmxcfs-replicated like the rest of /etc/pve).
-# We also keep /etc/pve/priv/nimble/<id>.pw for backward compatibility with existing clusters.
+# Password file layout matches PVE core plugins with sensitive `password` (same path as ESXiPlugin /
+# CIFSPlugin): /etc/pve/priv/storage/<storeid>.pw. We also write legacy paths for clusters that
+# predate that convention.
 sub nimble_password_file_paths {
   my ($storeid) = @_;
   return () if !defined $storeid || $storeid eq '';
   return (
+    "/etc/pve/priv/storage/${storeid}.pw",
     "/etc/pve/priv/storage/${storeid}.nimble.pw",
     "/etc/pve/priv/nimble/${storeid}.pw",
   );
