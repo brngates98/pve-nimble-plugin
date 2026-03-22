@@ -338,6 +338,52 @@ sub nimble_serial_matches {
   return 0;
 }
 
+# PVE loads custom storage plugins with perl -T (taint). Paths from readdir/readlink/abs_path are tainted;
+# pass only /^...$/ captures into exec/run_command or blockdev dies with "Insecure dependency in exec".
+sub nimble_untaint_dev_path {
+  my ($p) = @_;
+  return '' unless defined $p && length $p;
+  return $1 if $p =~ m{^(/dev/dm-\d+)$};
+  return $1 if $p =~ m{^(/dev/sd[a-z]+)$};
+  return $1 if $p =~ m{^(/dev/nvme\d+n\d+(?:p\d+)?)$};
+  return $1 if $p =~ m{^(/dev/disk/by-id/[a-zA-Z0-9_.:@+=-]+)$};
+  return '';
+}
+
+sub nimble_untaint_multipath_wwid {
+  my ($w) = @_;
+  return '' unless defined $w && length $w;
+  return $1 if $w =~ /^([0-9a-f]+)$/i;
+  return '';
+}
+
+# multipath -l / multipathd use the WWID from dm-uuid-mpath-* (e.g. 2aedb...), not always the 32-char NAA
+# body alone. wwn-0xaedb... (32 hex) maps to mpath id 2aedb... per Linux scsi_id / multipath convention.
+sub nimble_multipath_wwid_from_by_id_basename {
+  my ($entry_name) = @_;
+  return '' unless defined $entry_name && length $entry_name;
+  if ( $entry_name =~ /^dm-uuid-mpath-([0-9a-f]+)$/i ) {
+    return lc($1);
+  }
+  if ( $entry_name =~ /^scsi-(2[0-9a-f]{32})$/i ) {
+    return lc($1);
+  }
+  if ( $entry_name =~ /^wwn-0x([0-9a-f]{32})$/i ) {
+    return '2' . lc($1);
+  }
+  if ( $entry_name =~ /^wwn-0x([0-9a-f]+)/i ) {
+    my $h = lc($1);
+    return length($h) == 32 ? "2$h" : $h;
+  }
+  if ( $entry_name =~ /^wwn-([0-9a-f]+)/i ) {
+    return lc($1);
+  }
+  if ( $entry_name =~ /^scsi-3([0-9a-f]+)/i ) {
+    return lc($1);
+  }
+  return '';
+}
+
 # Resolve a by-id symlink (or block node) to absolute block path; extract multipath WWID from link name.
 sub nimble_resolve_by_id_entry {
   my ( $full, $entry_name ) = @_;
@@ -355,17 +401,11 @@ sub nimble_resolve_by_id_entry {
     return ( '', '' );
   }
   return ( '', '' ) unless $abs && -b $abs;
-  my $wwid = '';
-  if ( $entry_name =~ /^wwn-0x([0-9a-f]+)/i ) {
-    $wwid = lc($1);
-  }
-  elsif ( $entry_name =~ /^wwn-([0-9a-f]+)/i ) {
-    $wwid = lc($1);
-  }
-  elsif ( $entry_name =~ /^scsi-3([0-9a-f]+)/i ) {
-    $wwid = lc($1);
-  }
-  return ( $abs, $wwid );
+  my $safe = nimble_untaint_dev_path($abs);
+  return ( '', '' ) unless length $safe;
+  my $wwid = nimble_multipath_wwid_from_by_id_basename($entry_name);
+  $wwid = nimble_untaint_multipath_wwid($wwid) if length $wwid;
+  return ( $safe, $wwid );
 }
 
 # Find block device path by Nimble API serial_number.
@@ -398,9 +438,11 @@ sub get_device_path_by_serial {
     } readdir($dh);
     closedir($dh);
     @hit = sort {
-      my $pa = ( lc($a) =~ /^wwn-0x/ );
-      my $pb = ( lc($b) =~ /^wwn-0x/ );
-      ( $pb <=> $pa ) || ( length($a) <=> length($b) );
+      my $ma = ( lc($a) =~ /^dm-uuid-mpath-/ );
+      my $mb = ( lc($b) =~ /^dm-uuid-mpath-/ );
+      ( $mb <=> $ma )
+        || ( ( lc($b) =~ /^wwn-0x/ ) <=> ( lc($a) =~ /^wwn-0x/ ) )
+        || ( length($a) <=> length($b) );
     } @hit;
     for my $e (@hit) {
       my $full = "$by_id/$e";
@@ -429,16 +471,10 @@ SYSFS_SCAN:
       if ( defined $dev_serial && $dev_serial =~ /^\s*(.+?)\s*$/ ) {
         $dev_serial = $1;
         if ( nimble_serial_matches( $serial, $dev_serial ) ) {
-          $best_path = $abs unless length($best_path);
-          if ( $e =~ /^wwn-0x([0-9a-f]+)/i ) {
-            $wwid = lc($1);
-          }
-          elsif ( $e =~ /^wwn-([0-9a-f]+)/i && !length($wwid) ) {
-            $wwid = lc($1);
-          }
-          elsif ( $e =~ /^scsi-3([0-9a-f]+)/i && !length($wwid) ) {
-            $wwid = lc($1);
-          }
+          my $safe_abs = nimble_untaint_dev_path($abs);
+          $best_path = $safe_abs if length($safe_abs) && !length($best_path);
+          my $ww_try = nimble_multipath_wwid_from_by_id_basename($e);
+          $wwid = nimble_untaint_multipath_wwid($ww_try) if length($ww_try) && !length($wwid);
         }
       }
     }
@@ -481,12 +517,35 @@ sub scsi_scan_new {
   die "Error :: No hosts to scan.\n" unless $count > 0;
 }
 
+# multipath may register Nimble LUNs as 2<32-hex> while wwn-0x uses the 32-hex NAA body only.
+sub nimble_multipath_wwid_try_list {
+  my ($w) = @_;
+  $w = nimble_untaint_multipath_wwid($w);
+  return () unless length $w;
+  my @try = ($w);
+  unshift @try, '2' . $w if $w =~ /^[0-9a-f]{32}$/i;
+  return @try;
+}
+
 sub multipath_check {
   my ( $wwid ) = @_;
   return 0 unless length( $wwid );
-  my $mp  = get_command_path( 'multipath' );
-  my $out = `$mp -l $wwid 2>/dev/null`;
-  return $out ne '';
+  my $mp = get_command_path('multipath');
+  for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
+    my $out = `$mp -l $w 2>/dev/null`;
+    return 1 if $out ne '';
+  }
+  return 0;
+}
+
+sub nimble_multipath_active_wwid {
+  my ($wwid) = @_;
+  my $mp = get_command_path('multipath');
+  for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
+    my $out = `$mp -l $w 2>/dev/null`;
+    return $w if $out ne '';
+  }
+  return '';
 }
 
 sub wait_for {
@@ -1410,9 +1469,12 @@ sub block_device_action {
   my ( $action, @devices ) = @_;
   for my $device ( @devices ) {
     next unless $device =~ /^(sd[a-z]+)$/;
+    $device = $1;
+    my $flush = "/dev/$device";
+    $flush = $1 if $flush =~ m{^(/dev/sd[a-z]+)$};
     my $device_path = '/sys/block/' . $device . '/device';
     if ( $action eq 'remove' ) {
-      exec_command( [ 'blockdev', '--flushbufs', '/dev/' . $device ] );
+      exec_command( [ 'blockdev', '--flushbufs', $flush ] );
       device_op( $device_path, 'state',  'offline' );
       device_op( $device_path, 'delete', '1' );
     } elsif ( $action eq 'rescan' ) {
@@ -1444,6 +1506,7 @@ sub filesystem_path {
   my ( $vtype, undef, $vmid ) = $class->parse_volname( $volname );
   my ( $path, $wwid ) = $class->get_device_path_wwid( $scfg, $volname, undef );
   return wantarray ? ( "", "", "", "" ) : "" unless length( $path );
+  $path = nimble_untaint_dev_path($path) || $path;
   return wantarray ? ( $path, $vmid, $vtype, $wwid ) : $path;
 }
 
@@ -1614,20 +1677,29 @@ sub map_volume {
   );
   my ( $path, $wwid ) = get_device_path_by_serial( $serial );
   die "Error :: Volume \"$volname\" device did not appear after rescan (serial $serial).\n" unless length($path) && -b $path;
+  $path = nimble_untaint_dev_path($path) || $path;
   if ( length( $wwid ) && !multipath_check( $wwid ) ) {
-    exec_command( [ 'multipathd', 'add', 'map', $wwid ] );
+    for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
+      eval { exec_command( [ 'multipathd', 'add', 'map', $w ], -1, timeout => 30 ); };
+      last if multipath_check( $wwid );
+    }
     my $mp_ready = sub { return multipath_check( $wwid ) };
     wait_for( $mp_ready, "multipath for \"$volname\"", 30 );
   }
   elsif ( !length($wwid) ) {
     eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
     ( $path, $wwid ) = get_device_path_by_serial( $serial );
+    $path = nimble_untaint_dev_path($path) || $path if length $path;
     if ( length( $wwid ) && !multipath_check( $wwid ) ) {
-      exec_command( [ 'multipathd', 'add', 'map', $wwid ] );
+      for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
+        eval { exec_command( [ 'multipathd', 'add', 'map', $w ], -1, timeout => 30 ); };
+        last if multipath_check( $wwid );
+      }
       my $mp_ready = sub { return multipath_check( $wwid ) };
       wait_for( $mp_ready, "multipath for \"$volname\"", 30 );
     }
   }
+  $path = nimble_untaint_dev_path($path) || $path;
   return $path;
 }
 
@@ -1635,14 +1707,18 @@ sub unmap_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname ) = @_;
   my ( $path, $wwid ) = $class->get_device_path_wwid( $scfg, $volname, $storeid );
   return 0 unless length( $path ) && -b $path;
+  $path = nimble_untaint_dev_path($path) || return 0;
   my ( $device_path, @slaves ) = block_device_slaves( $path );
+  $device_path = nimble_untaint_dev_path($device_path) || $device_path;
   exec_command( ['sync'] );
   exec_command( [ 'blockdev', '--flushbufs', $device_path ] );
   eval { exec_command( [ 'udevadm', 'settle', '--timeout=10' ] ) };
   exec_command( ['sync'] );
 
-  if ( length( $wwid ) && multipath_check( $wwid ) ) {
-    exec_command( [ 'multipathd', 'remove', 'map', $wwid ] );
+  if ( length( $wwid ) ) {
+    my $active = nimble_multipath_active_wwid($wwid);
+    $active = nimble_untaint_multipath_wwid($active) if length($active);
+    exec_command( [ 'multipathd', 'remove', 'map', $active ] ) if length($active);
   }
   block_device_action( 'remove', @slaves );
   return 1;
