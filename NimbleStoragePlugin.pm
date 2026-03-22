@@ -261,22 +261,27 @@ sub on_delete_hook {
   return;
 }
 
+# Storage section in storage.cfg usually does not repeat the section id; some PVE workers omit the
+# explicit $storeid argument. Resolve the same id for priv files and token cache (import child, etc.).
+sub nimble_effective_storeid {
+  my ( $scfg, $storeid ) = @_;
+  return $storeid if defined $storeid && $storeid ne '';
+  return undef unless ref($scfg) eq 'HASH';
+  for my $k (qw( storage storagename storeid name id cfgkey section )) {
+    my $v = $scfg->{ $k };
+    return $v if defined $v && $v ne '';
+  }
+  return undef;
+}
+
 sub nimble_api_credentials {
   my ( $scfg, $storeid ) = @_;
   my $user = $scfg->{ username } // $scfg->{ nimble_user };
   die "Error :: username not set\n" if !defined($user) || $user eq '';
   my $pass = $scfg->{ password };
   if ( !defined($pass) || $pass eq '' ) {
-    $pass = nimble_read_password_file($storeid) if defined $storeid && $storeid ne '';
-  }
-  # Some PVE workers pass a redacted $scfg (no password) but include the storage id under another key.
-  if ( (!defined($pass) || $pass eq '') && ref($scfg) eq 'HASH' ) {
-    for my $k (qw( storage storagename storeid name id )) {
-      my $sid = $scfg->{ $k };
-      next unless defined $sid && $sid ne '';
-      $pass = nimble_read_password_file($sid);
-      last if defined $pass && $pass ne '';
-    }
+    my $sid = nimble_effective_storeid( $scfg, $storeid );
+    $pass = nimble_read_password_file($sid) if defined $sid && $sid ne '';
   }
   die "Error :: password not set (use pvesm --password or password file)\n" if !defined($pass) || $pass eq '';
   return ( $user, $pass );
@@ -712,9 +717,10 @@ sub nimble_base_url {
 sub nimble_api_call {
   my ( $scfg, $method, $path, $body, $storeid, $is_retry ) = @_;
   $is_retry //= 0;
+  my $eff_sid    = nimble_effective_storeid( $scfg, $storeid );
   my $base       = nimble_base_url( $scfg );
   my $url        = $base . '/' . $NIMBLE_API_VERSION . '/' . $path;
-  my $cache_path = defined $storeid ? get_token_cache_path( $storeid ) : undef;
+  my $cache_path = ( defined $eff_sid && $eff_sid ne '' ) ? get_token_cache_path( $eff_sid ) : undef;
   my $ttl        = $scfg->{ token_ttl } // 3600;
 
   my $auth = $scfg->{ _auth_token };
@@ -732,7 +738,7 @@ sub nimble_api_call {
     my $req = HTTP::Request->new( 'POST', $login_url );
     $req->header( 'Content-Type' => 'application/json' );
     # HPE Perl sample: request body is { "data": { "username", "password" } }; response has session_token under "data"
-    my ( $api_user, $api_pass ) = nimble_api_credentials( $scfg, $storeid );
+    my ( $api_user, $api_pass ) = nimble_api_credentials( $scfg, $eff_sid );
     $req->content( encode_json( { data => { username => $api_user, password => $api_pass } } ) );
     my $res = $ua->request( $req );
     die "Error :: Nimble login failed: " . $res->status_line . "\n" . ( $res->decoded_content // '' ) . "\n" unless $res->is_success;
@@ -758,7 +764,7 @@ sub nimble_api_call {
     if ( !$is_retry && $res->code == 401 && $cache_path ) {
       unlink $cache_path;
       delete $scfg->{ _auth_token };
-      return nimble_api_call( $scfg, $method, $path, $body, $storeid, 1 );
+      return nimble_api_call( $scfg, $method, $path, $body, $eff_sid, 1 );
     }
     die "Error :: Nimble API $method $path: " . $res->status_line . "\n" . ( $content // '' ) . "\n";
   }
@@ -1701,18 +1707,6 @@ sub parse_volname {
   die "Error :: Invalid volume name ($volname).\n";
 }
 
-# Optional $storeid matches Pure-style paths that omit it; also checks $scfg keys used by some PVE call sites.
-sub nimble_effective_storeid {
-  my ( $scfg, $storeid ) = @_;
-  return $storeid if defined $storeid && $storeid ne '';
-  return undef unless ref($scfg) eq 'HASH';
-  for my $k (qw( storage storagename storeid name id )) {
-    my $v = $scfg->{ $k };
-    return $v if defined $v && $v ne '';
-  }
-  return undef;
-}
-
 sub get_device_path_wwid {
   my ( $class, $scfg, $volname, $storeid ) = @_;
   my $sid = nimble_effective_storeid( $scfg, $storeid );
@@ -1730,6 +1724,12 @@ sub filesystem_path {
   return wantarray ? ( "", "", "", "" ) : "" unless length( $path );
   $path = nimble_untaint_dev_path($path) || $path;
   return wantarray ? ( $path, $vmid, $vtype, $wwid ) : $path;
+}
+
+# Base PVE::Storage::Plugin::path() does not pass $storeid into filesystem_path; Nimble needs it for API/block resolution.
+sub path {
+  my ( $class, $scfg, $volname, $storeid, $snapname ) = @_;
+  return $class->filesystem_path( $scfg, $volname, $snapname, $storeid );
 }
 
 sub find_free_diskname {
