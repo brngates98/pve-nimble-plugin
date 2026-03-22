@@ -694,13 +694,36 @@ sub nimble_get_volume_collection_id {
 sub nimble_get_volume_id {
   my ( $scfg, $volname, $storeid ) = @_;
   my $name = nimble_volname( $scfg, $volname, undef );
-  my $enc  = uri_escape( $name );
+  my $match = sub {
+    my ($list) = @_;
+    for my $v ( @$list ) {
+      next unless ref($v) eq 'HASH' && defined $v->{ name };
+      return $v if $v->{ name } eq $name;
+    }
+    return undef;
+  };
+
+  my $enc  = uri_escape($name);
   my $r    = nimble_api_call( $scfg, 'GET', "volumes?name=$enc", undef, $storeid );
   my $list = nimble_data_as_list( $r->{ data } );
-  for my $v ( @$list ) {
-    return ( $v->{ id }, $v ) if ref($v) eq 'HASH' && $v->{ name } eq $name;
+  my $vol  = $match->($list);
+
+  if ( !$vol ) {
+    $r    = nimble_api_call( $scfg, 'GET', 'volumes', undef, $storeid );
+    $list = nimble_data_as_list( $r->{ data } );
+    $vol  = $match->($list);
   }
-  return ( undef, undef );
+  return ( undef, undef ) unless $vol;
+
+  # List/search responses often omit serial_number; map_volume needs it for /sys scan.
+  if ( !length( $vol->{ serial_number } // '' ) && defined $vol->{ id } ) {
+    $r = nimble_api_call( $scfg, 'GET', "volumes/$vol->{ id }", undef, $storeid );
+    my $full = $r->{ data } || $r;
+    if ( ref($full) eq 'HASH' && length( $full->{ serial_number } // '' ) ) {
+      $vol = $full;
+    }
+  }
+  return ( $vol->{ id }, $vol );
 }
 
 sub nimble_list_volumes {
