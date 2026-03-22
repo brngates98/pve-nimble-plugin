@@ -417,6 +417,17 @@ sub nimble_untaint_multipath_wwid {
   return '';
 }
 
+# API / storage.cfg / iscsiadm output for -T / -p must be laundered for perl -T or run_command dies
+# ("Insecure dependency in exec") — eval in callers used to hide that and left sessions never established.
+sub nimble_untaint_iscsiadm_scalar {
+  my ($v) = @_;
+  return '' unless defined $v && length $v;
+  $v =~ s/^\s+|\s+$//g;
+  return '' if $v eq '';
+  return $1 if $v =~ /^([A-Za-z0-9.\[\]:,_+-]+)$/ && length($1) <= 512;
+  return '';
+}
+
 # multipath -l / multipathd WWID often matches dm-uuid-mpath-* / scsi-* with a leading type nibble (e.g. 2)
 # before the 32-hex NAA; wwn-0x<32 hex> may omit that leading digit — see nimble_multipath_wwid_from_by_id_basename.
 sub nimble_multipath_wwid_from_by_id_basename {
@@ -1013,14 +1024,15 @@ sub nimble_iscsi_portal {
 # Portals already in open-iscsi node DB for this target (after sendtargets on any host).
 sub nimble_iscsi_node_portals_for_target {
   my ($target_iqn) = @_;
-  return () if !length($target_iqn) || $target_iqn !~ m/^iqn\./i;
+  my $iqn = nimble_untaint_iscsiadm_scalar($target_iqn);
+  return () if !length($iqn) || $iqn !~ m/^iqn\./i;
   my $iscsiadm = nimble_iscsiadm_path();
   return () unless -x $iscsiadm;
   my $capture = '';
   eval {
     run_command(
       [
-        $iscsiadm, '-m', 'node', '--targetname', $target_iqn,
+        $iscsiadm, '-m', 'node', '--targetname', $iqn,
       ],
       outfunc => sub { $capture .= shift; },
       errfunc => sub { },
@@ -1093,7 +1105,8 @@ sub iscsi_sendtargets_on_ips {
   return unless -x $iscsiadm;
   for my $ip ( @$ips_ref ) {
     next unless defined $ip && $ip =~ m/^\S+$/ && length($ip) <= 253;
-    my $disc_ip = $ip;
+    my $disc_ip = nimble_untaint_iscsiadm_scalar($ip);
+    next unless length $disc_ip;
     eval {
       run_command(
         [ $iscsiadm, '-m', 'discovery', '-t', 'sendtargets', '-p', $disc_ip ],
@@ -1101,9 +1114,10 @@ sub iscsi_sendtargets_on_ips {
         quiet   => 1
       );
     };
-    if ( $@ && $DEBUG >= 1 ) {
+    if ( $@ ) {
       chomp( my $e = $@ );
-      print "Debug :: sendtargets -p $disc_ip: $e\n";
+      warn "Warning :: iscsiadm sendtargets -p $disc_ip failed: $e\n" if $e =~ /insecure dependency in exec/i;
+      print "Debug :: sendtargets -p $disc_ip: $e\n" if $DEBUG >= 1;
     }
   }
 }
@@ -1111,24 +1125,27 @@ sub iscsi_sendtargets_on_ips {
 # Login to target on all node records (open-iscsi), when portals are unknown but discovery already ran elsewhere.
 sub nimble_iscsi_login_target_on_all_recorded_portals {
   my ($target_iqn) = @_;
-  return unless length($target_iqn) && $target_iqn =~ m/^iqn\./i;
+  my $iqn = nimble_untaint_iscsiadm_scalar($target_iqn);
+  return unless length($iqn) && $iqn =~ m/^iqn\./i;
   my $iscsiadm = nimble_iscsiadm_path();
   return unless -x $iscsiadm;
   eval {
-    run_command( [ $iscsiadm, '-m', 'node', '-T', $target_iqn, '--login' ], timeout => 90, quiet => 1 );
+    run_command( [ $iscsiadm, '-m', 'node', '-T', $iqn, '--login' ], timeout => 90, quiet => 1 );
   };
 }
 
 # Same as PVE Datacenter → Add → iSCSI: "Enabled" (persist login across reboots) for this target+portal.
 sub nimble_iscsi_node_set_startup_automatic {
   my ( $target_iqn, $portal ) = @_;
-  return unless length( $target_iqn ) && length( $portal );
+  my $iqn = nimble_untaint_iscsiadm_scalar($target_iqn);
+  my $p   = nimble_untaint_iscsiadm_scalar($portal);
+  return unless length($iqn) && length($p);
   my $iscsiadm = nimble_iscsiadm_path();
   return unless -x $iscsiadm;
   eval {
     run_command(
       [
-        $iscsiadm, '-m', 'node', '-T', $target_iqn, '-p', $portal,
+        $iscsiadm, '-m', 'node', '-T', $iqn, '-p', $p,
         '--op', 'update', '-n', 'node.startup', '-v', 'automatic',
       ],
       timeout => 10,
@@ -1141,28 +1158,31 @@ sub nimble_iscsi_node_set_startup_automatic {
 # Mirrors manual PVE iSCSI: portal + per-volume Nimble IQN + "Use LUNs directly" (Nimble exposes LUN 0 on that IQN).
 sub nimble_iscsi_login_target_on_portals {
   my ( $storeid, $target_iqn, $ips_ref, $suppress_no_session_warn ) = @_;
-  return unless length( $target_iqn ) && $target_iqn =~ m/^iqn\./i;
+  my $iqn = nimble_untaint_iscsiadm_scalar($target_iqn);
+  return unless length($iqn) && $iqn =~ m/^iqn\./i;
   return unless ref($ips_ref) eq 'ARRAY' && @$ips_ref;
   my $iscsiadm = nimble_iscsiadm_path();
   return unless -x $iscsiadm;
   for my $ip ( @$ips_ref ) {
     next unless defined $ip && $ip =~ m/^\S+$/;
-    my $portal = nimble_iscsi_portal($ip);
+    my $portal = nimble_untaint_iscsiadm_scalar( nimble_iscsi_portal($ip) );
+    next unless length $portal;
     eval {
       run_command(
-        [ $iscsiadm, '-m', 'node', '-T', $target_iqn, '-p', $portal, '--login' ],
+        [ $iscsiadm, '-m', 'node', '-T', $iqn, '-p', $portal, '--login' ],
         timeout => 45,
         quiet   => 1
       );
     };
-    if ( $@ && $DEBUG >= 1 ) {
+    if ( $@ ) {
       chomp( my $e = $@ );
-      print "Debug :: iscsi login $target_iqn @ $portal: $e\n";
+      warn "Warning :: iscsiadm login failed ($iqn @ $portal): $e\n" if $e =~ /insecure dependency in exec/i;
+      print "Debug :: iscsi login $iqn @ $portal: $e\n" if $DEBUG >= 1;
     }
-    nimble_iscsi_node_set_startup_automatic( $target_iqn, $portal );
+    nimble_iscsi_node_set_startup_automatic( $iqn, $portal );
   }
-  if ( !nimble_iscsi_target_in_sessions($target_iqn) && !$suppress_no_session_warn ) {
-    warn "Warning :: No active iSCSI session for volume target \"$target_iqn\" after portal logins; "
+  if ( !nimble_iscsi_target_in_sessions($iqn) && !$suppress_no_session_warn ) {
+    warn "Warning :: No active iSCSI session for volume target \"$iqn\" after portal logins; "
       . "check ACL on the array, routing/firewall from this host to data iSCSI portals (Nimble discovery_ip from subnets API), and open-iscsi.\n";
   }
 }
@@ -1953,8 +1973,12 @@ sub map_volume {
   # $storeid is required for nimble_api_credentials (priv .pw path) and token cache.
   my $volume = $class->nimble_get_volume_info( $scfg, $volname, $storeid );
   die "Error :: Volume \"$volname\" not found (cannot map).\n" unless $volume && $volume->{ serial };
-  my $serial      = $volume->{ serial };
-  my $target_iqn  = $volume->{ target_name } // '';
+  my $serial = $volume->{ serial };
+  my $target_raw = $volume->{ target_name } // '';
+  my $target_iqn = nimble_untaint_iscsiadm_scalar($target_raw);
+  if ( length($target_raw) && !length($target_iqn) ) {
+    warn "Warning :: Volume \"$volname\" target_name is not usable for iscsiadm (sanitization failed); check Nimble API target_name.\n";
+  }
   my @dip = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
   if ( !@dip ) {
     warn "Warning :: No iSCSI discovery portals for storage \"$storeid\" after Nimble API resolution (GET v1/subnets + GET v1/subnets/:id per subnet, then optional fallbacks). Check API connectivity from this host and data subnets with discovery_ip; optional iscsi_discovery_ips only adds extra portals.\n";
