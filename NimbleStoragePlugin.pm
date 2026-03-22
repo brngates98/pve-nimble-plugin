@@ -85,6 +85,7 @@ sub plugindata {
   return {
     content => [ { images => 1, none => 1 }, { images => 1 } ],
     format  => [ { raw    => 1 },            "raw" ],
+    'sensitive-properties' => { nimble_password => 1, password => 1 },
   };
 }
 
@@ -94,9 +95,16 @@ sub properties {
       description => "HPE Nimble array management IP or DNS name.",
       type        => 'string'
     },
-    # Do not declare username/password here: PVE::SectionConfig registers property
-    # names globally (e.g. RBD defines username, CIFS defines password). Nimble only
-    # lists them in options() — same pattern as ESXi/PBS (see pve-storage).
+    # Globally unique names (RBD/CIFS already register username/password). pvesm/GUI
+    # only expose options that appear in this plugin's properties().
+    nimble_user => {
+      description => "Nimble REST API user (legacy: username).",
+      type        => 'string'
+    },
+    nimble_password => {
+      description => "Nimble REST API password (legacy: password).",
+      type        => 'string'
+    },
     initiator_group => {
       description => "Initiator group name (optional). If unset, a group is created automatically using this host's iSCSI IQN.",
       type        => 'string'
@@ -140,9 +148,11 @@ sub properties {
 
 sub options {
   return {
-    address         => { fixed    => 1 },
-    username        => { fixed    => 1 },
-    password        => { fixed    => 1 },
+    address            => { fixed    => 1 },
+    nimble_user        => { fixed    => 1 },
+    nimble_password    => { fixed    => 1 },
+    username           => { optional => 1 },
+    password           => { optional => 1 },
     initiator_group => { optional => 1 },
 
     vnprefix  => { optional => 1 },
@@ -157,6 +167,27 @@ sub options {
     content   => { optional => 1 },
     format    => { optional => 1 },
   };
+}
+
+sub check_config {
+  my ( $class, $sectionId, $config, $create, $skipSchemaCheck ) = @_;
+
+  # Accept legacy storage.cfg / pvesm --username/--password before required-option check.
+  if ( defined $config->{ username } && length( $config->{ username } ) ) {
+    $config->{ nimble_user } //= $config->{ username };
+  }
+  if ( defined $config->{ password } ) {
+    $config->{ nimble_password } //= $config->{ password };
+  }
+
+  return $class->SUPER::check_config( $sectionId, $config, $create, $skipSchemaCheck );
+}
+
+sub nimble_api_credentials {
+  my ($scfg) = @_;
+  my $user = $scfg->{ nimble_user } // $scfg->{ username };
+  my $pass = $scfg->{ nimble_password } // $scfg->{ password };
+  return ( $user, $pass );
 }
 
 ### Commands and helpers
@@ -393,7 +424,8 @@ sub nimble_api_call {
     my $req = HTTP::Request->new( 'POST', $login_url );
     $req->header( 'Content-Type' => 'application/json' );
     # HPE Perl sample: request body is { "data": { "username", "password" } }; response has session_token under "data"
-    $req->content( encode_json( { data => { username => $scfg->{ username }, password => $scfg->{ password } } } ) );
+    my ( $api_user, $api_pass ) = nimble_api_credentials($scfg);
+    $req->content( encode_json( { data => { username => $api_user, password => $api_pass } } ) );
     my $res = $ua->request( $req );
     die "Error :: Nimble login failed: " . $res->status_line . "\n" . ( $res->decoded_content // '' ) . "\n" unless $res->is_success;
     my $data = decode_json( $res->decoded_content );

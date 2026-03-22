@@ -64,7 +64,7 @@ pve-nimble-plugin/
 
 ## 4. How the Plugin Fits Together
 
-- **Config (storage.cfg):** `address`, `username`, `password`, optional `initiator_group` (if unset, plugin auto-creates/uses `pve-<nodename>` with local IQN), optional `vnprefix`, `pool_name`, optional **`volume_collection`** (Nimble volume collection name; new volumes are added to it for array-side protection/schedules), `check_ssl`, `token_ttl`, `debug`, optional **`auto_iscsi_discovery`** (default off; when enabled, on storage activate the plugin runs iSCSI discovery and login using discovery IPs from GET subnets).
+- **Config (storage.cfg):** `address`, `nimble_user`, `nimble_password` (legacy `username` / `password` still accepted), optional `initiator_group` (if unset, plugin auto-creates/uses `pve-<nodename>` with local IQN), optional `vnprefix`, `pool_name`, optional **`volume_collection`** (Nimble volume collection name; new volumes are added to it for array-side protection/schedules), `check_ssl`, `token_ttl`, `debug`, optional **`auto_iscsi_discovery`** (default off; when enabled, on storage activate the plugin runs iSCSI discovery and login using discovery IPs from GET subnets).
 - **Nimble API base:** `https://<address>:5392/v1/`. Auth: POST `tokens` with username/password → use `session_token` as `X-Auth-Token` on later requests.
 - **Volume naming:** `nimble_volname(scfg, volname, [snapname])` = optional prefix + volname (e.g. `vm-100-disk-0`) + optional `.snap-<name>` for snapshots.
 - **Key API calls:** volumes (GET/POST/PUT/DELETE), access_control_records (POST to grant vol to initiator group), snapshots (POST create, GET by name, DELETE), volume restore (POST with base_snap_id), **subnets** (GET for auto iSCSI discovery IPs when `auto_iscsi_discovery` is set).
@@ -75,7 +75,7 @@ pve-nimble-plugin/
 ## 5. Differences from Pure Storage Plugin (reference)
 
 - **Auth:** Nimble = username/password → session_token; Pure = API token → login → x-auth-token (`token` property — avoids clashing with globally registered `password`).
-- **PVE property registry:** Storage plugin keys in `sub properties` are registered **globally** in `PVE::SectionConfig`. **Do not** re-declare `username` or `password` in Nimble’s `properties()` — RBD already defines `username`, CIFS defines `password`. Duplicates cause `duplicate property 'username'/'password'` and prevent `pvedaemon` / `pveproxy` from starting. Keep `username`/`password` only in `sub options` (same idea as ESXi/PBS in `pve-storage`).
+- **PVE property registry:** Do **not** declare generic `username` / `password` in Nimble’s `properties()` — RBD registers `username`, CIFS registers `password`; duplicates break `pvedaemon` / `pveproxy`. Use **`nimble_user`** and **`nimble_password`** in `properties()` / required `options()` so `pvesm` and the GUI expose credentials. **`check_config`** copies legacy `username` / `password` into `nimble_*` before `SUPER::check_config`, so old `pvesm add ... --username ... --password ...` and existing `storage.cfg` still work.
 - **`sub api`:** Use `PVE::Storage::APIVER()` and `PVE::Storage::APIAGE()` with parentheses and `use PVE::Storage ();` — they are `use constant` subs, not `$PVE::Storage::APIVER` (wrong — uninitialized). Bareword `PVE::Storage::APIVER` without `()` fails **strict subs** on Perl 5.36+ (e.g. CI bookworm `perl -c`).
 - **ACL:** Nimble = initiator groups + access_control_records (vol_id, initiator_group_id); Pure = host/volume “connections.”
 - **API shape:** Nimble = `/v1/` JSON with `data` arrays; Pure = custom filter/params and `items`.
