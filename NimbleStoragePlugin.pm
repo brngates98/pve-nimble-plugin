@@ -1027,7 +1027,7 @@ sub nimble_iscsi_node_set_startup_automatic {
 # After iscsi_sendtargets_on_ips: login this volume IQN on each portal (no per-IP rediscovery; no global node --login).
 # Mirrors manual PVE iSCSI: portal + per-volume Nimble IQN + "Use LUNs directly" (Nimble exposes LUN 0 on that IQN).
 sub nimble_iscsi_login_target_on_portals {
-  my ( $storeid, $target_iqn, $ips_ref ) = @_;
+  my ( $storeid, $target_iqn, $ips_ref, $suppress_no_session_warn ) = @_;
   return unless length( $target_iqn ) && $target_iqn =~ m/^iqn\./i;
   return unless ref($ips_ref) eq 'ARRAY' && @$ips_ref;
   my $iscsiadm = nimble_iscsiadm_path();
@@ -1048,7 +1048,7 @@ sub nimble_iscsi_login_target_on_portals {
     }
     nimble_iscsi_node_set_startup_automatic( $target_iqn, $portal );
   }
-  if ( !nimble_iscsi_target_in_sessions($target_iqn) ) {
+  if ( !nimble_iscsi_target_in_sessions($target_iqn) && !$suppress_no_session_warn ) {
     warn "Warning :: No active iSCSI session for volume target \"$target_iqn\" after portal logins; "
       . "check ACL, paths, and discovery_ip / iscsi_discovery_ips.\n";
   }
@@ -1842,14 +1842,21 @@ sub map_volume {
     warn "Warning :: No iSCSI discovery IPs (Nimble subnets API, iscsi_discovery_ips, or active sessions) for storage \"$storeid\"; "
       . "set iscsi_discovery_ips or ensure iscsiadm sessions exist to this array.\n";
   }
-  # Do not run global `iscsiadm -m node --login` here (exit 15 / noise when many targets). Sendtargets once, then per-volume IQN login only.
-  iscsi_sendtargets_on_ips( \@dip ) if @dip;
+  # Per-volume IQN login on each portal (not global node --login). Retry: new ACL / first map on a node
+  # (e.g. live-migrate target) often needs several sendtargets + login passes after the array exposes the target.
   if ( length($target_iqn) ) {
     if (@dip) {
-      nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@dip );
-      if ( !nimble_iscsi_target_in_sessions($target_iqn) ) {
+      for my $round ( 1 .. 6 ) {
+        last if nimble_iscsi_target_in_sessions($target_iqn);
+        sleep(3) if $round > 1;
         iscsi_sendtargets_on_ips( \@dip );
-        nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@dip );
+        nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@dip, $round < 6 );
+      }
+      if ( !nimble_iscsi_target_in_sessions($target_iqn) ) {
+        my $adm = nimble_iscsiadm_path();
+        if ( -x $adm ) {
+          eval { run_command( [ $adm, '-m', 'node', '-T', $target_iqn, '--login' ], timeout => 90, quiet => 1 ); };
+        }
       }
     }
     else {
@@ -1895,7 +1902,7 @@ sub map_volume {
       return length($p) && -e $p;
     },
     "volume \"$volname\" to appear (API serial " . $serial . "; check iscsiadm -m session and ACL)",
-    90
+    120
   );
   my ( $path, $wwid ) = get_device_path_by_serial( $serial );
   die "Error :: Volume \"$volname\" device did not appear after rescan (serial $serial).\n" unless length($path) && -b $path;
