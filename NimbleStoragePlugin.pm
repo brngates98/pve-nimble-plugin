@@ -985,7 +985,70 @@ sub get_nimble_iscsi_discovery_ips {
 sub nimble_iscsi_portal {
   my ($ip) = @_;
   return $ip if $ip =~ /:\d+$/;
+  return $ip if $ip =~ /^\[.+\]:\d+$/;
+  # Unbracketed IPv6: open-iscsi expects -p [addr]:3260
+  if ( $ip =~ /:/ && $ip !~ /^\d+\.\d+\.\d+\.\d+$/ ) {
+    return "[$ip]:3260";
+  }
   return "$ip:3260";
+}
+
+# Portals already in open-iscsi node DB for this target (after sendtargets on any host).
+sub nimble_iscsi_node_portals_for_target {
+  my ($target_iqn) = @_;
+  return () if !length($target_iqn) || $target_iqn !~ m/^iqn\./i;
+  my $iscsiadm = nimble_iscsiadm_path();
+  return () unless -x $iscsiadm;
+  my $capture = '';
+  eval {
+    run_command(
+      [
+        $iscsiadm, '-m', 'node', '--targetname', $target_iqn,
+      ],
+      outfunc => sub { $capture .= shift; },
+      errfunc => sub { },
+      timeout => 25,
+      quiet   => 1
+    );
+  };
+  my %seen;
+  my @out;
+  for my $line ( split /\r?\n/, $capture ) {
+    next unless $line =~ m/^\s*node\.portal\s*=\s*(\S+)/;
+    my $portal = $1;
+    push @out, $portal unless $seen{$portal}++;
+  }
+  return @out;
+}
+
+# API/subnet/manual IPs plus any node.portal lines for this IQN (multipath needs every path logged in).
+sub nimble_iscsi_merge_portal_list {
+  my ( $target_iqn, $base_ips_ref ) = @_;
+  my %seen;
+  my @list;
+  if ( ref($base_ips_ref) eq 'ARRAY' ) {
+    for my $e ( @$base_ips_ref ) {
+      next unless defined $e && $e =~ m/\S/ && length($e) <= 253;
+      my $p = nimble_iscsi_portal($e);
+      push @list, $p unless $seen{$p}++;
+    }
+  }
+  if ( length($target_iqn) && $target_iqn =~ m/^iqn\./i ) {
+    for my $p ( nimble_iscsi_node_portals_for_target($target_iqn) ) {
+      push @list, $p unless $seen{$p}++;
+    }
+  }
+  return @list;
+}
+
+# Same strategy as activate_storage auto_iSCSI: discover + global login (exit 15 common if partial sessions).
+sub nimble_iscsi_global_node_login {
+  my ($portals_ref) = @_;
+  my $iscsiadm = nimble_iscsiadm_path();
+  return unless -x $iscsiadm && ref($portals_ref) eq 'ARRAY' && @$portals_ref;
+  iscsi_sendtargets_on_ips($portals_ref);
+  eval { run_command( [ $iscsiadm, '-m', 'node', '--op', 'update', '-n', 'node.startup', '-v', 'automatic' ], timeout => 10, quiet => 1 ); };
+  eval { run_command( [ $iscsiadm, '-m', 'node', '--login' ], timeout => 120, quiet => 1 ); };
 }
 
 sub nimble_iscsiadm_path {
@@ -1867,21 +1930,35 @@ sub map_volume {
     warn "Warning :: No iSCSI discovery IPs (Nimble subnets API, iscsi_discovery_ips, or active sessions) for storage \"$storeid\"; "
       . "set iscsi_discovery_ips or ensure iscsiadm sessions exist to this array.\n";
   }
-  # Per-volume IQN login on each portal (not global node --login). Retry: new ACL / first map on a node
-  # (e.g. live-migrate target) often needs several sendtargets + login passes after the array exposes the target.
+  # Per-volume IQN on every portal: merge Nimble/API IPs with open-iscsi node.portal records (multipath).
+  # Retry + global node --login fallback (same as activate_storage) for cold migration targets.
   if ( length($target_iqn) ) {
-    if (@dip) {
+    my @base_dip = @dip;
+    my @portals  = nimble_iscsi_merge_portal_list( $target_iqn, \@base_dip );
+    if (@portals) {
       for my $round ( 1 .. 6 ) {
         last if nimble_iscsi_target_in_sessions($target_iqn);
         sleep(3) if $round > 1;
-        iscsi_sendtargets_on_ips( \@dip );
-        nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@dip, $round < 6 );
+        @portals = nimble_iscsi_merge_portal_list( $target_iqn, \@base_dip );
+        iscsi_sendtargets_on_ips( \@portals );
+        @portals = nimble_iscsi_merge_portal_list( $target_iqn, \@base_dip );
+        nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@portals, $round < 6 );
+      }
+      if ( !nimble_iscsi_target_in_sessions($target_iqn) ) {
+        @portals = nimble_iscsi_merge_portal_list( $target_iqn, \@base_dip );
+        nimble_iscsi_global_node_login( \@portals );
+        sleep(2);
+        @portals = nimble_iscsi_merge_portal_list( $target_iqn, \@base_dip );
+        nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@portals, 1 );
       }
       if ( !nimble_iscsi_target_in_sessions($target_iqn) ) {
         my $adm = nimble_iscsiadm_path();
         if ( -x $adm ) {
           eval { run_command( [ $adm, '-m', 'node', '-T', $target_iqn, '--login' ], timeout => 90, quiet => 1 ); };
         }
+      }
+      if ( !nimble_iscsi_target_in_sessions($target_iqn) ) {
+        nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@portals, 0 );
       }
     }
     else {
@@ -1923,6 +2000,14 @@ sub map_volume {
       if ( $wait_ticks % 100 == 0 ) {
         eval { scsi_scan_new('iscsi'); };
       }
+      # Sessions up but LUN/multipath slow: periodic rescan + multipath refresh (migration target).
+      if ( $wait_ticks % 50 == 0 ) {
+        eval {
+          my $adm = nimble_iscsiadm_path();
+          run_command( [ $adm, '-m', 'session', '--rescan' ], timeout => 90, quiet => 1 ) if -x $adm;
+        };
+        eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
+      }
       my ( $p, $w ) = get_device_path_by_serial( $serial );
       return length($p) && -e $p;
     },
@@ -1938,7 +2023,7 @@ sub map_volume {
       last if multipath_check( $wwid );
     }
     my $mp_ready = sub { return multipath_check( $wwid ) };
-    wait_for( $mp_ready, "multipath for \"$volname\"", 30 );
+    wait_for( $mp_ready, "multipath for \"$volname\"", 45 );
   }
   elsif ( !length($wwid) ) {
     eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
@@ -1950,7 +2035,7 @@ sub map_volume {
         last if multipath_check( $wwid );
       }
       my $mp_ready = sub { return multipath_check( $wwid ) };
-      wait_for( $mp_ready, "multipath for \"$volname\"", 30 );
+      wait_for( $mp_ready, "multipath for \"$volname\"", 45 );
     }
   }
   $path = nimble_untaint_dev_path($path) || $path;
