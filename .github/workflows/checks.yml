@@ -1,0 +1,37 @@
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Perl test deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libjson-perl
+
+      - name: Run unit tests
+        run: ./tests/run_tests.sh
+
+  plugin-syntax-bookworm:
+    name: Plugin syntax (bookworm + Proxmox)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify NimbleStoragePlugin.pm in Docker
+        run: |
+          chmod +x scripts/verify_plugin_in_docker.sh
+          ./scripts/verify_plugin_in_docker.sh

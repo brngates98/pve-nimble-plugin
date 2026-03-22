@@ -20,11 +20,12 @@
 | **Core plugin** | Implemented | Create/delete/resize/rename volumes, list, status, activate/deactivate, map/unmap |
 | **Auth** | Implemented | Username/password → POST /v1/tokens → session token; cached under `/etc/pve/priv/nimble/<storeid>.json` |
 | **ACL / initiator** | Implemented | **initiator_group** is optional. If set, plugin uses that Nimble initiator group. If unset, plugin reads local IQN from `/etc/iscsi/initiatorname.iscsi`, creates/finds a group named `pve-<nodename>` with that IQN, and uses it for **access_control_records** (vol_id + initiator_group_id). |
-| **Snapshots** | Implemented | Create, delete, rollback; Nimble snapshots API + volume restore |
+| **Snapshots** | Implemented | Create, delete, rollback; Nimble snapshots API + volume restore; Veeam snapshot name normalization (`veeam_` → `veeam-`) |
 | **Clone from snapshot** | Implemented | Via POST volumes with clone=true, name, base_snap_id (then ACL + optional volume_collection) |
 | **Multipath** | Implemented | Same pattern as Pure: device by serial, multipathd add/remove map, block device actions |
 | **Device discovery** | Implemented | By SCSI serial from `/sys/block/*/device/serial` and `/dev/disk/by-id`; no fixed Nimble WWN prefix (Pure uses 3624a9370); Nimble prefix not documented/used here |
 | **Auto iSCSI discovery** | Implemented | Opt-in: `auto_iscsi_discovery` (default no). On activate_storage, plugin first ensures initiator group exists (nimble_ensure_initiator_group_id); then GET subnets, collects discovery IPs (allow_iscsi or type data), runs iscsiadm discovery + node startup automatic + login. If initiator group cannot be ensured (e.g. no IQN), discovery is skipped. Never fails storage activation; warns on failure. |
+| **Volume import/export** | Implemented | `raw+size` for backup/restore (e.g. Veeam V13+); size rounded up to full MB for odd-sector compatibility |
 | **Debian package** | Present | `libpve-storage-nimble-perl`, debian/*, scripts/build_deb.sh |
 | **CI (GitHub Actions)** | Present | checks, lint (Perl + Markdown), tests, release (tag → build .deb → gh-release) |
 | **Unit tests** | Present | test_command_validation.t, test_retry_logic.t, test_token_cache.t (+ token_cache_test.pl); no live Nimble tests |
@@ -51,7 +52,8 @@ pve-nimble-plugin/
 ├── .github/workflows/         # release, _deb
 ├── debian/                    # Package: libpve-storage-nimble-perl
 ├── scripts/
-│   └── build_deb.sh           # Local Docker build
+│   ├── build_deb.sh            # Local Docker build
+│   └── install-pve-nimble-plugin.sh  # Scripted install (single/cluster, APT or .deb)
 └── tests/
     ├── run_tests.sh
     ├── unit/*.t               # Perl unit tests
@@ -91,6 +93,8 @@ pve-nimble-plugin/
 
 Use this file when implementing or validating API calls instead of relying only on external docs.
 
+**Optional adjunct:** The official [HPE Nimble Python SDK](https://github.com/hpe-storage/nimble-python-sdk) ([docs](https://hpe-storage.github.io/nimble-python-sdk/)) targets the same REST API. It can help when designing a dedicated Perl client (endpoint coverage, naming, workflows); this plugin currently calls the API directly from `NimbleStoragePlugin.pm`.
+
 ---
 
 ## 6. What Might Need Work (when resuming)
@@ -120,6 +124,7 @@ See `.cursor/rules/releases.mdc` for the full release rule.
 - **Lint:** perltidy with `.perltidyrc`; markdownlint with `.markdownlint.json`. CI runs these on changed files.
 - **Build .deb:** `./scripts/build_deb.sh` (Docker, Debian bookworm) or CI on tag push.
 - **Install (manual):** Copy `NimbleStoragePlugin.pm` to `/usr/share/perl5/PVE/Storage/Custom/` on a PVE node and restart pvedaemon/pveproxy. Or install the built .deb.
+- **Scripted install:** `scripts/install-pve-nimble-plugin.sh` — single-node or cluster-wide (all nodes via SSH), from APT repo or a specific GitHub release .deb; supports `--dry-run`, `--yes`, `--all-nodes` (same pattern as Blockbridge’s get script).
 - **Add storage (example):**  
   `pvesm add nimble <id> --address https://<nimble> --username <u> --password <p> --initiator_group <name> --content images`
 

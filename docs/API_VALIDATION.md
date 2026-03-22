@@ -33,7 +33,26 @@ Reference: [REST API](https://support.hpe.com/docs/display/public/nmtp352en_us/w
 | **Clone from snapshot**            | POST `volumes` with clone=true, name, base_snap_id (then add ACL)                                  | Create doc: clone + name + base_snap_id for clone. Restore is for existing volume only.                                                                                                                      | **Fixed**: clone_image now uses nimble_clone_from_snapshot (POST volumes clone=true) instead of restore. |
 | **Snapshot create**                | volname then snap_name in call                                                                     | —                                                                                                                                                                                                            | **Fixed**: volume_snapshot now passes (volname, snap) to nimble_snapshot_create.                         |
 | **Volume collections**             | GET `volume_collections?name=...`                                                                  | Read with query param `name`                                                                                                                                                                                 | OK (optional: add volumes to collection via PUT volumes/:id volcoll_id).                                 |
-| **Subnets (auto iSCSI)**           | GET `subnets`                                                                                      | Read; discovery_ip, allow_iscsi, type                                                                                                                                                                        | OK (used when auto_iscsi_discovery is set).                                                              |
+| **Subnets (auto iSCSI)**           | GET `subnets`                                                                                      | Read; discovery_ip, allow_iscsi, type                                                                                                                                                                        | OK (used when auto_iscsi_discovery is set); response normalized via nimble_data_as_list.                |
+| **Volume import/export (raw+size)** | N/A (plugin stream)                                                                                | PVE format: 8-byte little-endian size header then raw bytes. Used for backup/restore (e.g. Veeam V13+).                                                                                                     | OK: volume_import, volume_export, volume_import_formats, volume_export_formats; size rounded up (size_bytes_to_mb) for odd-sector compatibility. |
+| **401 retry**                     | nimble_api_call: clear cache + retry once on 401                                                   | —                                                                                                                                                                                                             | OK: optional 6th param $is_retry prevents infinite recursion.                                            |
+
+### Cross-check: [HPE Nimble Python SDK](https://github.com/hpe-storage/nimble-python-sdk)
+
+The Python SDK ([documentation](https://hpe-storage.github.io/nimble-python-sdk/)) is generated against the same **v1** REST API. Every **object set** this plugin calls has a matching `nimbleclient/v1/api/<name>.py` module, so names and operations stay aligned with what HPE exposes to both clients.
+
+| Plugin `nimble_api_call` path (relative to `v1/`) | SDK module (under `nimbleclient/v1/api/`) | Notes |
+| ------------------------------------------------- | ------------------------------------------- | ----- |
+| `tokens` (POST login; plugin uses LWP + JSON) | `tokens.py` | Same auth model: session token, `X-Auth-Token`. |
+| `initiator_groups` | `initiator_groups.py` | Plugin may send `iscsi_initiators` on create; SDK also has `initiators.py` for separate initiator objects (see Initiator groups detail below). |
+| `access_control_records` | `access_control_records.py` | — |
+| `volumes`, `volumes/:id`, `volumes/:id/actions/restore` | `volumes.py` | SDK `VolumeList.restore(id, base_snap_id)` maps to **restore** action; volume **create** with `clone` + `base_snap_id` matches plugin clone-from-snapshot. |
+| `snapshots`, `snapshots/:id` | `snapshots.py` | — |
+| `pools` | `pools.py` | |
+| `volume_collections` | `volume_collections.py` | Lookup by `name=`; plugin uses PUT `volumes/:id` with `volcoll_id` per API doc. |
+| `subnets` | `subnets.py` | Used for discovery IPs when `auto_iscsi_discovery` is enabled. |
+
+**Host-side commands (not in the Python SDK):** `iscsiadm` (discovery, login), `multipath` / `multipathd`, `blockdev`, and SCSI host rescan are **Linux / open-iscsi / multipath-tools**—appropriate for a PVE storage plugin and unrelated to the Nimble HTTPS client. The `%cmd` table also lists `kpartx` and `dmsetup` for parity with the Pure plugin pattern (validated when present on the node).
 
 ---
 
@@ -67,6 +86,15 @@ Reference: [REST API](https://support.hpe.com/docs/display/public/nmtp352en_us/w
 - From volume/snapshot responses: id, name, serial_number, size (MB), creation_time, vol_usage_compressed_bytes (optional for used).
 - Doc: serial_number, size, creation_time, etc. Match.
 
+### Volume import/export (raw+size)
+
+- **Plugin:** volume_import reads 8-byte little-endian size (pack Q<), creates volume with size_bytes_to_mb round-up, activates, streams exactly size_bytes from $fh to device, deactivates. On failure: deactivate then delete volume. volume_export writes 8-byte size header then streams device to $fh. volume_import_formats / volume_export_formats return ['raw+size'] when no snapshot.
+- **PVE/backup:** Matches PVE PluginBase raw+size format (64-bit LE size prefix). Ensures odd sector sizes (e.g. from Veeam) do not truncate (round up to full MB).
+
+### 401 retry
+
+- **Plugin:** On 401, unlink token cache and delete _auth_token, then recurse with $is_retry=1. When $is_retry is true, 401 is not retried (die immediately). Limits to one retry to avoid infinite recursion on bad credentials.
+
 ---
 
 ## Request/response envelope (data wrapper)
@@ -90,6 +118,7 @@ All plugin API usage has been checked against `docs/NIMBLE_API_REFERENCE.md`:
 - **Methods:** POST (tokens, initiator_groups, volumes, access_control_records, snapshots), GET (all list/read), PUT (volumes/:id for size, name, volcoll_id), DELETE (volumes/:id, snapshots/:id).
 - **Request bodies:** All POST/PUT bodies are sent as `{ data => $body }`; GET/DELETE use no body.
 - **Clone vs restore:** Restore = POST volumes/:id/actions/restore (overwrite existing volume). Clone = POST volumes with clone=true, name, base_snap_id (new volume). Plugin uses both correctly.
+- **Python SDK:** The same paths map to [HPE’s nimble-python-sdk](https://github.com/hpe-storage/nimble-python-sdk) `v1/api/*.py` modules (see **Cross-check** table above); `volumes.py` implements `restore` and documents `clone` / `base_snap_id` on create, matching this plugin.
 
 ### Comparison with Pure Storage plugin (Proxmox-side logic)
 

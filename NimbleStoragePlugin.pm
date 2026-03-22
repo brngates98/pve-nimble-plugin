@@ -63,8 +63,8 @@ sub set_debug_from_config {
 ### Configuration
 sub api {
   my $tested_apiver = 12;
-  my $apiver        = PVE::Storage::APIVER;
-  my $apiage        = PVE::Storage::APIAGE;
+  my $apiver        = $PVE::Storage::APIVER;
+  my $apiage        = $PVE::Storage::APIAGE;
   if ( $apiver >= 2 and $apiver <= $tested_apiver ) {
     return $apiver;
   }
@@ -195,7 +195,7 @@ sub exec_command {
     warn "Warning :: $@" if $@ && $dm >= 0;
   }
   print "Debug :: execute '" . join( ' ', @$command ) . "'\n" if $DEBUG >= 2;
-  $param{ 'quiet' } = 1 unless exists $param{ 'quiet' }       if $DEBUG < 3;
+  $param{ 'quiet' } = 1 if $DEBUG < 3 && !exists $param{ 'quiet' };
   eval { run_command( $command, %param ) };
   if ( $@ ) {
     my $err = " :: Cannot execute '" . join( ' ', @$command ) . "'\n  ==> $@\n";
@@ -373,7 +373,8 @@ sub nimble_base_url {
 }
 
 sub nimble_api_call {
-  my ( $scfg, $method, $path, $body, $storeid ) = @_;
+  my ( $scfg, $method, $path, $body, $storeid, $is_retry ) = @_;
+  $is_retry //= 0;
   my $base       = nimble_base_url( $scfg );
   my $url        = $base . '/' . $NIMBLE_API_VERSION . '/' . $path;
   my $cache_path = defined $storeid ? get_token_cache_path( $storeid ) : undef;
@@ -416,10 +417,10 @@ sub nimble_api_call {
   my $content = $res->decoded_content;
 
   if ( !$res->is_success ) {
-    if ( $res->code == 401 && $cache_path ) {
+    if ( !$is_retry && $res->code == 401 && $cache_path ) {
       unlink $cache_path;
       delete $scfg->{ _auth_token };
-      return nimble_api_call( $scfg, $method, $path, $body, $storeid );
+      return nimble_api_call( $scfg, $method, $path, $body, $storeid, 1 );
     }
     die "Error :: Nimble API $method $path: " . $res->status_line . "\n" . ( $content // '' ) . "\n";
   }
@@ -440,9 +441,9 @@ sub get_nimble_iscsi_discovery_ips {
   my ( $scfg, $storeid ) = @_;
   my @ips;
   eval {
-    my $res = nimble_api_call( $scfg, 'GET', 'subnets', undef, $storeid );
-    my $list = $res->{ data };
-    return () unless ref($list) eq 'ARRAY' && @$list;
+    my $res  = nimble_api_call( $scfg, 'GET', 'subnets', undef, $storeid );
+    my $list = nimble_data_as_list( $res->{ data } );
+    return () unless @$list;
     my %seen;
     for my $sub ( @$list ) {
       next unless ref($sub) eq 'HASH';
@@ -628,25 +629,32 @@ sub nimble_get_volume_info {
   my ( $class, $scfg, $volname, $storeid ) = @_;
   my ( $id, $vol ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   return undef unless $vol;
-  my $volname = $vol->{ name };
-  my $prefix  = nimble_name_prefix( $scfg );
-  $volname = substr( $volname, length( $prefix ) ) if length( $prefix );
+  my $array_name = $vol->{ name };
+  my $prefix     = nimble_name_prefix( $scfg );
+  $array_name = substr( $array_name, length( $prefix ) ) if length( $prefix );
   return {
-    name   => $volname,
+    name   => $array_name,
     serial => $vol->{ serial_number },
     size   => ( $vol->{ size } || 0 ) * 1024 * 1024,
     used   => ( $vol->{ vol_usage_compressed_bytes } || $vol->{ size } || 0 ) * 1024 * 1024,
     ctime  => $vol->{ creation_time } || 0,
-    volid  => $storeid ? "$storeid:$volname" : $volname,
+    volid  => $storeid ? "$storeid:$array_name" : $array_name,
     format => 'raw'
   };
+}
+
+# Round size up to full MB (Veeam/import compatibility: odd sector counts must not truncate)
+sub size_bytes_to_mb {
+  my ( $size_bytes ) = @_;
+  return 1 if $size_bytes < 1;
+  my $size_mb = int( ( $size_bytes + 1024 * 1024 - 1 ) / ( 1024 * 1024 ) );
+  return $size_mb < 1 ? 1 : $size_mb;
 }
 
 sub nimble_create_volume {
   my ( $class, $scfg, $volname, $size_bytes, $storeid ) = @_;
   my $name    = nimble_volname( $scfg, $volname, undef );
-  my $size_mb = int( $size_bytes / ( 1024 * 1024 ) );
-  $size_mb = 1 if $size_mb < 1;
+  my $size_mb = size_bytes_to_mb( $size_bytes );
   my $body = { name => $name, size => $size_mb };
   $body->{ pool_name } = $scfg->{ pool_name } if $scfg->{ pool_name };
   my $r      = nimble_api_call( $scfg, 'POST', 'volumes', $body, $storeid );
@@ -680,8 +688,7 @@ sub nimble_resize_volume {
   my ( $class, $scfg, $volname, $size_bytes, $storeid ) = @_;
   my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   die "Error :: Volume \"$volname\" not found\n" unless $vol_id;
-  my $size_mb = int( $size_bytes / ( 1024 * 1024 ) );
-  $size_mb = 1 if $size_mb < 1;
+  my $size_mb = size_bytes_to_mb( $size_bytes );
   nimble_api_call( $scfg, 'PUT', "volumes/$vol_id", { size => $size_mb }, $storeid );
   return $size_bytes;
 }
@@ -1037,9 +1044,93 @@ sub create_base {
   die "Error :: Creating base image is not implemented.\n";
 }
 
+# raw+size: 8-byte little-endian size header (bytes), then raw stream (PVE/backup compatibility, e.g. Veeam V13+)
+sub RAW_SIZE_HEADER_LEN { 8 }
+
+sub volume_import_formats {
+  my ( $class, $scfg, $storeid, $volname, $snapshot, $base_snapshot, $with_snapshots ) = @_;
+  return ['raw+size'] if !$snapshot;
+  return [];
+}
+
+sub volume_export_formats {
+  my ( $class, $scfg, $storeid, $volname, $snapshot, $base_snapshot, $with_snapshots ) = @_;
+  return ['raw+size'] if !$snapshot;
+  return [];
+}
+
 sub volume_import {
   my ( $class, $scfg, $storeid, $fh, $volname, $format, $snapshot, $base_snapshot, $with_snapshots, $allow_rename ) = @_;
-  die "Error :: volume_import not implemented.\n";
+  die "Error :: volume_import: only raw+size format is supported.\n" if $format ne 'raw+size';
+  die "Error :: volume_import: snapshot import is not supported.\n" if $snapshot;
+
+  my $hlen = RAW_SIZE_HEADER_LEN();
+  my $buf;
+  my $n = read( $fh, $buf, $hlen );
+  die "Error :: volume_import: failed to read size header ($hlen bytes).\n" if !$n || $n != $hlen;
+  my $size_bytes = unpack( 'Q<', $buf );
+  die "Error :: volume_import: invalid size in header ($size_bytes).\n" if $size_bytes < 1;
+
+  my $size_alloc_bytes = size_bytes_to_mb( $size_bytes ) * 1024 * 1024;
+  $class->nimble_create_volume( $scfg, $volname, $size_alloc_bytes, $storeid );
+  eval {
+    $class->activate_volume( $storeid, $scfg, $volname, undef, {} );
+    my ( $path, undef, undef, undef ) = $class->filesystem_path( $scfg, $volname, undef );
+    die "Error :: volume_import: device path not available.\n" if !length( $path ) || !-b $path;
+    open( my $dev, '>:raw', $path ) or die "Error :: volume_import: cannot open device $path: $!\n";
+    my $chunk = 1024 * 1024;
+    my $remaining = $size_bytes;
+    while ( $remaining > 0 ) {
+      my $to_read = $remaining < $chunk ? $remaining : $chunk;
+      my $got = read( $fh, $buf, $to_read );
+      last if !$got;
+      my $w = syswrite( $dev, $buf, $got );
+      die "Error :: volume_import: write failed after " . ( $size_bytes - $remaining ) . " bytes.\n" if !defined $w || $w != $got;
+      $remaining -= $got;
+    }
+    close( $dev );
+    $class->deactivate_volume( $storeid, $scfg, $volname, undef, {} );
+  };
+  if ( $@ ) {
+    eval { $class->deactivate_volume( $storeid, $scfg, $volname, undef, {} ); };
+    eval { $class->nimble_delete_volume( $scfg, $volname, $storeid ); };
+    die $@;
+  }
+  return "$storeid:$volname";
+}
+
+sub volume_export {
+  my ( $class, $scfg, $storeid, $fh, $volname, $format, $snapshot, $base_snapshot, $with_snapshots ) = @_;
+  die "Error :: volume_export: only raw+size format is supported.\n" if $format ne 'raw+size';
+  die "Error :: volume_export: snapshot export is not supported.\n" if $snapshot;
+
+  my ( $size_bytes, undef, undef, undef ) = $class->volume_size_info( $scfg, $storeid, $volname, 30 );
+  die "Error :: volume_export: could not get volume size.\n" if !$size_bytes || $size_bytes < 1;
+
+  $class->activate_volume( $storeid, $scfg, $volname, undef, {} );
+  eval {
+    my ( $path, undef, undef, undef ) = $class->filesystem_path( $scfg, $volname, undef );
+    die "Error :: volume_export: device path not available.\n" if !length( $path ) || !-b $path;
+    print $fh pack( 'Q<', $size_bytes );
+    open( my $dev, '<:raw', $path ) or die "Error :: volume_export: cannot open device $path: $!\n";
+    my $chunk = 1024 * 1024;
+    my $remaining = $size_bytes;
+    my $buf;
+    while ( $remaining > 0 ) {
+      my $to_read = $remaining < $chunk ? $remaining : $chunk;
+      my $got = sysread( $dev, $buf, $to_read );
+      last if !$got;
+      print $fh $buf;
+      $remaining -= $got;
+    }
+    close( $dev );
+    $class->deactivate_volume( $storeid, $scfg, $volname, undef, {} );
+  };
+  if ( $@ ) {
+    eval { $class->deactivate_volume( $storeid, $scfg, $volname, undef, {} ); };
+    die $@;
+  }
+  return 1;
 }
 
 1;

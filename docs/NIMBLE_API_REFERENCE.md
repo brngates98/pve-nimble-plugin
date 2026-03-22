@@ -5,6 +5,8 @@ This file is an in-repo extract of the **HPE Nimble Storage REST API Reference V
 **Base URL:** `https://<array_mgmt_ip>:5392/v1/`  
 **Auth:** POST `tokens` with `data.username` and `data.password` → response `data.session_token`; use `X-Auth-Token` on subsequent requests.
 
+**Related (same REST API, different language):** HPE’s [Nimble Python SDK](https://github.com/hpe-storage/nimble-python-sdk) ([documentation](https://hpe-storage.github.io/nimble-python-sdk/)) maps object sets (volumes, snapshots, initiator_groups, subnets, tokens, etc.) to Python clients. This repo does not use that SDK; it is a useful reference if you extract or mirror the API as a Perl module—compare paths, payloads, and `data` envelopes against this file and `docs/API_VALIDATION.md`.
+
 ---
 
 ## 1. Request/response envelope (data wrapper)

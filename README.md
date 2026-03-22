@@ -52,6 +52,7 @@ This plugin integrates HPE Nimble Storage arrays with Proxmox Virtual Environmen
 - Clone from snapshot
 - Optional multipath (same pattern as the Pure Storage plugin)
 - Session token caching under `/etc/pve/priv/nimble/` (cluster-safe)
+- **Veeam V13+:** Compatible with Veeam Backup & Replication 13 and later for Proxmox VE (backup and restore of VM disks on this storage via `raw+size` import/export; snapshot names from Veeam are normalized for the array)
 
 ## Prerequisites
 
@@ -164,6 +165,28 @@ sudo apt install ./libpve-storage-nimble-perl_${PACKAGE_VERSION}-1_all.deb
 sudo apt remove libpve-storage-nimble-perl
 ```
 
+#### Option C: Scripted installer (single node or all cluster nodes)
+
+A script automates repo setup, package install, and PVE service restarts. It can install on the current node only or on every node in the cluster via SSH (same pattern as the Blockbridge PVE installer).
+
+**Single node** (installs from APT repo; use `--version X.Y.Z` to install a specific release .deb from GitHub instead):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/brngates98/pve-nimble-plugin/main/scripts/install-pve-nimble-plugin.sh | sudo bash
+```
+
+**All cluster nodes** — validate first, then install:
+
+```bash
+# Validate cluster is healthy and all nodes are responding (no changes)
+curl -fsSL https://raw.githubusercontent.com/brngates98/pve-nimble-plugin/main/scripts/install-pve-nimble-plugin.sh | sudo bash -s -- --all-nodes --dry-run
+
+# Install on each node in the cluster
+curl -fsSL https://raw.githubusercontent.com/brngates98/pve-nimble-plugin/main/scripts/install-pve-nimble-plugin.sh | sudo bash -s -- --all-nodes
+```
+
+Options: `--yes` (non-interactive), `--dry-run`, `--version X.Y.Z` (install that release from GitHub), `--codename SUITE` (default `bookworm`), `--help`. To review the script before running: download it, then run `bash ./install-pve-nimble-plugin.sh --help`.
+
 ## Configuration
 
 Add storage via CLI (no GUI for custom types):
@@ -205,20 +228,20 @@ nimble: <storage_id>
   # auto_iscsi_discovery 1   # optional; run iSCSI discovery/login on activate (default: no)
 ```
 
-| Parameter            | Description                                                                                                                                                                                                         |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| storage_id           | Name shown in Proxmox Storage list                                                                                                                                                                                  |
-| address              | Nimble management URL (e.g. `https://nimble.example.com`). Port 5392 is used by default if omitted.                                                                                                                 |
-| username             | Nimble REST API user                                                                                                                                                                                                |
-| password             | API password                                                                                                                                                                                                        |
+| Parameter            | Description                                                                                                                                                                                                                                                                                                                                               |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| storage_id           | Name shown in Proxmox Storage list                                                                                                                                                                                                                                                                                                                        |
+| address              | Nimble management URL (e.g. `https://nimble.example.com`). Port 5392 is used by default if omitted.                                                                                                                                                                                                                                                       |
+| username             | Nimble REST API user                                                                                                                                                                                                                                                                                                                                      |
+| password             | API password                                                                                                                                                                                                                                                                                                                                              |
 | initiator_group      | **Optional.** Nimble initiator group name. If unset, the plugin creates per-node groups `pve-<nodename>` and ensures the current node has access when a volume is activated (so migration works). If set, the plugin uses that group only (it does not create it or add IQNs—create the group in Nimble and add all nodes’ IQNs for cluster-wide access). |
-| auto_iscsi_discovery | **Optional.** Set to `1` or `yes` to run iSCSI discovery and login when the storage is activated. The plugin gets discovery IPs from the Nimble subnets API and runs `iscsiadm` on this host. Default: no (opt-in). |
-| vnprefix             | Optional prefix for volume names on the array                                                                                                                                                                       |
-| pool_name            | Optional Nimble pool for new volumes                                                                                                                                                                                |
-| volume_collection    | **Optional.** Nimble volume collection name. New volumes are added to this collection so array-side protection/snapshot schedules apply. Create the collection (and its protection template) in Nimble first.      |
-| check_ssl            | Set to `1` or `yes` to verify TLS (default: no)                                                                                                                                                                     |
-| token_ttl            | Session token cache TTL in seconds (default 3600)                                                                                                                                                                   |
-| content              | Use `images` for VM disks                                                                                                                                                                                           |
+| auto_iscsi_discovery | **Optional.** Set to `1` or `yes` to run iSCSI discovery and login when the storage is activated. The plugin gets discovery IPs from the Nimble subnets API and runs `iscsiadm` on this host. Default: no (opt-in).                                                                                                                                       |
+| vnprefix             | Optional prefix for volume names on the array                                                                                                                                                                                                                                                                                                             |
+| pool_name            | Optional Nimble pool for new volumes                                                                                                                                                                                                                                                                                                                      |
+| volume_collection    | **Optional.** Nimble volume collection name. New volumes are added to this collection so array-side protection/snapshot schedules apply. Create the collection (and its protection template) in Nimble first.                                                                                                                                             |
+| check_ssl            | Set to `1` or `yes` to verify TLS (default: no)                                                                                                                                                                                                                                                                                                           |
+| token_ttl            | Session token cache TTL in seconds (default 3600)                                                                                                                                                                                                                                                                                                         |
+| content              | Use `images` for VM disks                                                                                                                                                                                                                                                                                                                                 |
 
 ### VM migration (live migration and move)
 
@@ -233,9 +256,9 @@ If you set **auto_iscsi_discovery 1** (or **yes**) on the storage:
 
 1. **When** the storage is activated on a node (e.g. after adding the storage or when the node first uses it), the plugin will:
 
-    - **Ensure the initiator group exists** on the Nimble array (same logic as when creating volumes): if `initiator_group` is set in storage config, that group must exist; otherwise the plugin creates or finds a group named `pve-<nodename>` using this host's IQN from `/etc/iscsi/initiatorname.iscsi`. If this step fails (e.g. no IQN), auto discovery is skipped and a warning is logged.
-    - Call the Nimble REST API **GET v1/subnets** to obtain iSCSI discovery IPs (subnets with `allow_iscsi` or type containing `data`).
-    - Run on this host: `iscsiadm -m discovery -t sendtargets -p <ip>` for each discovery IP, then set `node.startup` to `automatic`, then run `iscsiadm -m node --login`.
+   - **Ensure the initiator group exists** on the Nimble array (same logic as when creating volumes): if `initiator_group` is set in storage config, that group must exist; otherwise the plugin creates or finds a group named `pve-<nodename>` using this host's IQN from `/etc/iscsi/initiatorname.iscsi`. If this step fails (e.g. no IQN), auto discovery is skipped and a warning is logged.
+   - Call the Nimble REST API **GET v1/subnets** to obtain iSCSI discovery IPs (subnets with `allow_iscsi` or type containing `data`).
+   - Run on this host: `iscsiadm -m discovery -t sendtargets -p <ip>` for each discovery IP, then set `node.startup` to `automatic`, then run `iscsiadm -m node --login`.
 
 2. **Requirements:** `open-iscsi` must be installed and an IQN must be set in `/etc/iscsi/initiatorname.iscsi`. The plugin does not install or configure the initiator; it ensures the initiator group on the array, then runs discovery and login.
 
@@ -258,6 +281,16 @@ Existing volumes are not moved into a collection; only newly created and cloned 
 - **VM snapshots:** The plugin supports **storage-level snapshots**. When you take a VM snapshot in Proxmox and the VM has disks on this storage, the plugin creates a Nimble snapshot per disk; rollback and delete work as expected. So Nimble is already a "snapshot target" for VM snapshots.
 - **vzdump backup target:** Proxmox backup (vzdump) expects **file** storage (directory, NFS, or Proxmox Backup Server). This plugin provides **block** (iSCSI) storage for VM disks. It does **not** support the "vzdump backup file" content type, so you cannot select this storage as a backup destination in PVE backup jobs. Use a file-based or PBS storage for backups.
 - **Array-scheduled snapshots:** Nimble's own scheduled snapshots (from protection templates / volume collections) are created by the array, not by PVE. They do not appear as "VM snapshots" in the Proxmox UI. You can use **volume_collection** so new disks get array-side schedules; restore from those snapshots via the Nimble UI/API or by cloning/restore workflows outside PVE. See [Restore a disk from the array](docs/00-SETUP-FULLY-PROTECTED-STORAGE.md#11-restore-a-disk-from-the-array-workflow) for a step-by-step workflow (PVE rollback, clone, and in-place restore via Nimble UI or API).
+
+### Veeam Backup & Replication (V13+)
+
+The plugin is compatible with **Veeam Backup & Replication 13** and later when used with the Proxmox VE integration. It supports:
+
+- **Backup:** Veeam can back up VMs whose disks are on this Nimble storage. The plugin exposes the `raw+size` export format so volume data can be streamed correctly.
+- **Restore:** Restore of disks to this storage is supported via the `raw+size` import format. Volume size is rounded up to a full MB when needed (e.g. odd sector counts from backup), so restores complete without size-related failures.
+- **Snapshot names:** If Veeam uses snapshot names with a `veeam_` prefix, the plugin normalizes them to `veeam-` on the array so Nimble snapshot names remain valid.
+
+Install the plugin on every Proxmox node that hosts VMs backed by Veeam, and ensure iSCSI (and optional multipath) is configured as in the rest of this README.
 
 ## Multipath (optional)
 
