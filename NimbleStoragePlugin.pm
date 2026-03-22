@@ -524,7 +524,7 @@ sub nimble_api_call {
   return length( $content ) ? decode_json( $content ) : {};
 }
 
-# Normalize API list response: HPE can return data as array, { items => [...] }, or single object.
+# Normalize API list response: array, { items => [] }, or Nimble paged { data => [ ... ], total_count => ... }.
 sub nimble_data_as_list {
   my ( $raw ) = @_;
   return [] unless defined $raw;
@@ -532,6 +532,9 @@ sub nimble_data_as_list {
   if ( ref($raw) eq 'HASH' ) {
     if ( defined $raw->{ items } && ref( $raw->{ items } ) eq 'ARRAY' ) {
       return $raw->{ items };
+    }
+    if ( defined $raw->{ data } && ref( $raw->{ data } ) eq 'ARRAY' ) {
+      return $raw->{ data };
     }
     return [ $raw ] if defined $raw->{ id };
   }
@@ -607,6 +610,29 @@ sub get_nimble_iscsi_discovery_ips {
     @ips = ();
   }
   my %seen_ip = map { $_ => 1 } @ips;
+  if ( !@ips ) {
+    eval {
+      my $r2   = nimble_api_call( $scfg, 'GET', 'network_interfaces', undef, $storeid );
+      my $nifs = nimble_data_as_list( $r2->{ data } );
+      for my $ni ( @$nifs ) {
+        next unless ref($ni) eq 'HASH';
+        my $nt = $ni->{ nic_type } // '';
+        next unless $nt =~ /data|iscsi|discovery/i;
+        my $ipl = $ni->{ ip_list };
+        next unless ref($ipl) eq 'ARRAY';
+        for my $e ( @$ipl ) {
+          my $s = ref($e) eq 'HASH' ? ( $e->{ ip } // $e->{ label } // '' ) : "$e";
+          $s =~ s/\/\d+\z//;
+          next unless $s =~ /^(\d{1,3}(?:\.\d{1,3}){3})$/;
+          push @ips, $1 if !$seen_ip{$1}++;
+        }
+      }
+    };
+    if ( $@ && $DEBUG >= 1 ) {
+      chomp( my $e = $@ );
+      print "Debug :: network_interfaces fallback for discovery IPs: $e\n";
+    }
+  }
   for my $m ( nimble_parse_manual_discovery_ips($scfg) ) {
     push @ips, $m if !$seen_ip{$m}++;
   }
@@ -625,63 +651,103 @@ sub nimble_iscsi_portal {
   return "$ip:3260";
 }
 
+sub nimble_iscsiadm_path {
+  my $iscsiadm = '/usr/sbin/iscsiadm';
+  return -x $iscsiadm ? $iscsiadm : '/sbin/iscsiadm';
+}
+
+# True if an active session lists this target IQN (authoritative after login attempts).
+sub nimble_iscsi_target_in_sessions {
+  my ($target_iqn) = @_;
+  return 0 if !length($target_iqn);
+  my $iscsiadm = nimble_iscsiadm_path();
+  return 0 unless -x $iscsiadm;
+  my $out = `"$iscsiadm" -m session 2>/dev/null` // '';
+  return index( $out, $target_iqn ) >= 0;
+}
+
+# One sendtargets pass per host (quiet). Caller then runs targeted --login; do not mix with global `node --login` on map.
+sub iscsi_sendtargets_on_ips {
+  my ($ips_ref) = @_;
+  return unless ref($ips_ref) eq 'ARRAY' && @$ips_ref;
+  my $iscsiadm = nimble_iscsiadm_path();
+  return unless -x $iscsiadm;
+  for my $ip ( @$ips_ref ) {
+    next unless defined $ip && $ip =~ m/^\S+$/ && length($ip) <= 253;
+    my $disc_ip = $ip;
+    eval {
+      run_command(
+        [ $iscsiadm, '-m', 'discovery', '-t', 'sendtargets', '-p', $disc_ip ],
+        timeout => 20,
+        quiet   => 1
+      );
+    };
+    if ( $@ && $DEBUG >= 1 ) {
+      chomp( my $e = $@ );
+      print "Debug :: sendtargets -p $disc_ip: $e\n";
+    }
+  }
+}
+
 # Login to target on all node records (open-iscsi), when portals are unknown but discovery already ran elsewhere.
 sub nimble_iscsi_login_target_on_all_recorded_portals {
   my ($target_iqn) = @_;
   return unless length($target_iqn) && $target_iqn =~ m/^iqn\./i;
-  my $iscsiadm = '/usr/sbin/iscsiadm';
-  $iscsiadm = '/sbin/iscsiadm' if !-x $iscsiadm;
+  my $iscsiadm = nimble_iscsiadm_path();
   return unless -x $iscsiadm;
-  eval { run_command( [ $iscsiadm, '-m', 'node', '-T', $target_iqn, '--login' ], timeout => 90 ); };
+  eval {
+    run_command( [ $iscsiadm, '-m', 'node', '-T', $target_iqn, '--login' ], timeout => 90, quiet => 1 );
+  };
 }
 
-# Nimble volume-scoped targets (per-LUN IQN in target_name) need discovery + explicit login on each portal.
+# After iscsi_sendtargets_on_ips: login this volume IQN on each portal (no per-IP rediscovery; no global node --login).
 sub nimble_iscsi_login_target_on_portals {
   my ( $storeid, $target_iqn, $ips_ref ) = @_;
   return unless length( $target_iqn ) && $target_iqn =~ m/^iqn\./i;
   return unless ref($ips_ref) eq 'ARRAY' && @$ips_ref;
-  my $iscsiadm = '/usr/sbin/iscsiadm';
-  $iscsiadm = '/sbin/iscsiadm' if !-x $iscsiadm;
+  my $iscsiadm = nimble_iscsiadm_path();
   return unless -x $iscsiadm;
-  my $any_ok = 0;
   for my $ip ( @$ips_ref ) {
     next unless defined $ip && $ip =~ m/^\S+$/;
     my $portal = nimble_iscsi_portal($ip);
-    eval { run_command( [ $iscsiadm, '-m', 'discovery', '-t', 'sendtargets', '-p', $ip ], timeout => 15 ); };
-    if ( $@ && $DEBUG >= 1 ) { chomp( my $e = $@ ); print "Debug :: discovery $ip before target login: $e\n"; }
     eval {
       run_command(
         [ $iscsiadm, '-m', 'node', '-T', $target_iqn, '-p', $portal, '--login' ],
-        timeout => 45
+        timeout => 45,
+        quiet   => 1
       );
-      $any_ok = 1;
     };
-    if ( $@ && $DEBUG >= 1 ) { chomp( my $e = $@ ); print "Debug :: iscsi login $target_iqn @ $portal: $e\n"; }
+    if ( $@ && $DEBUG >= 1 ) {
+      chomp( my $e = $@ );
+      print "Debug :: iscsi login $target_iqn @ $portal: $e\n";
+    }
   }
-  warn "Warning :: iSCSI login for volume target \"$target_iqn\" did not succeed on any discovery portal; "
-    . "check subnets, ACL, and that the volume uses an iSCSI volume target.\n"
-    if !$any_ok;
+  if ( !nimble_iscsi_target_in_sessions($target_iqn) ) {
+    warn "Warning :: No active iSCSI session for volume target \"$target_iqn\" after portal logins; "
+      . "check ACL, paths, and discovery_ip / iscsi_discovery_ips.\n";
+  }
 }
 
-### Run iscsiadm discovery and login; never die (for optional auto-discovery)
+### Storage activate only: sendtargets (quiet) + automatic startup + global login (can exit 15 if some portals already logged in — harmless).
 sub run_iscsi_discovery_and_login {
   my ( $storeid, $scfg, $ips_ref ) = @_;
   return unless ref($ips_ref) eq 'ARRAY' && @$ips_ref;
-  my $iscsiadm = '/usr/sbin/iscsiadm';
-  $iscsiadm = '/sbin/iscsiadm' if !-x $iscsiadm;
+  my $iscsiadm = nimble_iscsiadm_path();
   if ( !-x $iscsiadm ) {
     warn "Warning :: iscsiadm not found or not executable; skipping auto iSCSI discovery for storage \"$storeid\".\n";
     return;
   }
-  for my $ip ( @$ips_ref ) {
-    next unless defined $ip && $ip =~ m/^\S+$/ && length($ip) <= 253;
-    eval { run_command( [ $iscsiadm, '-m', 'discovery', '-t', 'sendtargets', '-p', $ip ], timeout => 15 ); };
-    if ( $@ ) { chomp( my $e = $@ ); warn "Warning :: iSCSI discovery to $ip failed: $e\n"; }
+  iscsi_sendtargets_on_ips($ips_ref);
+  eval { run_command( [ $iscsiadm, '-m', 'node', '--op', 'update', '-n', 'node.startup', '-v', 'automatic' ], timeout => 10, quiet => 1 ); };
+  if ( $@ && $DEBUG >= 1 ) {
+    chomp( my $e = $@ );
+    print "Debug :: node startup update: $e\n";
   }
-  eval { run_command( [ $iscsiadm, '-m', 'node', '--op', 'update', '-n', 'node.startup', '-v', 'automatic' ], timeout => 10 ); };
-  if ( $@ ) { chomp( my $e = $@ ); warn "Warning :: iSCSI node startup update failed: $e\n"; }
-  eval { run_command( [ $iscsiadm, '-m', 'node', '--login' ], timeout => 30 ); };
-  if ( $@ ) { chomp( my $e = $@ ); warn "Warning :: iSCSI node login failed: $e\n"; }
+  eval { run_command( [ $iscsiadm, '-m', 'node', '--login' ], timeout => 120, quiet => 1 ); };
+  if ( $@ && $DEBUG >= 1 ) {
+    chomp( my $e = $@ );
+    print "Debug :: global node --login (often exit 15 if sessions exist): $e\n";
+  }
 }
 
 sub nimble_get_local_iscsi_iqn {
@@ -1315,8 +1381,8 @@ sub map_volume {
     warn "Warning :: No iSCSI discovery IPs (Nimble subnets API, iscsi_discovery_ips, or active sessions) for storage \"$storeid\"; "
       . "set iscsi_discovery_ips or ensure iscsiadm sessions exist to this array.\n";
   }
-  # Pure Storage uses API volume->host "connections" before map; Nimble uses ACL + host iscsi. We discover/login here.
-  run_iscsi_discovery_and_login( $storeid, $scfg, \@dip ) if @dip;
+  # Do not run global `iscsiadm -m node --login` here (exit 15 / noise when many targets). Sendtargets once, then per-volume IQN login only.
+  iscsi_sendtargets_on_ips( \@dip ) if @dip;
   if ( length($target_iqn) ) {
     if (@dip) {
       nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@dip );
@@ -1326,8 +1392,11 @@ sub map_volume {
     }
   }
   else {
-    warn "Warning :: Volume \"$volname\" has no target_name (iSCSI IQN) from Nimble API; "
-      . "only generic node login was attempted.\n";
+    warn "Warning :: Volume \"$volname\" has no target_name (iSCSI IQN) from Nimble API.\n";
+    if (@dip) {
+      my $adm = nimble_iscsiadm_path();
+      eval { run_command( [ $adm, '-m', 'node', '--login' ], timeout => 90, quiet => 1 ); } if -x $adm;
+    }
   }
   eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
   scsi_scan_new( 'iscsi' );
