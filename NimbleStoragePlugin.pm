@@ -1157,6 +1157,40 @@ sub iscsi_sendtargets_on_ips {
   }
 }
 
+# Run sendtargets on each portal and return portals whose response contained $target_iqn.
+# This is the authoritative check: if the IQN is in the sendtargets response, the ACL has
+# propagated and the target is accessible from this host on that portal.
+sub iscsi_sendtargets_find_target {
+  my ( $portals_ref, $target_iqn ) = @_;
+  my $iscsiadm = nimble_iscsiadm_path();
+  return () unless -x $iscsiadm && ref($portals_ref) eq 'ARRAY' && @$portals_ref;
+  return () unless length($target_iqn);
+  my $needle = nimble_iscsi_compact_lc($target_iqn);
+  my @found;
+  for my $ip ( @$portals_ref ) {
+    next unless defined $ip && $ip =~ m/^\S+$/ && length($ip) <= 253;
+    my $disc_ip = nimble_untaint_iscsiadm_scalar($ip);
+    next unless length $disc_ip;
+    my $output = '';
+    eval {
+      run_command(
+        [ $iscsiadm, '-m', 'discovery', '-t', 'sendtargets', '-p', $disc_ip ],
+        outfunc  => sub { $output .= shift },
+        errfunc  => sub { },
+        timeout  => 20,
+        quiet    => 1
+      );
+    };
+    if ( $@ ) {
+      chomp( my $e = $@ );
+      warn "Warning :: iscsiadm sendtargets -p $disc_ip failed: $e\n" if $e =~ /insecure dependency in exec/i;
+      print "Debug :: sendtargets -p $disc_ip: $e\n" if $DEBUG >= 1;
+    }
+    push @found, $disc_ip if length($output) && index( nimble_iscsi_compact_lc($output), $needle ) >= 0;
+  }
+  return @found;
+}
+
 # Login to target on all node records (open-iscsi), when portals are unknown but discovery already ran elsewhere.
 sub nimble_iscsi_login_target_on_all_recorded_portals {
   my ($target_iqn) = @_;
@@ -1569,29 +1603,31 @@ sub nimble_iscsi_establish_volume_session {
     return 0;
   }
 
-  # Retry sendtargets until the target IQN appears in the local open-iscsi node DB.
-  # Each round: run sendtargets on all portals, then check node DB.  If found, break and login.
-  # If not found after max rounds, fall through and attempt login anyway (best-effort).
+  # Retry sendtargets until the target IQN appears in the response from at least one portal.
+  # Directly checking sendtargets output is authoritative: if the IQN is returned, the ACL has
+  # propagated.  Only login on portals that returned the IQN (avoids exit 21 on non-owning
+  # Nimble controller ports, which never serve a given volume's IQN).
   my $max_disc = 12;    # 12 x 2 s = up to 24 s
-  my @portals  = nimble_iscsi_merge_portal_list( $target_iqn, \@dip );
+  my @portals      = nimble_iscsi_merge_portal_list( $target_iqn, \@dip );
+  my @login_portals;
   for my $round ( 1 .. $max_disc ) {
     return 1 if nimble_iscsi_target_in_sessions( $target_iqn, 0 );
-    iscsi_sendtargets_on_ips( \@portals );
-    @portals = nimble_iscsi_merge_portal_list( $target_iqn, \@dip );
-    if ( nimble_iscsi_node_portals_for_target($target_iqn) ) {
-      print "Info :: Target \"$target_iqn\" is discoverable (sendtargets round $round).\n"
+    my @found = iscsi_sendtargets_find_target( \@portals, $target_iqn );
+    if ( @found ) {
+      print "Info :: Target \"$target_iqn\" found via sendtargets on "
+        . join( ', ', @found )
+        . " (round $round).\n"
         if $round > 1 || $DEBUG >= 1;
+      @login_portals = @found;
       last;
     }
     last if $round >= $max_disc;
-    print "Info :: Target not yet in node DB after sendtargets (ACL propagation, round $round/$max_disc); retrying in 2s...\n"
+    print "Info :: Target not yet in sendtargets response (ACL propagation, round $round/$max_disc); retrying in 2s...\n"
       if $round >= 2 || $DEBUG >= 1;
     sleep(2);
   }
 
-  # Login only on portals where the node DB has records (sendtargets succeeded on those portals).
-  # Fall back to the full portal list if node DB is still empty (e.g. sendtargets timed out).
-  my @login_portals = nimble_iscsi_node_portals_for_target($target_iqn);
+  # Fall back to the full portal list if sendtargets never returned the IQN.
   @login_portals = @portals unless @login_portals;
   # suppress_no_session_warn=1: session listing is checked by the caller (map_volume device wait)
   nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@login_portals, 1, undef );
