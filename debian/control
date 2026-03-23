@@ -22,4 +22,4 @@ Description: HPE Nimble Storage integration for Proxmox VE
  .
  It allows administrators to configure and manage Nimble volumes
  directly within Proxmox VE (create, delete, resize, snapshots).
- Supports Proxmox VE 8.2+.
+ Supports Proxmox VE 8.2+ (Debian bookworm) and PVE 9.x (Debian trixie).

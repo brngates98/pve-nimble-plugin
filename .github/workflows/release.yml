@@ -85,23 +85,40 @@ jobs:
 
     - name: Set up APT repo layout
       run: |
-        mkdir -p apt/pool/main apt/dists/bookworm/main/binary-all
+        mkdir -p apt/pool/main
+        mkdir -p apt/dists/bookworm/main/binary-all
+        mkdir -p apt/dists/trixie/main/binary-all
         cp *.deb apt/pool/main/
 
-    - name: Generate Packages
+    - name: Generate Packages (bookworm)
       run: |
         cd apt && apt-ftparchive packages pool/main > dists/bookworm/main/binary-all/Packages
-        gzip -c dists/bookworm/main/binary-all/Packages > dists/bookworm/main/binary-all/Packages.gz
+        gzip -c apt/dists/bookworm/main/binary-all/Packages > apt/dists/bookworm/main/binary-all/Packages.gz
 
-    - name: Generate Release
+    - name: Generate Packages (trixie)
       run: |
-        cat > release.conf << 'EOF'
+        cp apt/dists/bookworm/main/binary-all/Packages apt/dists/trixie/main/binary-all/Packages
+        cp apt/dists/bookworm/main/binary-all/Packages.gz apt/dists/trixie/main/binary-all/Packages.gz
+
+    - name: Generate Release (bookworm)
+      run: |
+        cat > release-bookworm.conf << 'EOF'
         APT::FTPArchive::Release::Codename "bookworm";
         APT::FTPArchive::Release::Architectures "all";
         APT::FTPArchive::Release::Components "main";
         APT::FTPArchive::Release::Description "PVE Nimble Storage Plugin";
         EOF
-        cd apt && apt-ftparchive -c ../release.conf release dists/bookworm > dists/bookworm/Release
+        cd apt && apt-ftparchive -c ../release-bookworm.conf release dists/bookworm > dists/bookworm/Release
+
+    - name: Generate Release (trixie)
+      run: |
+        cat > release-trixie.conf << 'EOF'
+        APT::FTPArchive::Release::Codename "trixie";
+        APT::FTPArchive::Release::Architectures "all";
+        APT::FTPArchive::Release::Components "main";
+        APT::FTPArchive::Release::Description "PVE Nimble Storage Plugin";
+        EOF
+        cd apt && apt-ftparchive -c ../release-trixie.conf release dists/trixie > dists/trixie/Release
 
     - uses: actions/upload-pages-artifact@v3
       with:

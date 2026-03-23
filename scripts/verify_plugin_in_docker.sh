@@ -1,9 +1,15 @@
 #!/bin/bash
-# Syntax-check the **workspace** NimbleStoragePlugin.pm in Debian bookworm with
-# Proxmox's libpve-storage-perl (PVE stack only). We do not install this project
-# from APT or GitHub .deb—the only plugin source is the repo bind-mounted at
-# /workspace (read-only). A copy is placed under /tmp/.../PVE/Storage/Custom/
-# so perl -c matches the on-node install path.
+# Syntax-check the **workspace** NimbleStoragePlugin.pm against a Proxmox
+# release in Docker.  Supports bookworm (PVE 8) and trixie (PVE 9).
+#
+# Environment variables:
+#   DIST                  Debian codename: bookworm (default) or trixie
+#   VERIFY_DOCKER_IMAGE   Docker image (default: debian:<DIST>-slim)
+#   DOCKER_PLATFORM       Docker platform (default: linux/amd64)
+#
+# Examples:
+#   ./scripts/verify_plugin_in_docker.sh               # bookworm / PVE 8
+#   DIST=trixie ./scripts/verify_plugin_in_docker.sh   # trixie  / PVE 9
 #
 # Requires: Docker
 # On Apple Silicon, forces linux/amd64 (Proxmox packages are amd64).
@@ -12,7 +18,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-IMAGE="${VERIFY_DOCKER_IMAGE:-debian:bookworm-slim}"
+
+DIST="${DIST:-bookworm}"
+IMAGE="${VERIFY_DOCKER_IMAGE:-debian:${DIST}-slim}"
 PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
 
 if ! command -v docker &>/dev/null; then
@@ -20,9 +28,10 @@ if ! command -v docker &>/dev/null; then
   exit 1
 fi
 
-echo "Verifying local workspace plugin in $IMAGE ($PLATFORM)..."
+echo "Verifying local workspace plugin in $IMAGE ($PLATFORM) [dist=$DIST]..."
 docker run --rm -i \
   --platform "$PLATFORM" \
+  -e DIST="$DIST" \
   -v "$PROJECT_DIR:/workspace:ro" \
   -w /workspace \
   "$IMAGE" \
@@ -34,9 +43,9 @@ apt-get update -qq
 apt-get install -y -qq ca-certificates wget cpio
 printf '%s\n' '#!/bin/sh' 'exit 0' > /usr/sbin/policy-rc.d
 chmod +x /usr/sbin/policy-rc.d
-wget -qO /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg \
-  https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg
-echo "deb [arch=amd64] http://download.proxmox.com/debian/pve bookworm pve-no-subscription" \
+wget -qO /etc/apt/trusted.gpg.d/proxmox-release.gpg \
+  "https://enterprise.proxmox.com/debian/proxmox-release-${DIST}.gpg"
+echo "deb [arch=amd64] http://download.proxmox.com/debian/pve ${DIST} pve-no-subscription" \
   > /etc/apt/sources.list.d/pve-install-repo.list
 apt-get update -qq
 apt-get install -y -qq \

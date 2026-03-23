@@ -26,7 +26,7 @@ jobs:
         run: ./tests/run_tests.sh
 
   plugin-syntax-bookworm:
-    name: Plugin syntax (bookworm + Proxmox)
+    name: Plugin syntax (bookworm + Proxmox PVE 8)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -34,4 +34,15 @@ jobs:
       - name: Verify NimbleStoragePlugin.pm in Docker
         run: |
           chmod +x scripts/verify_plugin_in_docker.sh
-          ./scripts/verify_plugin_in_docker.sh
+          DIST=bookworm ./scripts/verify_plugin_in_docker.sh
+
+  plugin-syntax-trixie:
+    name: Plugin syntax (trixie + Proxmox PVE 9)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify NimbleStoragePlugin.pm in Docker
+        run: |
+          chmod +x scripts/verify_plugin_in_docker.sh
+          DIST=trixie ./scripts/verify_plugin_in_docker.sh
