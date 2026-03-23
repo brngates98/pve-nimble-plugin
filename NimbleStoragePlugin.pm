@@ -1723,16 +1723,19 @@ sub nimble_get_volume_id {
   }
   return ( undef, undef ) unless $vol;
 
-  # List/search often omit serial_number and target_name (per-volume iSCSI IQN); map_volume needs both.
+  # List/search often omit serial_number, target_name (per-volume iSCSI IQN), and sometimes size.
+  # Fetch the full detail record when any of these are absent so callers always get correct values.
   if ( defined $vol->{ id } ) {
     my $need_serial = !length( $vol->{ serial_number } // '' );
     my $need_target = !length( $vol->{ target_name } // '' );
-    if ( $need_serial || $need_target ) {
+    my $need_size   = !( $vol->{ size } // 0 );
+    if ( $need_serial || $need_target || $need_size ) {
       $r = nimble_api_call( $scfg, 'GET', "volumes/$vol->{ id }", undef, $storeid );
       my $full = $r->{ data } || $r;
       if ( ref($full) eq 'HASH' ) {
         $vol->{ serial_number } = $full->{ serial_number } if length( $full->{ serial_number } // '' );
         $vol->{ target_name }    = $full->{ target_name } if length( $full->{ target_name } // '' );
+        $vol->{ size }           = $full->{ size } if ( $full->{ size } // 0 ) > 0;
       }
     }
   }
@@ -1751,6 +1754,14 @@ sub nimble_list_volumes {
     my $volname = length( $prefix ) ? substr( $name, length( $prefix ) ) : $name;
     next unless $volname =~ m/^vm-\d+-(disk-|cloudinit|state-)/;
     my ( undef, undef, $volvm ) = $class->parse_volname( $volname );
+    # List endpoint sometimes omits size (returns 0) for freshly-created volumes.
+    # Fetch the full record so the GUI and move_disk get the real provisioned size.
+    if ( !( $v->{ size } // 0 ) && defined $v->{ id } ) {
+      my $detail = eval { nimble_api_call( $scfg, 'GET', "volumes/$v->{ id }", undef, $storeid ) };
+      if ( $detail && ref( $detail->{ data } ) eq 'HASH' && ( $detail->{ data }{ size } // 0 ) > 0 ) {
+        $v->{ size } = $detail->{ data }{ size };
+      }
+    }
     push @volumes,
       {
         name   => $volname,
