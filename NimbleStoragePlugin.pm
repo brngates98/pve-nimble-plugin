@@ -1498,10 +1498,14 @@ sub nimble_volume_has_acl_for_ig {
 
 # Parallel to PureStoragePlugin::purestorage_volume_connection: $mode true = connect (POST), false = disconnect (DELETE).
 # Nimble maps host access via access_control_records for this storage's initiator group (same ig as activate).
+# For connect: ACL is ensured first, then the per-volume iSCSI session is established here (not deferred to
+# map_volume).  map_volume then mirrors Pure's map_volume: rescan + wait for device.
 sub nimble_volume_connection {
   my ( $class, $storeid, $scfg, $volname, $mode ) = @_;
   if ($mode) {
-    return $class->nimble_ensure_volume_acl_for_current_node( $scfg, $volname, $storeid );
+    $class->nimble_ensure_volume_acl_for_current_node( $scfg, $volname, $storeid );
+    $class->nimble_iscsi_establish_volume_session( $scfg, $volname, $storeid );
+    return 1;
   }
   my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   return 1 unless $vol_id;
@@ -1529,12 +1533,75 @@ sub nimble_ensure_volume_acl_for_current_node {
   return 1 if nimble_volume_has_acl_for_ig( $scfg, $vol_id, $ig_id, $storeid );
   if ( nimble_post_access_control_record_idempotent( $scfg, $vol_id, $ig_id, $storeid ) ) {
     print "Info :: Volume \"$volname\" granted Nimble access (initiator group ACL).\n";
-    # Nimble propagates new ACLs to its iSCSI target asynchronously.  Without a pause, map_volume's
-    # first login attempts fire before the LUN is presented, producing spurious "no iSCSI session"
-    # warnings during live migration (the destination node always needs a fresh ACL).
-    sleep(3);
+    # ACL propagation is handled by the sendtargets retry loop in nimble_iscsi_establish_volume_session.
   }
   return 1;
+}
+
+# Establish (or verify) an iSCSI session for this volume's per-volume IQN.
+# Called from nimble_volume_connection after the ACL is assured — mirrors the role that
+# purestorage_volume_connection plays for Pure (make the volume accessible to this host)
+# but for Nimble we also need to log in to the per-volume IQN, not just call a REST API.
+#
+# Retries sendtargets until the target appears in the local open-iscsi node DB: Nimble
+# restricts sendtargets responses to authorised initiators, so a freshly-created ACL may
+# take several seconds to propagate before this node can discover the target.  Only logs
+# in on portals where the node DB was populated — avoids ISCSI_ERR_NO_OBJS_FOUND (exit 21)
+# on non-owning Nimble controller ports, which never serve this volume's IQN.
+sub nimble_iscsi_establish_volume_session {
+  my ( $class, $scfg, $volname, $storeid ) = @_;
+
+  my $volume = $class->nimble_get_volume_info( $scfg, $volname, $storeid );
+  return 0 unless $volume && length( $volume->{ target_name } // '' );
+  my $target_iqn = nimble_untaint_iscsiadm_scalar( $volume->{ target_name } );
+  return 0 unless length $target_iqn;
+
+  # Fast path: session already up (node.startup=automatic re-login, or already activated).
+  return 1 if nimble_iscsi_target_in_sessions( $target_iqn, 0 );
+
+  my @dip = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
+  if ( !@dip ) {
+    warn "Warning :: No iSCSI discovery IPs for storage \"$storeid\"; cannot establish session for "
+      . "\"$volname\". Check data subnet configuration (GET v1/subnets discovery_ip) or set iscsi_discovery_ips.\n";
+    return 0;
+  }
+
+  # Retry sendtargets until the target IQN appears in the local open-iscsi node DB.
+  # Each round: run sendtargets on all portals, then check node DB.  If found, break and login.
+  # If not found after max rounds, fall through and attempt login anyway (best-effort).
+  my $max_disc = 12;    # 12 x 2 s = up to 24 s
+  my @portals  = nimble_iscsi_merge_portal_list( $target_iqn, \@dip );
+  for my $round ( 1 .. $max_disc ) {
+    return 1 if nimble_iscsi_target_in_sessions( $target_iqn, 0 );
+    iscsi_sendtargets_on_ips( \@portals );
+    @portals = nimble_iscsi_merge_portal_list( $target_iqn, \@dip );
+    if ( nimble_iscsi_node_portals_for_target($target_iqn) ) {
+      print "Info :: Target \"$target_iqn\" is discoverable (sendtargets round $round).\n"
+        if $round > 1 || $DEBUG >= 1;
+      last;
+    }
+    last if $round >= $max_disc;
+    print "Info :: Target not yet in node DB after sendtargets (ACL propagation, round $round/$max_disc); retrying in 2s...\n"
+      if $round >= 2 || $DEBUG >= 1;
+    sleep(2);
+  }
+
+  # Login only on portals where the node DB has records (sendtargets succeeded on those portals).
+  # Fall back to the full portal list if node DB is still empty (e.g. sendtargets timed out).
+  my @login_portals = nimble_iscsi_node_portals_for_target($target_iqn);
+  @login_portals = @portals unless @login_portals;
+  # suppress_no_session_warn=1: session listing is checked by the caller (map_volume device wait)
+  nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@login_portals, 1, undef );
+
+  # Brief poll for session to register with open-iscsi after login completes.
+  my $up = nimble_iscsi_target_in_sessions( $target_iqn, 20 );    # up to 10 s
+  if ($up) {
+    print "Info :: iSCSI session established for \"$target_iqn\".\n" if $DEBUG >= 1;
+  } else {
+    print "Info :: iSCSI session for \"$target_iqn\" not yet confirmed in listing; "
+      . "device appearance in map_volume is the definitive check.\n";
+  }
+  return $up;
 }
 
 sub nimble_get_volume_collection_id {
@@ -2045,78 +2112,14 @@ sub map_volume {
   if ( length($target_raw) && !length($target_iqn) ) {
     warn "Warning :: Volume \"$volname\" target_name is not usable for iscsiadm (sanitization failed); check Nimble API target_name.\n";
   }
-  my @dip = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
-  if ( !@dip ) {
-    warn "Warning :: No iSCSI discovery portals for storage \"$storeid\" after Nimble API resolution (GET v1/subnets + GET v1/subnets/:id per subnet, then optional fallbacks). Check API connectivity from this host and data subnets with discovery_ip; optional iscsi_discovery_ips only adds extra portals.\n";
+  # Session should already be up from nimble_volume_connection (activate_volume path).
+  # If not (called directly, or session dropped), attempt to establish it now.
+  if ( length($target_iqn) && !nimble_iscsi_target_in_sessions( $target_iqn, 0 ) ) {
+    print "Info :: No active iSCSI session for \"$target_iqn\" at map time; attempting connect.\n";
+    $class->nimble_iscsi_establish_volume_session( $scfg, $volname, $storeid );
   }
-  # Per-volume IQN on every portal: merge Nimble/API IPs with open-iscsi node.portal records (multipath).
-  # Retry + global node --login fallback (same as activate_storage) for cold migration targets.
-  if ( length($target_iqn) ) {
-    my @base_dip = @dip;
-    my @portals  = nimble_iscsi_merge_portal_list( $target_iqn, \@base_dip );
-    if (@portals) {
-      for my $round ( 1 .. 6 ) {
-        last if nimble_iscsi_target_in_sessions( $target_iqn, 6 );
-        sleep(3) if $round > 1;
-        @portals = nimble_iscsi_merge_portal_list( $target_iqn, \@base_dip );
-        iscsi_sendtargets_on_ips( \@portals );
-        @portals = nimble_iscsi_merge_portal_list( $target_iqn, \@base_dip );
-        nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@portals, $round < 6, $serial );
-      }
-      if ( !nimble_iscsi_target_in_sessions( $target_iqn, 6 ) ) {
-        @portals = nimble_iscsi_merge_portal_list( $target_iqn, \@base_dip );
-        nimble_iscsi_global_node_login( \@portals );
-        sleep(2);
-        @portals = nimble_iscsi_merge_portal_list( $target_iqn, \@base_dip );
-        nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@portals, 1, $serial );
-      }
-      if ( !nimble_iscsi_target_in_sessions( $target_iqn, 6 ) ) {
-        my $adm = nimble_iscsiadm_path();
-        if ( -x $adm ) {
-          my $ti = nimble_untaint_iscsiadm_scalar($target_iqn);
-          eval { run_command( [ $adm, '-m', 'node', '-T', $ti, '--login' ], timeout => 90, quiet => 1 ); } if length $ti;
-        }
-      }
-      if ( !nimble_iscsi_target_in_sessions( $target_iqn, 12 ) ) {
-        # Session not yet visible in iscsiadm listing, but login may have succeeded on some portals
-        # (Nimble multi-controller: only the owning controller serves the IQN; other portals return
-        # exit 21 / no node record, which is expected).  Do a quick SCSI rescan + serial check so
-        # that nimble_iscsi_login_target_on_portals' $device_already gate can suppress a false-positive
-        # "no session" warning when the session IS established and the LUN just needs a scan to appear.
-        eval {
-          my $adm = nimble_iscsiadm_path();
-          run_command( [ $adm, '-m', 'session', '--rescan' ], timeout => 30, quiet => 1 ) if -x $adm;
-        };
-        scsi_scan_new('iscsi');
-        nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@portals, 0, $serial );
-      }
-    }
-    else {
-      nimble_iscsi_login_target_on_all_recorded_portals($target_iqn);
-      my $adm = nimble_iscsiadm_path();
-      if ( -x $adm ) {
-        my $ti = nimble_untaint_iscsiadm_scalar($target_iqn);
-        if ( length $ti ) {
-          eval {
-            run_command(
-              [
-                $adm, '-m', 'node', '-T', $ti,
-                '--op', 'update', '-n', 'node.startup', '-v', 'automatic',
-              ],
-              timeout => 10,
-              quiet   => 1
-            );
-          };
-        }
-      }
-    }
-  }
-  else {
+  elsif ( !length($target_iqn) ) {
     warn "Warning :: Volume \"$volname\" has no target_name (iSCSI IQN) from Nimble API.\n";
-    if (@dip) {
-      my $adm = nimble_iscsiadm_path();
-      eval { run_command( [ $adm, '-m', 'node', '--login' ], timeout => 90, quiet => 1 ); } if -x $adm;
-    }
   }
   # Like the GUI after attaching a LUN: rescan active iSCSI sessions so new LUNs appear without waiting only on sysfs scan.
   eval {
