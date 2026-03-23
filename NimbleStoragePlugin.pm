@@ -1043,8 +1043,11 @@ sub nimble_iscsi_node_portals_for_target {
   my %seen;
   my @out;
   for my $line ( split /\r?\n/, $capture ) {
-    next unless $line =~ m/^\s*node\.portal\s*=\s*(\S+)/;
+    # iscsiadm -m node --targetname outputs short-list format: "10.1.1.1:3260,1 iqn.xxx"
+    # (one line per node DB record; TPGT appended to portal with comma)
+    next unless $line =~ m/^\s*(\S+)\s+iqn\./i;
     my $portal = $1;
+    $portal =~ s/,[0-9]+\z//;    # strip TPGT suffix (",1")
     push @out, $portal unless $seen{$portal}++;
   }
   return @out;
