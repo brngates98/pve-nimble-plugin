@@ -1157,16 +1157,20 @@ sub iscsi_sendtargets_on_ips {
   }
 }
 
-# Run sendtargets on each portal and return portals whose response contained $target_iqn.
-# This is the authoritative check: if the IQN is in the sendtargets response, the ACL has
-# propagated and the target is accessible from this host on that portal.
+# Run sendtargets on each discovery portal and return the actual target portals from the
+# response for lines containing $target_iqn.
+#
+# Sendtargets output format: "<portal>,<tpgt> <iqn>" — the portal in the response is the
+# data portal where the target is reachable, which may differ from the discovery portal.
+# We return those response portals (TPGT stripped) so that login is attempted on the correct
+# addresses, not just the discovery IPs.
 sub iscsi_sendtargets_find_target {
   my ( $portals_ref, $target_iqn ) = @_;
   my $iscsiadm = nimble_iscsiadm_path();
   return () unless -x $iscsiadm && ref($portals_ref) eq 'ARRAY' && @$portals_ref;
   return () unless length($target_iqn);
   my $needle = nimble_iscsi_compact_lc($target_iqn);
-  my @found;
+  my %found;
   for my $ip ( @$portals_ref ) {
     next unless defined $ip && $ip =~ m/^\S+$/ && length($ip) <= 253;
     my $disc_ip = nimble_untaint_iscsiadm_scalar($ip);
@@ -1186,9 +1190,19 @@ sub iscsi_sendtargets_find_target {
       warn "Warning :: iscsiadm sendtargets -p $disc_ip failed: $e\n" if $e =~ /insecure dependency in exec/i;
       print "Debug :: sendtargets -p $disc_ip: $e\n" if $DEBUG >= 1;
     }
-    push @found, $disc_ip if length($output) && index( nimble_iscsi_compact_lc($output), $needle ) >= 0;
+    next unless length($output) && index( nimble_iscsi_compact_lc($output), $needle ) >= 0;
+    # Extract the portal from each matching response line: "<portal>,<tpgt> <iqn>"
+    for my $line ( split /\n/, $output ) {
+      next unless index( nimble_iscsi_compact_lc($line), $needle ) >= 0;
+      if ( $line =~ m/^\s*(\S+)\s+\S+/ ) {
+        my $p = $1;
+        $p =~ s/,[0-9]+\z//;    # strip TPGT suffix
+        my $safe = nimble_untaint_iscsiadm_scalar($p);
+        $found{$safe}++ if length $safe;
+      }
+    }
   }
-  return @found;
+  return keys %found;
 }
 
 # Login to target on all node records (open-iscsi), when portals are unknown but discovery already ran elsewhere.
@@ -1627,18 +1641,28 @@ sub nimble_iscsi_establish_volume_session {
     sleep(2);
   }
 
-  # Fall back to the full portal list if sendtargets never returned the IQN.
-  @login_portals = @portals unless @login_portals;
-  # suppress_no_session_warn=1: session listing is checked by the caller (map_volume device wait)
-  nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@login_portals, 1, undef );
+  if ( @login_portals ) {
+    # Login on the portals that the sendtargets response named for this IQN.
+    # suppress_no_session_warn=0: we want to see login errors here.
+    nimble_iscsi_login_target_on_portals( $storeid, $target_iqn, \@login_portals, 0, undef );
+  } else {
+    # sendtargets never returned the IQN — fall back to all node DB records for this IQN
+    # (covers cases where the target was discovered by activate_storage or a previous activation).
+    print "Info :: sendtargets did not return \"$target_iqn\" on any portal after $max_disc rounds; "
+      . "attempting login on all recorded node DB portals.\n";
+    nimble_iscsi_login_target_on_all_recorded_portals($target_iqn);
+  }
 
   # Brief poll for session to register with open-iscsi after login completes.
   my $up = nimble_iscsi_target_in_sessions( $target_iqn, 20 );    # up to 10 s
-  if ($up) {
-    print "Info :: iSCSI session established for \"$target_iqn\".\n" if $DEBUG >= 1;
-  } else {
-    print "Info :: iSCSI session for \"$target_iqn\" not yet confirmed in listing; "
-      . "device appearance in map_volume is the definitive check.\n";
+  return 1 if $up;
+
+  # If still no session and we had specific portals, also try the catch-all node DB login as
+  # a last resort (handles portal mismatch between response and node DB record format).
+  if ( @login_portals && !$up ) {
+    print "Info :: No session after targeted login; trying all node DB portals for \"$target_iqn\".\n";
+    nimble_iscsi_login_target_on_all_recorded_portals($target_iqn);
+    $up = nimble_iscsi_target_in_sessions( $target_iqn, 10 );
   }
   return $up;
 }
