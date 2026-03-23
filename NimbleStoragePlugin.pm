@@ -1498,6 +1498,26 @@ sub nimble_volume_has_acl_for_ig {
   return 0;
 }
 
+# Ensure multi_initiator=true on the Nimble volume so that both source and destination nodes
+# can hold simultaneous iSCSI sessions during live migration.  New volumes are created with this
+# flag; this call fixes volumes created before the flag was introduced.  The PUT is idempotent:
+# a no-op if the array already has multi_initiator=true.  Failures are non-fatal (warn only) so
+# they do not block activation on arrays/firmware that do not expose this field.
+sub nimble_ensure_volume_multi_initiator {
+  my ( $class, $scfg, $volname, $storeid ) = @_;
+  my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
+  return unless $vol_id;
+  eval {
+    nimble_api_call( $scfg, 'PUT', "volumes/$vol_id", { multi_initiator => JSON::XS::true }, $storeid );
+    print "Info :: Volume \"$volname\" multi_initiator=true (concurrent access for live migration).\n"
+      if $DEBUG >= 1;
+  };
+  if ( my $e = $@ ) {
+    chomp $e;
+    warn "Warning :: Could not set multi_initiator on volume \"$volname\": $e\n";
+  }
+}
+
 # Parallel to PureStoragePlugin::purestorage_volume_connection: $mode true = connect (POST), false = disconnect (DELETE).
 # Nimble maps host access via access_control_records for this storage's initiator group (same ig as activate).
 # For connect: ACL is ensured first, then the per-volume iSCSI session is established here (not deferred to
@@ -1506,6 +1526,7 @@ sub nimble_volume_connection {
   my ( $class, $storeid, $scfg, $volname, $mode ) = @_;
   if ($mode) {
     $class->nimble_ensure_volume_acl_for_current_node( $scfg, $volname, $storeid );
+    $class->nimble_ensure_volume_multi_initiator( $scfg, $volname, $storeid );
     $class->nimble_iscsi_establish_volume_session( $scfg, $volname, $storeid );
     return 1;
   }
@@ -1785,7 +1806,7 @@ sub nimble_create_volume {
   my ( $class, $scfg, $volname, $size_bytes, $storeid ) = @_;
   my $name    = nimble_volname( $scfg, $volname, undef );
   my $size_mb = size_bytes_to_mb( $size_bytes );
-  my $body = { name => $name, size => $size_mb };
+  my $body = { name => $name, size => $size_mb, multi_initiator => JSON::XS::true };
   $body->{ pool_name } = $scfg->{ pool_name } if $scfg->{ pool_name };
   my $r      = nimble_api_call( $scfg, 'POST', 'volumes', $body, $storeid );
   my $vol    = $r->{ data } || $r;
@@ -1962,7 +1983,7 @@ sub nimble_clone_from_snapshot {
   }
   die "Error :: Snapshot \"$snap_name\" not found for volume \"$source_volname\".\n" unless $snap_id;
   my $name_on_array = nimble_volname( $scfg, $new_volname, undef );
-  my $body = { clone => JSON::XS::true, name => $name_on_array, base_snap_id => $snap_id };
+  my $body = { clone => JSON::XS::true, name => $name_on_array, base_snap_id => $snap_id, multi_initiator => JSON::XS::true };
   $r = nimble_api_call( $scfg, 'POST', 'volumes', $body, $storeid );
   my $vol = $r->{ data } || $r;
   my $vol_id = $vol->{ id } or die "Error :: Clone did not return volume id.\n";
