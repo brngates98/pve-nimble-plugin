@@ -776,7 +776,10 @@ sub nimble_api_call {
     $req->content( encode_json( { data => { username => $api_user, password => $api_pass } } ) );
     my $res = $ua->request( $req );
     die "Error :: Nimble login failed: " . $res->status_line . "\n" . ( $res->decoded_content // '' ) . "\n" unless $res->is_success;
-    my $data = decode_json( $res->decoded_content );
+    my $login_body = $res->decoded_content // '';
+    my $data;
+    eval { $data = decode_json( $login_body ); };
+    die "Error :: Nimble login response is not valid JSON: $@\nBody: " . substr( $login_body, 0, 256 ) . "\n" if $@;
     $auth = ( $data->{ data } && $data->{ data }->{ session_token } ) ? $data->{ data }->{ session_token } : $data->{ session_token };
     $auth or die "Error :: No session_token in response\n";
     $scfg->{ _auth_token } = $auth;
@@ -802,7 +805,13 @@ sub nimble_api_call {
     }
     die "Error :: Nimble API $method $path: " . $res->status_line . "\n" . ( $content // '' ) . "\n";
   }
-  return length( $content ) ? decode_json( $content ) : {};
+  if ( !length( $content ) ) {
+    return {};
+  }
+  my $decoded;
+  eval { $decoded = decode_json( $content ); };
+  die "Error :: Nimble API $method $path response is not valid JSON: $@\nBody: " . substr( $content, 0, 256 ) . "\n" if $@;
+  return $decoded;
 }
 
 # Normalize API list response: array, { items => [] }, or Nimble paged { data => [ ... ], total_count => ... }.
@@ -2221,7 +2230,8 @@ sub map_volume {
     run_command( [ $adm, '-m', 'session', '--rescan' ], timeout => 120, quiet => 1 ) if -x $adm;
   };
   eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
-  scsi_scan_new( 'iscsi' );
+  eval { scsi_scan_new( 'iscsi' ); };
+  warn "Warning :: iSCSI host scan failed: $@" if $@;
   eval { exec_command( [ 'udevadm', 'settle', '--timeout=30' ] ); };
   my $wait_ticks = 0;
   wait_for(
