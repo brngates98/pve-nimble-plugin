@@ -14,12 +14,11 @@ This guide walks you from **zero** to **fully protected** HPE Nimble storage in 
 - [3. Install the plugin on every node](#3-install-the-plugin-on-every-node)
 - [4. Configure open-iscsi (IQN)](#4-configure-open-iscsi-iqn)
 - [5. Configure multipath (optional but recommended)](#5-configure-multipath-optional-but-recommended)
-- [6. iSCSI discovery](#6-iscsi-discovery)
-- [7. Add Nimble storage to Proxmox](#7-add-nimble-storage-to-proxmox)
-- [8. Verify storage](#8-verify-storage)
-- [9. Create a VM disk and test](#9-create-a-vm-disk-and-test)
-- [10. Test snapshots and rollback](#10-test-snapshots-and-rollback)
-- [11. Restore a disk from the array (workflow)](#11-restore-a-disk-from-the-array-workflow)
+- [6. Add Nimble storage to Proxmox](#6-add-nimble-storage-to-proxmox)
+- [7. Verify storage](#7-verify-storage)
+- [8. Create a VM disk and test](#8-create-a-vm-disk-and-test)
+- [9. Test snapshots and rollback](#9-test-snapshots-and-rollback)
+- [10. Restore a disk from the array (workflow)](#10-restore-a-disk-from-the-array-workflow)
 - [Quick reference](#quick-reference)
 - [Troubleshooting](#troubleshooting)
 
@@ -31,13 +30,12 @@ This guide walks you from **zero** to **fully protected** HPE Nimble storage in 
 |------|-------------|------|
 | 1 | Plan management + iSCSI VLANs and IPs | 5 min |
 | 2 | Ensure Nimble has REST API + iSCSI subnets | 5 min |
-| 3 | Install plugin on **every** cluster node | 2 min × nodes |
+| 3 | Install plugin on **every** cluster node | 2 min |
 | 4 | Set IQN in `/etc/iscsi/initiatorname.iscsi` | 1 min |
 | 5 | Configure multipath (optional) | 5 min |
-| 6 | iSCSI discovery (or use auto in step 7) | 2 min |
-| 7 | Add Nimble storage (with optional auto discovery) | 2 min |
-| 8 | Verify in UI + create test VM disk | 5 min |
-| 9 | Test snapshot / rollback | 5 min |
+| 6 | Add Nimble storage (auto iSCSI discovery on by default) | 2 min |
+| 7 | Verify in UI + create test VM disk | 5 min |
+| 8 | Test snapshot / rollback | 5 min |
 
 ---
 
@@ -103,22 +101,30 @@ You should get JSON with `data.session_token`. If you see that, the array is rea
 
 ## 3. Install the plugin on every node
 
-On **every** Proxmox node (storage config syncs, but the plugin binary must be on each):
+Storage config syncs via corosync, but the plugin file must be present on each node.
 
-**Option A – APT (recommended)**
+**Scripted install (recommended)** — handles repo setup, dependencies, service restarts, and can install on all nodes at once:
+
+```bash
+# Single node
+curl -fsSL https://raw.githubusercontent.com/brngates98/pve-nimble-plugin/main/scripts/install-pve-nimble-plugin.sh | sudo bash
+
+# All cluster nodes at once (dry-run first, then install)
+curl -fsSL https://raw.githubusercontent.com/brngates98/pve-nimble-plugin/main/scripts/install-pve-nimble-plugin.sh | sudo bash -s -- --all-nodes --dry-run
+curl -fsSL https://raw.githubusercontent.com/brngates98/pve-nimble-plugin/main/scripts/install-pve-nimble-plugin.sh | sudo bash -s -- --all-nodes
+```
+
+**Manual APT**
 
 ```bash
 echo "deb [trusted=yes] https://brngates98.github.io/pve-nimble-plugin bookworm main" | sudo tee /etc/apt/sources.list.d/pve-nimble-plugin.list
-sudo apt update
-sudo apt install libpve-storage-nimble-perl
+sudo apt update && sudo apt install libpve-storage-nimble-perl
 ```
 
-**Option B – Download .deb from [Releases](https://github.com/brngates98/pve-nimble-plugin/releases)**
+**Download .deb** — grab a specific release from the [releases page](https://github.com/brngates98/pve-nimble-plugin/releases):
 
 ```bash
-# Replace 0.0.4 with the version you want
-wget "https://github.com/brngates98/pve-nimble-plugin/releases/download/v0.0.4/libpve-storage-nimble-perl_0.0.4-1_all.deb"
-sudo apt install ./libpve-storage-nimble-perl_0.0.4-1_all.deb
+sudo apt install ./libpve-storage-nimble-perl_<version>-1_all.deb
 ```
 
 Verify:
@@ -126,8 +132,6 @@ Verify:
 ```bash
 dpkg -l | grep libpve-storage-nimble-perl
 ```
-
-> **Cluster:** Repeat the install on every node.
 
 ---
 
@@ -213,32 +217,9 @@ devices {
 
 ---
 
-## 6. iSCSI discovery
+## 6. Add Nimble storage to Proxmox
 
-**Default:** The plugin reads discovery portals from the Nimble REST API (**GET v1/subnets** and **GET v1/subnets/:id** for each subnet) and runs **`iscsiadm` discovery/login** for you on activate and when mapping disks—no need to pre-discover by hand.
-
-**Option A – Manual (optional, legacy / special cases only)**
-
-If you turned off plugin discovery, run on each node (use each Nimble iSCSI discovery IP):
-
-```bash
-sudo iscsiadm -m discovery -t sendtargets -p <NIMBLE_DISCOVERY_IP_1>
-sudo iscsiadm -m discovery -t sendtargets -p <NIMBLE_DISCOVERY_IP_2>
-sudo iscsiadm -m node --op update -n node.startup -v automatic
-sudo iscsiadm -m node --login
-```
-
-**Option B – Auto discovery (recommended)**
-
-Skip manual discovery. In [step 7](#7-add-nimble-storage-to-proxmox) add Nimble storage normally—**activate-time discovery is on by default**. When the storage is activated on each node, the plugin fetches discovery IPs from the Nimble API and runs discovery/login. Use **`auto_iscsi_discovery no`** only if you want to skip that step.
-
----
-
-## 7. Add Nimble storage to Proxmox
-
-From **any** node (config syncs to the cluster):
-
-**Default (activate-time iSCSI discovery on):**
+Run from **any** node — config syncs to the cluster automatically. iSCSI discovery is on by default; the plugin fetches discovery IPs from the Nimble API and logs in when the storage activates on each node.
 
 ```bash
 pvesm add nimble <storage_id> \
@@ -248,24 +229,21 @@ pvesm add nimble <storage_id> \
   --content images
 ```
 
-**Disable activate-time discovery** (e.g. you rely only on manual discovery from step 6):
-
-```bash
-pvesm add nimble <storage_id> \
-  --address https://<NIMBLE_MGMT_IP_OR_FQDN> \
-  --username <API_USER> \
-  --password '<API_PASSWORD>' \
-  --content images \
-  --auto_iscsi_discovery 0
-```
-
 Replace `<storage_id>` with a name (e.g. `nimble-prod`). The storage will appear in **Datacenter → Storage**.
 
-> **Tip:** If you use an existing Nimble initiator group, add `--initiator_group <name>`.
+> **Tip:** Add `--initiator_group <name>` to use an existing Nimble initiator group instead of auto-creating one.
+
+If you need to run iSCSI discovery manually (e.g. `auto_iscsi_discovery` disabled), run on each node:
+
+```bash
+sudo iscsiadm -m discovery -t sendtargets -p <NIMBLE_DISCOVERY_IP>
+sudo iscsiadm -m node --op update -n node.startup -v automatic
+sudo iscsiadm -m node --login
+```
 
 ---
 
-## 8. Verify storage
+## 7. Verify storage
 
 1. In the Proxmox UI: **Datacenter → Storage** – your Nimble storage should be listed and **Content** should include **Disk image**.
 2. Click the storage and check **Summary** – you should see **Usage** and **Free** (from the Nimble pool).
@@ -273,7 +251,7 @@ Replace `<storage_id>` with a name (e.g. `nimble-prod`). The storage will appear
 
 ---
 
-## 9. Create a VM disk and test
+## 8. Create a VM disk and test
 
 1. Create a VM or use an existing one.
 2. **Hardware → Add → Hard disk** – choose your Nimble storage, pick size, and add.
@@ -282,7 +260,7 @@ Replace `<storage_id>` with a name (e.g. `nimble-prod`). The storage will appear
 
 ---
 
-## 10. Test snapshots and rollback
+## 9. Test snapshots and rollback
 
 1. With a VM that has a disk on Nimble storage, take a **snapshot** (VM → Snapshot → Take snapshot).
 2. Make a change inside the guest (e.g. create a file).
@@ -293,7 +271,7 @@ You now have **fully protected** storage: one LUN per disk, array snapshots, and
 
 ---
 
-## 11. Restore a disk from the array (workflow)
+## 10. Restore a disk from the array (workflow)
 
 When you need to bring a disk back to a previous point in time, use one of these patterns depending on where the snapshot lives.
 
