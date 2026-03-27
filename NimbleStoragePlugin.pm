@@ -1956,7 +1956,7 @@ sub nimble_snapshot_create {
 sub nimble_snapshot_delete {
   my ( $class, $scfg, $storeid, $volname, $snap_name ) = @_;
   my $snap_id;
-  if ( $snap_name =~ /^n(\d+)$/ ) {
+  if ( $snap_name =~ /^nimble(\d+)$/ ) {
     # Array-imported snapshot: find by creation_time (±60s)
     my $target_ts = $1;
     my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
@@ -1994,7 +1994,7 @@ sub nimble_volume_restore {
   my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   die "Error :: Volume \"$volname\" not found\n" unless $vol_id;
   my $snap_id;
-  if ( $snap =~ /^n(\d+)$/ ) {
+  if ( $snap =~ /^nimble(\d+)$/ ) {
     # Array-imported snapshot: find by creation_time (±60s) using vol_id
     my $target_ts = $1;
     my $r    = nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$vol_id", undef, $storeid );
@@ -2164,6 +2164,7 @@ sub nimble_sync_array_snapshots {
   eval { require PVE::QemuConfig };
   return if $@;
 
+  my $debug  = get_debug_level( $scfg );
   my $prefix = nimble_name_prefix( $scfg );
 
   # All volumes belonging to this storage
@@ -2178,11 +2179,13 @@ sub nimble_sync_array_snapshots {
     next unless $volname =~ /^vm-(\d+)-(disk-|cloudinit|state-)/;
     $vol_map{ $name } = { id => $v->{ id }, volname => $volname, vmid => $1 };
   }
+  print "Debug :: nimble_sync [$storeid]: " . scalar( keys %vol_map ) . " PVE volumes found\n" if $debug >= 1;
   return unless %vol_map;
 
   # All snapshots on the array; filter client-side to our volumes
   my $sr    = nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid );
   my $snaps = nimble_data_as_list( $sr->{ data } );
+  print "Debug :: nimble_sync [$storeid]: " . scalar( @$snaps ) . " total array snapshots\n" if $debug >= 1;
 
   # Group: vmid => full_vol_name => [ { id, name, creation_time }, ... ]
   my %by_vmid;
@@ -2224,7 +2227,7 @@ sub nimble_sync_array_snapshots {
           $ok = 0; last;
         }
       }
-      push @groups, { pve_name => "n${min_ts}", snaptime => $min_ts } if $ok;
+      push @groups, { pve_name => "nimble${min_ts}", snaptime => $min_ts } if $ok;
     }
 
     my %nimble_names = map { $_->{ pve_name } => 1 } @groups;
@@ -2252,13 +2255,16 @@ sub nimble_sync_array_snapshots {
 
         # Remove stale imported entries whose Nimble snapshot no longer exists
         for my $sname ( keys %$psnaps ) {
-          next unless $sname =~ /^n\d+$/;
+          next unless $sname =~ /^nimble\d+$/;
           next if $nimble_names{ $sname };
           delete $psnaps->{ $sname };
           $changed = 1;
         }
 
-        PVE::QemuConfig->write_config( $vmid, $conf ) if $changed;
+        if ( $changed ) {
+          PVE::QemuConfig->write_config( $vmid, $conf );
+          print "Debug :: nimble_sync [$storeid]: vmid $vmid config updated\n" if $debug >= 1;
+        }
       } );
     };
     warn "Warning :: Nimble snapshot sync vmid $vmid: $@" if $@;
@@ -2300,7 +2306,9 @@ sub status {
   my $free = $total - $used;
   $free = 0 if $free < 0;
 
-  # Periodic import of array-created snapshots into PVE VM configs (throttled to 30s per storage)
+  # Periodic import of array-created snapshots into PVE VM configs (throttled to 30s per storage).
+  # Timestamp is always updated after each attempt (success or failure) to prevent hammering
+  # the Nimble API and pvestatd when the array is unreachable or a VM config is locked.
   my $ts_file = "/var/run/pve-nimble-sync-${storeid}.ts";
   my $last    = 0;
   if ( open my $fh, '<', $ts_file ) { $last = <$fh> // 0; chomp $last; close $fh; }
