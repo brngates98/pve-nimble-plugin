@@ -1955,18 +1955,37 @@ sub nimble_snapshot_create {
 
 sub nimble_snapshot_delete {
   my ( $class, $scfg, $storeid, $volname, $snap_name ) = @_;
-  my $snap_full = nimble_volname( $scfg, $volname, $snap_name );
-  my $enc       = uri_escape( $snap_full );
-  my $r         = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
-  my $list      = nimble_data_as_list( $r->{ data } );
-  for my $s ( @$list ) {
-    if ( $s->{ name } eq $snap_full ) {
-      nimble_api_call( $scfg, 'DELETE', "snapshots/" . $s->{ id }, undef, $storeid );
-      print "Info :: Snapshot \"$snap_name\" deleted.\n";
-      return 1;
+  my $snap_id;
+  if ( $snap_name =~ /^n(\d+)$/ ) {
+    # Array-imported snapshot: find by creation_time (±60s)
+    my $target_ts = $1;
+    my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
+    if ( $vol_id ) {
+      my $r    = nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$vol_id", undef, $storeid );
+      my $list = nimble_data_as_list( $r->{ data } );
+      my $best;
+      for my $s ( @$list ) {
+        my $ts = $s->{ creation_time } // 0;
+        my $d  = abs( $ts - $target_ts );
+        $best  = $s if $d <= 60 && ( !$best || $d < abs( ( $best->{ creation_time } // 0 ) - $target_ts ) );
+      }
+      $snap_id = $best->{ id } if $best;
+    }
+  } else {
+    my $snap_full = nimble_volname( $scfg, $volname, $snap_name );
+    my $enc  = uri_escape( $snap_full );
+    my $r    = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
+    my $list = nimble_data_as_list( $r->{ data } );
+    for my $s ( @$list ) {
+      if ( $s->{ name } eq $snap_full ) { $snap_id = $s->{ id }; last; }
     }
   }
-  warn "Warning :: Snapshot \"$snap_name\" not found for volume \"$volname\".\n";
+  unless ( $snap_id ) {
+    warn "Warning :: Snapshot \"$snap_name\" not found for volume \"$volname\".\n";
+    return 1;
+  }
+  nimble_api_call( $scfg, 'DELETE', "snapshots/$snap_id", undef, $storeid );
+  print "Info :: Snapshot \"$snap_name\" deleted.\n";
   return 1;
 }
 
@@ -1974,14 +1993,28 @@ sub nimble_volume_restore {
   my ( $class, $scfg, $storeid, $volname, $svolname, $snap, $overwrite ) = @_;
   my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   die "Error :: Volume \"$volname\" not found\n" unless $vol_id;
-  my $snap_full = nimble_volname( $scfg, $svolname, $snap );
-  my $enc       = uri_escape( $snap_full );
-  my $r         = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
-  my $list      = nimble_data_as_list( $r->{ data } );
   my $snap_id;
-
-  for my $s ( @$list ) {
-    if ( $s->{ name } eq $snap_full ) { $snap_id = $s->{ id }; last; }
+  if ( $snap =~ /^n(\d+)$/ ) {
+    # Array-imported snapshot: find by creation_time (±60s) using vol_id
+    my $target_ts = $1;
+    my $r    = nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$vol_id", undef, $storeid );
+    my $list = nimble_data_as_list( $r->{ data } );
+    my $best;
+    for my $s ( @$list ) {
+      my $ts = $s->{ creation_time } // 0;
+      my $d  = abs( $ts - $target_ts );
+      $best  = $s if $d <= 60 && ( !$best || $d < abs( ( $best->{ creation_time } // 0 ) - $target_ts ) );
+    }
+    die "Error :: Nimble snapshot for \"$svolname\" at time $target_ts not found\n" unless $best;
+    $snap_id = $best->{ id };
+  } else {
+    my $snap_full = nimble_volname( $scfg, $svolname, $snap );
+    my $enc  = uri_escape( $snap_full );
+    my $r    = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
+    my $list = nimble_data_as_list( $r->{ data } );
+    for my $s ( @$list ) {
+      if ( $s->{ name } eq $snap_full ) { $snap_id = $s->{ id }; last; }
+    }
   }
   die "Error :: Snapshot \"$snap\" not found\n" unless $snap_id;
   # HPE REST API: POST v1/volumes/id/actions/restore with id and base_snap_id (both mandatory)
@@ -2121,6 +2154,117 @@ sub free_image {
   return undef;
 }
 
+# Sync array-created snapshots into PVE VM configs as fully functional PVE snapshots.
+# Imported snapshot names use the format n<unix_timestamp> to avoid collision with
+# user-named PVE snapshots and to allow rollback via creation_time lookup.
+# Called from status() with a 30s throttle. Requires PVE::QemuConfig (pvestatd context).
+sub nimble_sync_array_snapshots {
+  my ( $scfg, $storeid ) = @_;
+
+  eval { require PVE::QemuConfig };
+  return if $@;
+
+  my $prefix = nimble_name_prefix( $scfg );
+
+  # All volumes belonging to this storage
+  my $vr   = nimble_api_call( $scfg, 'GET', 'volumes', undef, $storeid );
+  my $vols = nimble_data_as_list( $vr->{ data } );
+
+  my %vol_map;    # full_nimble_name => { id, volname, vmid }
+  for my $v ( @$vols ) {
+    my $name = $v->{ name } // '';
+    next if length( $prefix ) && index( $name, $prefix ) != 0;
+    my $volname = length( $prefix ) ? substr( $name, length( $prefix ) ) : $name;
+    next unless $volname =~ /^vm-(\d+)-(disk-|cloudinit|state-)/;
+    $vol_map{ $name } = { id => $v->{ id }, volname => $volname, vmid => $1 };
+  }
+  return unless %vol_map;
+
+  # All snapshots on the array; filter client-side to our volumes
+  my $sr    = nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid );
+  my $snaps = nimble_data_as_list( $sr->{ data } );
+
+  # Group: vmid => full_vol_name => [ { id, name, creation_time }, ... ]
+  my %by_vmid;
+  for my $s ( @$snaps ) {
+    my $vname = $s->{ vol_name } // '';
+    next unless exists $vol_map{ $vname };
+    my $vmid = $vol_map{ $vname }{ vmid };
+    push @{ $by_vmid{ $vmid }{ $vname } }, {
+      id            => $s->{ id },
+      name          => $s->{ name },
+      creation_time => $s->{ creation_time } // 0,
+    };
+  }
+  return unless %by_vmid;
+
+  for my $vmid ( sort keys %by_vmid ) {
+    my @vm_vols = grep { $vol_map{ $_ }{ vmid } eq $vmid } keys %vol_map;
+
+    # Find consistent snapshot groups: all volumes for this VM covered within 60s.
+    # Seed from first volume's snapshots and verify every other volume has a match.
+    my %seen;
+    my @groups;
+    my $seed_snaps = $by_vmid{ $vmid }{ $vm_vols[0] } // [];
+
+    for my $seed ( @$seed_snaps ) {
+      my $ts = $seed->{ creation_time };
+      next if $seen{ $ts }++;
+      my $ok     = 1;
+      my $min_ts = $ts;
+      for my $vname ( @vm_vols[ 1 .. $#vm_vols ] ) {
+        my $best;
+        for my $vs ( @{ $by_vmid{ $vmid }{ $vname } // [] } ) {
+          my $d = abs( $vs->{ creation_time } - $ts );
+          $best = $vs if $d <= 60 && ( !$best || $d < abs( $best->{ creation_time } - $ts ) );
+        }
+        if ( $best ) {
+          $min_ts = $best->{ creation_time } if $best->{ creation_time } < $min_ts;
+        } else {
+          $ok = 0; last;
+        }
+      }
+      push @groups, { pve_name => "n${min_ts}", snaptime => $min_ts } if $ok;
+    }
+
+    my %nimble_names = map { $_->{ pve_name } => 1 } @groups;
+
+    eval {
+      PVE::QemuConfig->lock_config( $vmid, sub {
+        my $conf   = PVE::QemuConfig->load_config( $vmid );
+        my $psnaps = $conf->{ snapshots } //= {};
+        my $changed = 0;
+
+        # Add snapshot entries not yet in PVE
+        for my $g ( @groups ) {
+          my $pve_name = $g->{ pve_name };
+          next if exists $psnaps->{ $pve_name };
+          # Snapshot section mirrors current live config (best available record of state at snap time)
+          my $entry = { snaptime => $g->{ snaptime }, description => 'Imported from Nimble array' };
+          for my $k ( keys %$conf ) {
+            next if $k eq 'snapshots' || $k eq 'snapstate' || $k eq 'lock' || $k eq 'pending';
+            next if ref( $conf->{ $k } );
+            $entry->{ $k } = $conf->{ $k };
+          }
+          $psnaps->{ $pve_name } = $entry;
+          $changed = 1;
+        }
+
+        # Remove stale imported entries whose Nimble snapshot no longer exists
+        for my $sname ( keys %$psnaps ) {
+          next unless $sname =~ /^n\d+$/;
+          next if $nimble_names{ $sname };
+          delete $psnaps->{ $sname };
+          $changed = 1;
+        }
+
+        PVE::QemuConfig->write_config( $vmid, $conf ) if $changed;
+      } );
+    };
+    warn "Warning :: Nimble snapshot sync vmid $vmid: $@" if $@;
+  }
+}
+
 sub list_images {
   my ( $class, $storeid, $scfg, $vmid, $vollist, $cache ) = @_;
   set_debug_from_config( $scfg );
@@ -2155,6 +2299,17 @@ sub status {
   $total = 1 if $total <= 0;
   my $free = $total - $used;
   $free = 0 if $free < 0;
+
+  # Periodic import of array-created snapshots into PVE VM configs (throttled to 30s per storage)
+  my $ts_file = "/var/run/pve-nimble-sync-${storeid}.ts";
+  my $last    = 0;
+  if ( open my $fh, '<', $ts_file ) { $last = <$fh> // 0; chomp $last; close $fh; }
+  if ( time() - $last >= 30 ) {
+    eval { nimble_sync_array_snapshots( $scfg, $storeid ) };
+    warn "Warning :: Nimble snapshot sync: $@" if $@;
+    if ( open my $fh, '>', $ts_file ) { print $fh time(); close $fh; }
+  }
+
   return ( $total, $free, $used, 1 );
 }
 

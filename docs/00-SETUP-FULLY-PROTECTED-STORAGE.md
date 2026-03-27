@@ -30,12 +30,14 @@ This guide walks you from **zero** to **fully protected** HPE Nimble storage in 
 |------|-------------|------|
 | 1 | Plan management + iSCSI VLANs and IPs | 5 min |
 | 2 | Ensure Nimble has REST API + iSCSI subnets | 5 min |
-| 3 | Install plugin on **every** cluster node | 2 min |
-| 4 | Set IQN in `/etc/iscsi/initiatorname.iscsi` | 1 min |
+| 3 | Install plugin on **every** cluster node (installs open-iscsi too) | 2 min |
+| 4 | Verify/set IQN in `/etc/iscsi/initiatorname.iscsi` | 1 min |
 | 5 | Configure multipath (optional) | 5 min |
 | 6 | Add Nimble storage (auto iSCSI discovery on by default) | 2 min |
-| 7 | Verify in UI + create test VM disk | 5 min |
-| 8 | Test snapshot / rollback | 5 min |
+| 7 | Verify storage in Proxmox UI | 2 min |
+| 8 | Create a VM disk and test | 5 min |
+| 9 | Test snapshots and rollback | 5 min |
+| 10 | Restore a disk from array snapshot (reference) | – |
 
 ---
 
@@ -137,10 +139,15 @@ dpkg -l | grep libpve-storage-nimble-perl
 
 ## 4. Configure open-iscsi (IQN)
 
-The plugin uses the host’s iSCSI IQN to register with the Nimble. Each node needs **open-iscsi** and a unique IQN (or same IQN per node if you prefer).
+The plugin uses the host’s iSCSI IQN to register with the Nimble. The scripted installer installs `open-iscsi` automatically. If you installed manually, install it now:
 
 ```bash
 sudo apt install open-iscsi
+```
+
+Verify the IQN is set:
+
+```bash
 sudo cat /etc/iscsi/initiatorname.iscsi
 ```
 

@@ -279,7 +279,7 @@ function install_from_apt_repo()
     if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
         log "DRY-RUN: would add APT repo: deb [trusted=yes] $REPO_BASE $REPO_SUITE main -> $SOURCES_LIST"
         log "DRY-RUN: would update package lists: apt-get update -q"
-        log "DRY-RUN: would install package: apt-get install -y -q $PACKAGE_NAME"
+        log "DRY-RUN: would install package: apt-get install -y -q open-iscsi $PACKAGE_NAME"
         log "DRY-RUN: would restart PVE services: systemctl try-reload-or-restart $RESTARTED_SERVICES"
     else
         log "1. Adding PVE Nimble Plugin APT repository..."
@@ -289,8 +289,8 @@ function install_from_apt_repo()
         log "2. Updating package lists..."
         builtin command apt-get update -q >> "$LOG_FILE" 2>&1
 
-        log "3. Installing $PACKAGE_NAME..."
-        builtin command apt-get install -y -q "$PACKAGE_NAME" >> "$LOG_FILE" 2>&1
+        log "3. Installing open-iscsi and $PACKAGE_NAME..."
+        builtin command apt-get install -y -q open-iscsi "$PACKAGE_NAME" >> "$LOG_FILE" 2>&1
 
         log "4. Restarting PVE services ($RESTARTED_SERVICES)..."
         builtin command systemctl try-reload-or-restart $RESTARTED_SERVICES
@@ -306,25 +306,29 @@ function install_from_github_deb()
     deb_tmp=$(mktemp -t "pve-nimble-plugin-${deb_name}.XXXXXX")
 
     if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        log "DRY-RUN: would install open-iscsi: apt-get install -y -q open-iscsi"
         log "DRY-RUN: would download $deb_url"
         log "DRY-RUN: would install: dpkg -i $deb_name && apt-get install -f -y"
         log "DRY-RUN: would restart PVE services: systemctl try-reload-or-restart $RESTARTED_SERVICES"
         return
     fi
 
-    log "1. Downloading $deb_name from GitHub releases..."
+    log "1. Installing open-iscsi..."
+    builtin command apt-get install -y -q open-iscsi >> "$LOG_FILE" 2>&1
+
+    log "2. Downloading $deb_name from GitHub releases..."
     if ! builtin command /usr/bin/curl -fsSL -o "$deb_tmp" "$deb_url"; then
         rm -f "$deb_tmp"
         fail "Failed to download $deb_url (check version and network)"
     fi
 
-    log "2. Installing $PACKAGE_NAME..."
+    log "3. Installing $PACKAGE_NAME..."
     if ! dpkg -i "$deb_tmp"; then
         apt-get install -f -y -q >> "$LOG_FILE" 2>&1 || true
     fi
     rm -f "$deb_tmp"
 
-    log "3. Restarting PVE services ($RESTARTED_SERVICES)..."
+    log "4. Restarting PVE services ($RESTARTED_SERVICES)..."
     builtin command systemctl try-reload-or-restart $RESTARTED_SERVICES
 }
 
