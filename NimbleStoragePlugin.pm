@@ -554,15 +554,6 @@ SYSFS_SCAN:
   return ( $best_path, $wwid );
 }
 
-sub get_device_size {
-  my ( $device ) = @_;
-  return 0 unless length( $device );
-  my $path = '/sys/block/' . basename( $device ) . '/size';
-  my $size = file_read_firstline( $path );
-  return 0 unless defined $size && $size =~ /^\d+$/;
-  return $size << 9;
-}
-
 sub device_op {
   my ( $device_path, $op, $value ) = @_;
   open( my $fh, '>', $device_path . '/' . $op ) or die "Error :: Could not open $device_path/$op: $!\n";
@@ -1208,36 +1199,6 @@ sub nimble_iscsi_node_portals_for_target {
 }
 
 # API/subnet/manual IPs plus any node.portal lines for this IQN (multipath needs every path logged in).
-sub nimble_iscsi_merge_portal_list {
-  my ( $target_iqn, $base_ips_ref ) = @_;
-  my %seen;
-  my @list;
-  if ( ref($base_ips_ref) eq 'ARRAY' ) {
-    for my $e ( @$base_ips_ref ) {
-      next unless defined $e && $e =~ m/\S/ && length($e) <= 253;
-      my $p = nimble_iscsi_portal($e);
-      push @list, $p unless $seen{$p}++;
-    }
-  }
-  if ( length($target_iqn) && $target_iqn =~ m/^iqn\./i ) {
-    for my $raw ( nimble_iscsi_node_portals_for_target($target_iqn) ) {
-      my $p = nimble_iscsi_portal($raw);
-      push @list, $p if length($p) && !$seen{$p}++;
-    }
-  }
-  return @list;
-}
-
-# Same strategy as activate_storage auto_iSCSI: discover + global login (exit 15 common if partial sessions).
-sub nimble_iscsi_global_node_login {
-  my ($portals_ref) = @_;
-  my $iscsiadm = nimble_iscsiadm_path();
-  return unless -x $iscsiadm && ref($portals_ref) eq 'ARRAY' && @$portals_ref;
-  iscsi_sendtargets_on_ips($portals_ref);
-  eval { run_command( [ $iscsiadm, '-m', 'node', '--op', 'update', '-n', 'node.startup', '-v', 'automatic' ], timeout => 10, quiet => 1 ); };
-  eval { run_command( [ $iscsiadm, '-m', 'node', '--login' ], timeout => 120, quiet => 1 ); };
-}
-
 sub nimble_iscsiadm_path {
   my $iscsiadm = '/usr/sbin/iscsiadm';
   return -x $iscsiadm ? $iscsiadm : '/sbin/iscsiadm';
@@ -1312,17 +1273,6 @@ sub iscsi_sendtargets_on_ips {
 }
 
 # Login to target on all node records (open-iscsi), when portals are unknown but discovery already ran elsewhere.
-sub nimble_iscsi_login_target_on_all_recorded_portals {
-  my ($target_iqn) = @_;
-  my $iqn = nimble_untaint_iscsiadm_scalar($target_iqn);
-  return unless length($iqn) && $iqn =~ m/^iqn\./i;
-  my $iscsiadm = nimble_iscsiadm_path();
-  return unless -x $iscsiadm;
-  eval {
-    run_command( [ $iscsiadm, '-m', 'node', '-T', $iqn, '--login' ], timeout => 90, quiet => 1 );
-  };
-}
-
 # Collapse multi-line command errors into one line for task/syslog (avoid huge dumps).
 sub nimble_iscsi_sanitize_cmd_err {
   my ($e) = @_;
@@ -2421,6 +2371,16 @@ sub nimble_sync_array_snapshots {
 sub list_images {
   my ( $class, $storeid, $scfg, $vmid, $vollist, $cache ) = @_;
   set_debug_from_config( $scfg );
+  if ( ref($cache) eq 'HASH' ) {
+    $cache->{nimble}{$storeid} //= $class->nimble_list_volumes( $scfg, undef, $storeid, undef );
+    my $all = $cache->{nimble}{$storeid};
+    if ( defined($vollist) && ref($vollist) eq 'ARRAY' ) {
+      my %want = map { $_ => 1 } @$vollist;
+      return [ grep { $want{ $_->{ volid } } } @$all ];
+    }
+    return [ grep { defined $_->{ vmid } && "$_->{ vmid }" eq "$vmid" } @$all ] if defined $vmid;
+    return [@$all];
+  }
   return $class->nimble_list_volumes( $scfg, $vmid, $storeid, $vollist );
 }
 
@@ -2676,10 +2636,53 @@ sub volume_snapshot_rollback {
   return 1;
 }
 
+sub volume_rollback_is_possible {
+  my ( $class, $scfg, $storeid, $volname, $snap, $blockers ) = @_;
+  # Nimble supports restore to any snapshot via volumes/:id/actions/restore; no ordering constraint.
+  return 1;
+}
+
 sub volume_snapshot_delete {
   my ( $class, $scfg, $storeid, $volname, $snap ) = @_;
   $class->nimble_snapshot_delete( $scfg, $storeid, $volname, $snap );
   return 1;
+}
+
+# Returns { $pve_snapname => { id => $nimble_uuid, timestamp => $epoch }, ... } for all snapshots
+# on this volume. PVE-created snaps are reverse-mapped from the array name (prefix+volname+.snap-name);
+# array-created snaps (no .snap- suffix match) fall back to the nimble<epoch> naming convention
+# used by nimble_sync_array_snapshots so the keys are consistent with what PVE already has in VM configs.
+sub volume_snapshot_info {
+  my ( $class, $scfg, $storeid, $volname ) = @_;
+  my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
+  return {} unless $vol_id;
+  my $r = eval { nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$vol_id", undef, $storeid ) };
+  return {} unless $r;
+  my $list = nimble_data_as_list( $r->{ data } );
+  # Compute the array-side base name (prefix + volname, no snap suffix) once.
+  my $sep = nimble_volname( $scfg, $volname ) . '.';
+  my %info;
+  for my $s ( @$list ) {
+    my $array_name = $s->{ name } // '';
+    my $ts         = $s->{ creation_time } // 0;
+    my $id         = $s->{ id } // '';
+    my $pve_name;
+    if ( index( $array_name, $sep ) == 0 ) {
+      my $suffix = substr( $array_name, length($sep) );
+      if ( $suffix =~ /^snap-(.+)$/ ) {
+        $pve_name = $1;
+        $pve_name =~ s/^veeam-/veeam_/;  # reverse nimble_volname's veeam_ → veeam- substitution
+      }
+    }
+    $pve_name //= "nimble${ts}";
+    $info{ $pve_name } = { id => $id, timestamp => $ts };
+  }
+  return \%info;
+}
+
+sub rename_snapshot {
+  my ( $class, $scfg, $storeid, $volname, $snap, $newsnapname ) = @_;
+  die "Error :: rename_snapshot is not supported.\n";
 }
 
 sub clone_image {
@@ -2702,6 +2705,21 @@ sub volume_has_feature {
   my $key = $snapname ? "snap" : ( $isBase ? "base" : "current" );
   return 1 if $features->{ $feature } && $features->{ $feature }->{ $key };
   return undef;
+}
+
+# Tell PVE/QEMU to use storage-side snapshots rather than QEMU internal snapshots (APIVER 12).
+sub volume_qemu_snapshot_method {
+  my ( $class, $scfg, $storeid, $volname ) = @_;
+  return 'storage';
+}
+
+# Return QEMU blockdev options for this volume (APIVER 12). Nimble volumes are raw block devices;
+# the host_device driver is the correct QEMU driver for mapped iSCSI/multipath block nodes.
+sub qemu_blockdev_options {
+  my ( $class, $scfg, $storeid, $volname, $machine_version, $options ) = @_;
+  my $path = $class->filesystem_path( $scfg, $volname, undef, $storeid );
+  return undef unless length($path) && -b $path;
+  return { driver => 'host_device', filename => $path };
 }
 
 sub create_base {
