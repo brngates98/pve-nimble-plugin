@@ -603,8 +603,9 @@ sub multipath_check {
   return 0 unless length( $wwid );
   my $mp = get_command_path('multipath');
   for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
-    my $out = `$mp -l $w 2>/dev/null`;
-    return 1 if $out ne '';
+    my $out = '';
+    eval { run_command( [ $mp, '-l', $w ], outfunc => sub { $out .= shift . "\n" }, quiet => 1 ) };
+    return 1 if length($out);
   }
   return 0;
 }
@@ -613,10 +614,155 @@ sub nimble_multipath_active_wwid {
   my ($wwid) = @_;
   my $mp = get_command_path('multipath');
   for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
-    my $out = `$mp -l $w 2>/dev/null`;
-    return $w if $out ne '';
+    my $out = '';
+    eval { run_command( [ $mp, '-l', $w ], outfunc => sub { $out .= shift . "\n" }, quiet => 1 ) };
+    return $w if length($out);
   }
   return '';
+}
+
+# --- Multipath alias management ---
+# Aliases are written to /etc/multipath/conf.d/nimble-<storeid>.conf (never /etc/multipath.conf).
+# Alias lifetime follows volume lifetime: added on first map_volume, removed on free_image.
+# WWIDs are cached in /etc/pve/priv/nimble/<storeid>.wwid.json so activate_storage can restore
+# aliases on reboot without requiring devices to be present first.
+
+sub nimble_multipath_alias_name {
+  my ( $storeid, $volname ) = @_;
+  return "$storeid-$volname";
+}
+
+sub nimble_multipath_conf_path {
+  my ($storeid) = @_;
+  return "/etc/multipath/conf.d/nimble-$storeid.conf";
+}
+
+sub nimble_multipath_wwid_cache_path {
+  my ($storeid) = @_;
+  return "/etc/pve/priv/nimble/$storeid.wwid.json";
+}
+
+sub nimble_multipath_load_wwid_cache {
+  my ($storeid) = @_;
+  my $path = nimble_multipath_wwid_cache_path($storeid);
+  return {} unless -f $path;
+  my $json = eval { file_get_contents($path) };
+  return {} unless defined $json && length $json;
+  my $data = eval { decode_json($json) };
+  return ( ref($data) eq 'HASH' ) ? $data : {};
+}
+
+sub nimble_multipath_save_wwid_cache {
+  my ( $storeid, $cache ) = @_;
+  my $path = nimble_multipath_wwid_cache_path($storeid);
+  File::Path::make_path( dirname($path) ) unless -d dirname($path);
+  my $tmp = "$path.tmp.$$";
+  eval {
+    open( my $fh, '>', $tmp ) or die "Cannot write $tmp: $!";
+    print $fh encode_json($cache);
+    close($fh);
+    rename( $tmp, $path ) or die "Cannot rename $tmp to $path: $!";
+  };
+  if ($@) {
+    unlink $tmp;
+    warn "Warning :: [nimble-multipath] Failed to save WWID cache for $storeid: $@\n";
+  }
+}
+
+sub nimble_multipath_wwid_in_main_conf {
+  my ($wwid) = @_;
+  return 0 unless length($wwid);
+  return 0 unless -f '/etc/multipath.conf';
+  my $content = eval { file_get_contents('/etc/multipath.conf') };
+  return 0 unless defined $content;
+  return index( lc($content), lc($wwid) ) >= 0 ? 1 : 0;
+}
+
+sub nimble_multipath_write_conf {
+  my ( $storeid, $aliases ) = @_;
+  my $path = nimble_multipath_conf_path($storeid);
+  unless ( keys %$aliases ) {
+    unlink $path if -f $path;
+    return;
+  }
+  my $content = "# Managed by pve-nimble-plugin. Do not edit manually.\n";
+  $content .= "multipaths {\n";
+  for my $wwid ( sort keys %$aliases ) {
+    $content .= "    multipath {\n";
+    $content .= "        wwid $wwid\n";
+    $content .= "        alias $aliases->{$wwid}\n";
+    $content .= "    }\n";
+  }
+  $content .= "}\n";
+  File::Path::make_path( dirname($path) ) unless -d dirname($path);
+  my $tmp = "$path.tmp.$$";
+  eval {
+    open( my $fh, '>', $tmp ) or die "Cannot write $tmp: $!";
+    print $fh $content;
+    close($fh);
+    rename( $tmp, $path ) or die "Cannot rename $tmp to $path: $!";
+  };
+  if ($@) {
+    unlink $tmp;
+    warn "Warning :: [nimble-multipath] Failed to write conf.d for $storeid: $@\n";
+  }
+}
+
+sub nimble_multipath_build_aliases {
+  my ( $storeid, $cache ) = @_;
+  my %aliases;
+  for my $vn ( keys %$cache ) {
+    my $w = $cache->{$vn};
+    next unless length($w);
+    next if nimble_multipath_wwid_in_main_conf($w);
+    $aliases{$w} = nimble_multipath_alias_name( $storeid, $vn );
+  }
+  return %aliases;
+}
+
+sub nimble_multipath_reconfigure {
+  eval { exec_command( ['multipathd', 'reconfigure'], -1, timeout => 15 ) };
+  warn "Warning :: [nimble-multipath] multipathd reconfigure failed: $@\n" if $@;
+}
+
+sub nimble_multipath_register {
+  my ( $storeid, $volname, $wwid ) = @_;
+  return unless length($wwid) && length($volname) && length($storeid);
+  my $sane_wwid = nimble_untaint_multipath_wwid($wwid);
+  return unless length($sane_wwid);
+  if ( nimble_multipath_wwid_in_main_conf($sane_wwid) ) {
+    warn "Warning :: [nimble-multipath] WWID $sane_wwid ($volname) is already defined in"
+      . " /etc/multipath.conf — skipping alias management. Remove that entry from"
+      . " /etc/multipath.conf to enable plugin-managed aliases.\n";
+    return;
+  }
+  my $cache = nimble_multipath_load_wwid_cache($storeid);
+  $cache->{$volname} = $sane_wwid;
+  nimble_multipath_save_wwid_cache( $storeid, $cache );
+  my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
+  nimble_multipath_write_conf( $storeid, \%aliases );
+  nimble_multipath_reconfigure();
+}
+
+sub nimble_multipath_deregister {
+  my ( $storeid, $volname ) = @_;
+  return unless length($volname) && length($storeid);
+  my $cache = nimble_multipath_load_wwid_cache($storeid);
+  delete $cache->{$volname};
+  nimble_multipath_save_wwid_cache( $storeid, $cache );
+  my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
+  nimble_multipath_write_conf( $storeid, \%aliases );
+  nimble_multipath_reconfigure();
+}
+
+sub nimble_multipath_restore_aliases {
+  my ($storeid) = @_;
+  my $cache = nimble_multipath_load_wwid_cache($storeid);
+  return unless keys %$cache;
+  my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
+  return unless keys %aliases;
+  nimble_multipath_write_conf( $storeid, \%aliases );
+  nimble_multipath_reconfigure();
 }
 
 # Same as PureStoragePlugin: remove LVM/partition DM stacks above a multipath map before array-side delete.
@@ -2151,6 +2297,7 @@ sub free_image {
   my ( $class, $storeid, $scfg, $volname, $isBase ) = @_;
   $class->deactivate_volume( $storeid, $scfg, $volname );
   $class->nimble_remove_volume( $scfg, $volname, $storeid );
+  nimble_multipath_deregister( $storeid, $volname );
   return undef;
 }
 
@@ -2350,6 +2497,7 @@ sub activate_storage {
       }
     }
   }
+  nimble_multipath_restore_aliases($storeid);
   return 1;
 }
 
@@ -2452,6 +2600,7 @@ sub map_volume {
     }
   }
   $path = nimble_untaint_dev_path($path) || $path;
+  nimble_multipath_register( $storeid, $volname, $wwid ) if length($wwid);
   return $path;
 }
 
@@ -2460,7 +2609,11 @@ sub unmap_volume {
   my ( $path, $wwid ) = $class->get_device_path_wwid( $scfg, $volname, $storeid );
   return 0 unless length( $path ) && -b $path;
   $path = nimble_untaint_dev_path($path) || return 0;
-  my ( $device_path, @slaves ) = block_device_slaves( $path );
+  my ( $device_path, @slaves ) = eval { block_device_slaves( $path ) };
+  if ( $@ ) {
+    warn "Warning :: unmap_volume: block_device_slaves failed for \"$path\": $@\n";
+    return 0;
+  }
   $device_path = nimble_untaint_dev_path($device_path) || $device_path;
   exec_command( ['sync'] );
   exec_command( [ 'blockdev', '--flushbufs', $device_path ] );
