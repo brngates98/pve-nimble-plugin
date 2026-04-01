@@ -130,6 +130,15 @@ function preflight()
     if [ "$OS_CODENAME" == "unset" ]; then
         fail "Failed to determine distribution version (VERSION_CODENAME not found in $OS_RELEASE_FILE)"
     fi
+
+    # Auto-select the correct APT suite from the OS codename unless the caller
+    # explicitly passed --codename.
+    if [[ "$REPO_SUITE_SET" -eq 0 ]]; then
+        case "$OS_CODENAME" in
+            trixie)  REPO_SUITE="trixie" ;;
+            *)       REPO_SUITE="bookworm" ;;
+        esac
+    fi
 }
 
 # quote input for remote execution
@@ -255,12 +264,38 @@ function install_on_all_nodes()
 }
 
 ###########################################################################
+# check_existing_install: detect whether this is a fresh install, an
+# upgrade with the correct repo already in place, or an upgrade that
+# requires the sources list to be updated first.
+#
+# Outputs one of: fresh | upgrade | repo_update
+###########################################################################
+function check_existing_install()
+{
+    local pkg_status
+    pkg_status=$(dpkg-query -W -f='${Status}' "$PACKAGE_NAME" 2>/dev/null || true)
+    if [[ "$pkg_status" != "install ok installed" ]]; then
+        echo "fresh"
+        return
+    fi
+    # Package is installed — check whether the sources list exists and
+    # references the correct repo base URL and suite.
+    if [[ -f "$SOURCES_LIST" ]] \
+        && grep -qF "$REPO_BASE" "$SOURCES_LIST" \
+        && grep -qF "$REPO_SUITE" "$SOURCES_LIST"; then
+        echo "upgrade"
+    else
+        echo "repo_update"
+    fi
+}
+
+###########################################################################
 # install_software: add APT repo and install package, or install .deb from GitHub
 ###########################################################################
 function install_software()
 {
     if [[ "${YES:-0}" -ne 1 ]] && [[ "${DRY_RUN:-0}" -ne 1 ]] && [[ -t 0 ]]; then
-        read -r -p "Do you want to continue with the installation? (y/n): " choice
+        read -r -p "Do you want to continue? (y/n): " choice
         if [[ "$choice" != "y" ]]; then
             log "Installation aborted."
             exit 1
@@ -270,31 +305,79 @@ function install_software()
     if [[ -n "$INSTALL_VERSION" ]]; then
         install_from_github_deb
     else
-        install_from_apt_repo
+        local mode
+        mode=$(check_existing_install)
+        case "$mode" in
+            fresh)
+                log "Fresh install — suite: $REPO_SUITE"
+                ;;
+            upgrade)
+                log "$PACKAGE_NAME already installed. APT repo is correct (suite: $REPO_SUITE) — checking for upgrade."
+                ;;
+            repo_update)
+                log "$PACKAGE_NAME already installed. APT repo needs updating to suite '$REPO_SUITE'."
+                ;;
+        esac
+        install_from_apt_repo "$mode"
     fi
 }
 
 function install_from_apt_repo()
 {
+    local mode="${1:-fresh}"
+    local step=1
+
     if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
-        log "DRY-RUN: would add APT repo: deb [trusted=yes] $REPO_BASE $REPO_SUITE main -> $SOURCES_LIST"
+        case "$mode" in
+            fresh)
+                log "DRY-RUN: would write APT repo: deb [trusted=yes] $REPO_BASE $REPO_SUITE main -> $SOURCES_LIST"
+                ;;
+            repo_update)
+                log "DRY-RUN: would update $SOURCES_LIST to: deb [trusted=yes] $REPO_BASE $REPO_SUITE main"
+                ;;
+            upgrade)
+                log "DRY-RUN: APT repo already correct ($SOURCES_LIST, suite: $REPO_SUITE) — no change needed"
+                ;;
+        esac
         log "DRY-RUN: would update package lists: apt-get update -q"
-        log "DRY-RUN: would install package: apt-get install -y -q open-iscsi $PACKAGE_NAME"
+        if [[ "$mode" == "fresh" ]]; then
+            log "DRY-RUN: would install: apt-get install -y -q open-iscsi $PACKAGE_NAME"
+        else
+            log "DRY-RUN: would upgrade: apt-get install -y -q --only-upgrade $PACKAGE_NAME"
+        fi
         log "DRY-RUN: would restart PVE services: systemctl try-reload-or-restart $RESTARTED_SERVICES"
-    else
-        log "1. Adding PVE Nimble Plugin APT repository..."
-        printf "deb [trusted=yes] %s %s main\n" "$REPO_BASE" "$REPO_SUITE" > "$SOURCES_LIST"
-        chmod 644 "$SOURCES_LIST"
-
-        log "2. Updating package lists..."
-        builtin command apt-get update -q >> "$LOG_FILE" 2>&1
-
-        log "3. Installing open-iscsi and $PACKAGE_NAME..."
-        builtin command apt-get install -y -q open-iscsi "$PACKAGE_NAME" >> "$LOG_FILE" 2>&1
-
-        log "4. Restarting PVE services ($RESTARTED_SERVICES)..."
-        builtin command systemctl try-reload-or-restart $RESTARTED_SERVICES
+        return
     fi
+
+    case "$mode" in
+        fresh)
+            log "$((step++)). Adding PVE Nimble Plugin APT repository (suite: $REPO_SUITE)..."
+            printf "deb [trusted=yes] %s %s main\n" "$REPO_BASE" "$REPO_SUITE" > "$SOURCES_LIST"
+            chmod 644 "$SOURCES_LIST"
+            ;;
+        repo_update)
+            log "$((step++)). Updating APT repository to suite '$REPO_SUITE'..."
+            printf "deb [trusted=yes] %s %s main\n" "$REPO_BASE" "$REPO_SUITE" > "$SOURCES_LIST"
+            chmod 644 "$SOURCES_LIST"
+            ;;
+        upgrade)
+            log "$((step++)). APT repository already correct (suite: $REPO_SUITE)."
+            ;;
+    esac
+
+    log "$((step++)). Updating package lists..."
+    builtin command apt-get update -q >> "$LOG_FILE" 2>&1
+
+    if [[ "$mode" == "fresh" ]]; then
+        log "$((step++)). Installing open-iscsi and $PACKAGE_NAME..."
+        builtin command apt-get install -y -q open-iscsi "$PACKAGE_NAME" >> "$LOG_FILE" 2>&1
+    else
+        log "$((step++)). Upgrading $PACKAGE_NAME..."
+        builtin command apt-get install -y -q --only-upgrade "$PACKAGE_NAME" >> "$LOG_FILE" 2>&1
+    fi
+
+    log "$((step++)). Restarting PVE services ($RESTARTED_SERVICES)..."
+    builtin command systemctl try-reload-or-restart $RESTARTED_SERVICES
 }
 
 function install_from_github_deb()
