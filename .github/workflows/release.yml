@@ -92,13 +92,14 @@ jobs:
 
     - name: Generate Packages (bookworm)
       run: |
-        cd apt && apt-ftparchive packages pool/main > dists/bookworm/main/binary-all/Packages
-        gzip -c apt/dists/bookworm/main/binary-all/Packages > apt/dists/bookworm/main/binary-all/Packages.gz
+        cd apt
+        apt-ftparchive packages pool/main > dists/bookworm/main/binary-all/Packages
+        gzip -c dists/bookworm/main/binary-all/Packages > dists/bookworm/main/binary-all/Packages.gz
 
     - name: Generate Packages (trixie)
       run: |
-        cp apt/dists/bookworm/main/binary-all/Packages apt/dists/trixie/main/binary-all/Packages
-        cp apt/dists/bookworm/main/binary-all/Packages.gz apt/dists/trixie/main/binary-all/Packages.gz
+        cp apt/dists/bookworm/main/binary-all/Packages     apt/dists/trixie/main/binary-all/Packages
+        cp apt/dists/bookworm/main/binary-all/Packages.gz  apt/dists/trixie/main/binary-all/Packages.gz
 
     - name: Generate Release (bookworm)
       run: |
