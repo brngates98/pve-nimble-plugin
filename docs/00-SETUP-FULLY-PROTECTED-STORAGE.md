@@ -222,6 +222,8 @@ devices {
    sudo multipath -ll
    ```
 
+> **Alias management:** Once the plugin is active, it automatically writes per-volume WWID→alias entries to `/etc/multipath/conf.d/nimble-<storeid>.conf` when volumes are mapped, and restores them on `activate_storage` after a reboot. You do not need to manage this file — but do not hand-edit it, as the plugin owns it.
+
 ---
 
 ## 6. Add Nimble storage to Proxmox

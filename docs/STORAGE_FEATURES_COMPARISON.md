@@ -25,7 +25,7 @@ This document compares the **HPE Nimble Storage plugin** (`nimble`) for Proxmox 
 
 **Notes:**
 
-- **Nimble plugin:** Native array integration (REST API). Volume create/delete/resize/rename, ACL (initiator groups), snapshots, and clone-from-snapshot. VM disks only; use NFS or directory for ISOs, backups, templates.
+- **Nimble plugin:** Native array integration (REST API). Volume create/delete/resize/rename, ACL (initiator groups), snapshots, clone-from-snapshot, and array snapshot sync (array-created snapshots imported into PVE VM configs automatically). VM disks only; use NFS or directory for ISOs, backups, templates.
 - **NFS:** Snapshots/clones via qcow2 or volume chains (file-based). Supports all content types. Block performance is file-layer, not raw block.
 - **LVM / LVM-thin:** Snapshots/clones with LVM-thin, or snapshot-as-volume-chain on LVM (PVE 9+). Shared only when built on shared block (e.g. LVM on iSCSI LUN). No automatic volume management from PVE for SAN LUNs.
 - **iSCSI (kernel):** Raw LUNs; thin/snapshots/clones depend on the target. No automatic volume management; you create LUNs and ACLs on the array. Multipath is configurable per target.

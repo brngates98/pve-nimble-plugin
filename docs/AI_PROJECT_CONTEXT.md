@@ -13,25 +13,29 @@
 
 ---
 
-## 2. Current Status (as of project creation)
+## 2. Current Status (as of v0.0.12)
 
 | Area | Status | Notes |
 |------|--------|--------|
 | **Core plugin** | Implemented | Create/delete/resize/rename volumes, list, status, activate/deactivate, map/unmap |
-| **list_images / detach** | Fixed | `list_images` now honors PVE’s `vollist` and `vmid` like RBD: explicit volids (e.g. `unusedN:` in qemu config) are listed for reattach; without `vollist`, results filter by `vmid`. Previously ignoring `vollist` made detached disks “vanish” in the GUI. |
+| **list_images / detach** | Implemented | Honors PVE’s `vollist` and `vmid` like RBD: explicit volids (e.g. `unusedN:` in qemu config) are listed for reattach; without `vollist`, results filter by `vmid`. |
+| **list_images caching** | Implemented | Volume list cached in `$cache->{nimble}{$storeid}` during a single PVE operation to avoid redundant REST calls. Returns a shallow copy to prevent cache mutation. |
 | **ACL on activate (initiator_group set)** | Fixed | `nimble_ensure_volume_acl_for_current_node` used to return immediately when `initiator_group` was set, so **no** access_control_record was created; LUN never presented → timeout waiting for disk. Now ACL is ensured for the configured group as well as for auto `pve-<nodename>`. |
 | **Auth** | Implemented | Username/password → POST /v1/tokens → session token; cached under `/etc/pve/priv/nimble/<storeid>.json` |
 | **ACL / initiator** | Implemented | **initiator_group** optional: if set, that group by name; if unset, **reuse** first iSCSI group containing this host’s IQN (API order, skip any group with CHAP/`chapuser_id` on initiators), else create `pve-<nodename>`. **access_control_records** on create/activate. |
 | **Snapshots** | Implemented | Create, delete, rollback; Nimble snapshots API + volume restore; Veeam snapshot name normalization (`veeam_` → `veeam-`) |
 | **Clone from snapshot** | Implemented | Via POST volumes with clone=true, name, base_snap_id (then ACL + optional volume_collection) |
-| **Multipath** | Implemented | Same pattern as Pure: device by serial, multipathd add/remove map, block device actions |
-| **Device discovery** | Implemented | **Pure-style first:** `/dev/disk/by-id/wwn-0x<api_serial>`, then any `by-id` name containing the API `serial_number` (needed for **multipath dm** — often no sysfs `device/serial`), then sysfs serial match. |
+| **Multipath** | Implemented | Device by serial, multipathd add/remove map, block device actions |
+| **Multipath alias management** | Implemented | Plugin auto-writes volname→WWID aliases to `/etc/multipath/conf.d/nimble-<storeid>.conf` on `map_volume`, removes on `free_image`, restores on `activate_storage`. WWID cache persisted in `/etc/pve/priv/nimble/<storeid>.wwid.json`. Skips WWIDs already defined in `/etc/multipath.conf` with a warning. |
+| **Device discovery** | Implemented | **3-tier fallback:** `/dev/disk/by-id/wwn-0x<api_serial>`, then any `by-id` name containing the API `serial_number` (needed for multipath dm — often no sysfs `device/serial`), then sysfs serial match. |
 | **Auto iSCSI discovery** | Implemented | **Default on** for **`auto_iscsi_discovery`** on **activate_storage** (`no`/`0` disables). **`map_volume`** mirrors manual PVE iSCSI (portal + per-volume IQN + LUN 0): portal list = **GET subnets + GET subnets/:id per subnet** (authoritative), then **network_interfaces** fallback, optional **`iscsi_discovery_ips`**, then **tcp session IPs from `iscsiadm`** (last resort); sendtargets + per-target login; **`node.startup=automatic`**; **`iscsiadm -m session --rescan`**; long wait + periodic SCSI rescan; device by **serial**; `multipath -v2`. |
 | **Volume import/export** | Implemented | `raw+size` for backup/restore (e.g. Veeam V13+); size rounded up to full MB for odd-sector compatibility |
+| **Array snapshot sync** | Implemented | `nimble_sync_array_snapshots` runs from `status()` (throttled to once per 30s per storage). Imports array-created snapshots into PVE VM configs so they appear in the Proxmox UI snapshot list. Array snaps get `nimble<epoch>` PVE keys. |
+| **APIVER 12/13 methods** | Implemented | `volume_qemu_snapshot_method` returns `’storage’` (delegates snapshot management to plugin). `qemu_blockdev_options` returns `host_device` driver spec for mapped block node, `undef` if not yet mapped. `volume_snapshot_info` reverse-maps Nimble snapshot names to PVE snapshot keys. `volume_rollback_is_possible` returns 1. `rename_snapshot` stubs with a clean die. |
 | **Debian package** | Present | `libpve-storage-nimble-perl`, debian/*, scripts/build_deb.sh |
 | **CI (GitHub Actions)** | Present | checks, lint (Perl + Markdown), tests, release (tag → build .deb → gh-release) |
 | **Unit tests** | Present | test_command_validation.t, test_retry_logic.t, test_token_cache.t (+ token_cache_test.pl); no live Nimble tests |
-| **Real-array testing** | Not done | No automated tests against a real Nimble array; manual only |
+| **Real-array testing** | Partial | Lab cluster: PVE 9.1.1, real HPE Nimble array, Windows Server + Ubuntu Server VMs. VM creation and snapshots confirmed working. **Snapshot rollback is failing** — under investigation. |
 | **debian/watch** | Done | Points at `brngates98/pve-nimble-plugin` |
 
 ---
@@ -105,7 +109,7 @@ Use this file when implementing or validating API calls instead of relying only 
 
 ## 6. What Might Need Work (when resuming)
 
-- **Validate on real Nimble:** Create storage, create VM disk, snapshot, clone, resize, delete; confirm device paths and multipath on a real node.
+- **Snapshot rollback is failing on real array** — confirmed broken in lab testing (PVE 9.1.1 + real Nimble). The code path is `volume_snapshot_rollback` → `nimble_volume_restore` → `POST volumes/:id/actions/restore`. Needs debug logging and a test to identify whether the failure is in the API call, the volume offline/online sequence, or the response handling. Documentation for the rollback workflow also needs to be written once the fix is confirmed.
 - **Nimble API quirks:** Response shapes (e.g. list vs single object, pagination) may need adjustment per Nimble firmware; error codes/messages might need better handling.
 - **Status/capacity:** `status()` uses pools API; field names (`capacity`, `usage`, etc.) may vary by Nimble version—verify and adjust if needed.
 - **Changelog:** `_deb.yml` generates `debian/changelog` from git tags and history. Pushing a tag runs the release workflow and produces the .deb.
@@ -144,4 +148,4 @@ See `.cursor/rules/releases.mdc` for the full release rule.
 
 ---
 
-*Last updated: repo URL and first-release prep. Update this file when you make significant changes or when status/next steps change.*
+*Last updated: v0.0.12 — multipath alias management, APIVER 12/13 methods, list_images caching, array snapshot sync; real-array test results (PVE 9.1.1). Update this file when you make significant changes or when status/next steps change.*
