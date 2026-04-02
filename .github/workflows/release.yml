@@ -19,8 +19,8 @@ on:
     - 'v[0-9]+.[0-9]+.[0-9]+-beta.[0-9]'
 
 jobs:
-  test:
-    name: Test release tag
+  validate-tag:
+    name: Validate release tag
     runs-on: ubuntu-22.04
     steps:
     - run: |
@@ -29,10 +29,49 @@ jobs:
       run: |
         echo "::error::${{ github.ref }} branch is not a release tag"; exit 1
 
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Perl test deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libjson-perl
+
+      - name: Run unit tests
+        run: ./tests/run_tests.sh
+
+  plugin-syntax-bookworm:
+    name: Plugin syntax (bookworm + Proxmox PVE 8)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify NimbleStoragePlugin.pm in Docker
+        run: |
+          chmod +x scripts/verify_plugin_in_docker.sh
+          DIST=bookworm ./scripts/verify_plugin_in_docker.sh
+
+  plugin-syntax-trixie:
+    name: Plugin syntax (trixie + Proxmox PVE 9)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify NimbleStoragePlugin.pm in Docker
+        run: |
+          chmod +x scripts/verify_plugin_in_docker.sh
+          DIST=trixie ./scripts/verify_plugin_in_docker.sh
+
   build:
     name: Make deb package
     needs:
-    - test
+    - validate-tag
+    - unit-tests
+    - plugin-syntax-bookworm
+    - plugin-syntax-trixie
     uses: ./.github/workflows/_deb.yml
     secrets: inherit
 
@@ -67,7 +106,7 @@ jobs:
         body_path: release-notes.md
         generate_release_notes: false
         make_latest: true
-        prerelease: false
+        prerelease: ${{ contains(github.ref_name, '-rc.') || contains(github.ref_name, '-beta.') }}
         files: |
           *.deb
           sha256sums

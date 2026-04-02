@@ -364,6 +364,7 @@ sub nimble_name_prefix {
 
 sub nimble_volname {
   my ( $scfg, $volname, $snapname ) = @_;
+  $snapname //= '';
   my $name = nimble_name_prefix( $scfg ) . $volname;
   if ( length( $snapname ) ) {
     my $snap = $snapname;
@@ -646,7 +647,7 @@ sub nimble_multipath_load_wwid_cache {
 sub nimble_multipath_save_wwid_cache {
   my ( $storeid, $cache ) = @_;
   my $path = nimble_multipath_wwid_cache_path($storeid);
-  File::Path::make_path( dirname($path) ) unless -d dirname($path);
+  File::Path::make_path( dirname($path), { mode => 0700 } ) unless -d dirname($path);
   my $tmp = "$path.tmp.$$";
   eval {
     open( my $fh, '>', $tmp ) or die "Cannot write $tmp: $!";
@@ -712,8 +713,7 @@ sub nimble_multipath_build_aliases {
 }
 
 sub nimble_multipath_reconfigure {
-  eval { exec_command( ['multipathd', 'reconfigure'], -1, timeout => 15 ) };
-  warn "Warning :: [nimble-multipath] multipathd reconfigure failed: $@\n" if $@;
+  exec_command( ['multipathd', 'reconfigure'], -1, timeout => 15 );
 }
 
 sub nimble_multipath_register {
@@ -1038,7 +1038,15 @@ sub get_iscsi_discovery_ips_from_running_sessions {
   my $iscsiadm = '/usr/sbin/iscsiadm';
   $iscsiadm = '/sbin/iscsiadm' if !-x $iscsiadm;
   return () unless -x $iscsiadm;
-  my $out = `"$iscsiadm" -m session 2>/dev/null` // '';
+  my $out = '';
+  eval {
+    run_command( [ $iscsiadm, '-m', 'session' ],
+      outfunc => sub { $out .= shift . "\n" },
+      errfunc => sub { },
+      timeout => 15,
+      quiet   => 1
+    );
+  };
   while ( $out =~ /^\s*tcp:\s*\[\d+\]\s+(\d{1,3}(?:\.\d{1,3}){3}):(\d+)/gm ) {
     my $host = $1;
     push @ips, $host if !$seen{$host}++;
@@ -1266,7 +1274,6 @@ sub iscsi_sendtargets_on_ips {
     };
     if ( $@ ) {
       chomp( my $e = $@ );
-      warn "Warning :: iscsiadm sendtargets -p $disc_ip failed: $e\n" if $e =~ /insecure dependency in exec/i;
       print "Debug :: sendtargets -p $disc_ip: $e\n" if $DEBUG >= 1;
     }
   }
@@ -1591,7 +1598,10 @@ sub nimble_post_access_control_record_idempotent {
 sub nimble_volume_has_acl_for_ig {
   my ( $scfg, $vol_id, $ig_id, $storeid ) = @_;
   return 0 if !defined $vol_id || !defined $ig_id;
-  my $r    = nimble_api_call( $scfg, 'GET', 'access_control_records', undef, $storeid );
+  my $enc_vid = uri_escape($vol_id);
+  my $r = eval { nimble_api_call( $scfg, 'GET', "access_control_records?vol_id=$enc_vid", undef, $storeid ) };
+  $r = eval { nimble_api_call( $scfg, 'GET', 'access_control_records', undef, $storeid ) } unless $r;
+  return 0 unless $r;
   my $list = nimble_data_as_list( $r->{ data } );
   for my $acr ( @$list ) {
     next unless ref($acr) eq 'HASH';
@@ -1927,17 +1937,28 @@ sub nimble_create_volume {
   my $r      = nimble_api_call( $scfg, 'POST', 'volumes', $body, $storeid );
   my $vol    = $r->{ data } || $r;
   my $serial = $vol->{ serial_number } or die "Error :: No serial_number in create response\n";
+  $vol->{ id } or die "Error :: No id in create response\n";
   print "Info :: Volume \"$volname\" created (serial=$serial).\n";
   my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
-  nimble_post_access_control_record_idempotent( $scfg, $vol->{ id }, $ig_id, $storeid );
-  if ( $scfg->{ volume_collection } ) {
-    my $volcoll_id = nimble_get_volume_collection_id( $scfg, $scfg->{ volume_collection }, $storeid );
-    if ( $volcoll_id ) {
-      nimble_api_call( $scfg, 'PUT', "volumes/$vol->{ id }", { volcoll_id => $volcoll_id }, $storeid );
-      print "Info :: Volume \"$volname\" added to volume collection \"$scfg->{ volume_collection }\".\n";
-    } else {
-      warn "Warning :: volume_collection \"$scfg->{ volume_collection }\" not found; volume not added to any collection.\n";
+  my $create_err;
+  eval {
+    nimble_post_access_control_record_idempotent( $scfg, $vol->{ id }, $ig_id, $storeid );
+    if ( $scfg->{ volume_collection } ) {
+      my $volcoll_id = nimble_get_volume_collection_id( $scfg, $scfg->{ volume_collection }, $storeid );
+      if ( $volcoll_id ) {
+        nimble_api_call( $scfg, 'PUT', "volumes/$vol->{ id }", { volcoll_id => $volcoll_id }, $storeid );
+        print "Info :: Volume \"$volname\" added to volume collection \"$scfg->{ volume_collection }\".\n";
+      } else {
+        warn "Warning :: volume_collection \"$scfg->{ volume_collection }\" not found; volume not added to any collection.\n";
+      }
     }
+  };
+  if ( $create_err = $@ ) {
+    eval {
+      nimble_api_call( $scfg, 'PUT', "volumes/$vol->{ id }", { online => JSON::XS::false }, $storeid );
+      nimble_api_call( $scfg, 'DELETE', "volumes/$vol->{ id }", undef, $storeid );
+    };
+    die $create_err;
   }
   return 1;
 }
@@ -1946,7 +1967,9 @@ sub nimble_create_volume {
 sub nimble_delete_snapshots_for_volume_id {
   my ( $scfg, $vol_id, $storeid ) = @_;
   return unless defined $vol_id;
-  my $r    = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) };
+  my $enc_vid = uri_escape($vol_id);
+  my $r = eval { nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$enc_vid", undef, $storeid ) };
+  $r = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) } unless $r;
   return unless $r;
   my $list = nimble_data_as_list( $r->{ data } );
   for my $s ( @$list ) {
@@ -2057,10 +2080,14 @@ sub nimble_snapshot_delete {
     my $target_ts = $1;
     my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
     if ( $vol_id ) {
-      my $r    = nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$vol_id", undef, $storeid );
+      my $enc_vid = uri_escape($vol_id);
+      my $r = eval { nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$enc_vid", undef, $storeid ) };
+      $r = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) } unless $r;
+      return 1 unless $r;
       my $list = nimble_data_as_list( $r->{ data } );
       my $best;
       for my $s ( @$list ) {
+        next unless ( $s->{ vol_id } // '' ) eq $vol_id;
         my $ts = $s->{ creation_time } // 0;
         my $d  = abs( $ts - $target_ts );
         $best  = $s if $d <= 60 && ( !$best || $d < abs( ( $best->{ creation_time } // 0 ) - $target_ts ) );
@@ -2093,10 +2120,14 @@ sub nimble_volume_restore {
   if ( $snap =~ /^nimble(\d+)$/ ) {
     # Array-imported snapshot: find by creation_time (±60s) using vol_id
     my $target_ts = $1;
-    my $r    = nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$vol_id", undef, $storeid );
+    my $enc_vid = uri_escape($vol_id);
+    my $r = eval { nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$enc_vid", undef, $storeid ) };
+    $r = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) } unless $r;
+    die "Error :: Could not query snapshots for volume \"$volname\"\n" unless $r;
     my $list = nimble_data_as_list( $r->{ data } );
     my $best;
     for my $s ( @$list ) {
+      next unless ( $s->{ vol_id } // '' ) eq $vol_id;
       my $ts = $s->{ creation_time } // 0;
       my $d  = abs( $ts - $target_ts );
       $best  = $s if $d <= 60 && ( !$best || $d < abs( ( $best->{ creation_time } // 0 ) - $target_ts ) );
@@ -2137,15 +2168,25 @@ sub nimble_clone_from_snapshot {
   my $vol = $r->{ data } || $r;
   my $vol_id = $vol->{ id } or die "Error :: Clone did not return volume id.\n";
   my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
-  nimble_post_access_control_record_idempotent( $scfg, $vol_id, $ig_id, $storeid );
-  if ( $scfg->{ volume_collection } ) {
-    my $volcoll_id = nimble_get_volume_collection_id( $scfg, $scfg->{ volume_collection }, $storeid );
-    if ( $volcoll_id ) {
-      nimble_api_call( $scfg, 'PUT', "volumes/$vol_id", { volcoll_id => $volcoll_id }, $storeid );
-      print "Info :: Cloned volume \"$new_volname\" added to volume collection \"$scfg->{ volume_collection }\".\n";
-    } else {
-      warn "Warning :: volume_collection \"$scfg->{ volume_collection }\" not found; clone not added to any collection.\n";
+  my $clone_err;
+  eval {
+    nimble_post_access_control_record_idempotent( $scfg, $vol_id, $ig_id, $storeid );
+    if ( $scfg->{ volume_collection } ) {
+      my $volcoll_id = nimble_get_volume_collection_id( $scfg, $scfg->{ volume_collection }, $storeid );
+      if ( $volcoll_id ) {
+        nimble_api_call( $scfg, 'PUT', "volumes/$vol_id", { volcoll_id => $volcoll_id }, $storeid );
+        print "Info :: Cloned volume \"$new_volname\" added to volume collection \"$scfg->{ volume_collection }\".\n";
+      } else {
+        warn "Warning :: volume_collection \"$scfg->{ volume_collection }\" not found; clone not added to any collection.\n";
+      }
     }
+  };
+  if ( $clone_err = $@ ) {
+    eval {
+      nimble_api_call( $scfg, 'PUT', "volumes/$vol_id", { online => JSON::XS::false }, $storeid );
+      nimble_api_call( $scfg, 'DELETE', "volumes/$vol_id", undef, $storeid );
+    };
+    die $clone_err;
   }
   print "Info :: Cloned volume \"$new_volname\" from \"$source_volname\" snapshot \"$snap_name\".\n";
   return 1;
@@ -2305,14 +2346,17 @@ sub nimble_sync_array_snapshots {
     # Seed from first volume's snapshots and verify every other volume has a match.
     my %seen;
     my @groups;
-    my $seed_snaps = $by_vmid{ $vmid }{ $vm_vols[0] } // [];
+    my ($seed_vol) = grep { exists $by_vmid{$vmid}{$_} } @vm_vols;
+    my $seed_snaps = defined($seed_vol) ? ($by_vmid{$vmid}{$seed_vol} // []) : [];
 
     for my $seed ( @$seed_snaps ) {
       my $ts = $seed->{ creation_time };
       next if $seen{ $ts }++;
       my $ok     = 1;
       my $min_ts = $ts;
-      for my $vname ( @vm_vols[ 1 .. $#vm_vols ] ) {
+      for my $vname ( @vm_vols ) {
+        next if defined($seed_vol) && $vname eq $seed_vol;
+        unless ( exists $by_vmid{$vmid}{$vname} ) { $ok = 0; last; }
         my $best;
         for my $vs ( @{ $by_vmid{ $vmid }{ $vname } // [] } ) {
           my $d = abs( $vs->{ creation_time } - $ts );
@@ -2422,7 +2466,12 @@ sub status {
   if ( time() - $last >= 30 ) {
     eval { nimble_sync_array_snapshots( $scfg, $storeid ) };
     warn "Warning :: Nimble snapshot sync: $@" if $@;
-    if ( open my $fh, '>', $ts_file ) { print $fh time(); close $fh; }
+    my $tmp = "$ts_file.tmp.$$";
+    if ( open my $fh, '>', $tmp ) {
+      print $fh time();
+      close $fh;
+      rename( $tmp, $ts_file );
+    }
   }
 
   return ( $total, $free, $used, 1 );
@@ -2638,7 +2687,43 @@ sub volume_snapshot_rollback {
 
 sub volume_rollback_is_possible {
   my ( $class, $scfg, $storeid, $volname, $snap, $blockers ) = @_;
-  # Nimble supports restore to any snapshot via volumes/:id/actions/restore; no ordering constraint.
+  my $ok = eval {
+    my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
+    die "Error :: Volume \"$volname\" not found\n" unless $vol_id;
+
+    if ( $snap =~ /^nimble(\d+)$/ ) {
+      my $target_ts = $1;
+      my $enc_vid = uri_escape($vol_id);
+      my $r = eval { nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$enc_vid", undef, $storeid ) };
+      $r = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) } unless $r;
+      die "Error :: Could not query snapshots for volume \"$volname\"\n" unless $r;
+      my $list = nimble_data_as_list( $r->{ data } );
+      my $best;
+      for my $s ( @$list ) {
+        next unless ( $s->{ vol_id } // '' ) eq $vol_id;
+        my $ts = $s->{ creation_time } // 0;
+        my $d  = abs( $ts - $target_ts );
+        $best  = $s if $d <= 60 && ( !$best || $d < abs( ( $best->{ creation_time } // 0 ) - $target_ts ) );
+      }
+      die "Error :: Snapshot \"$snap\" not found for volume \"$volname\"\n" unless $best;
+    } else {
+      my $snap_full = nimble_volname( $scfg, $volname, $snap );
+      my $enc  = uri_escape( $snap_full );
+      my $r    = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
+      my $list = nimble_data_as_list( $r->{ data } );
+      my $found = 0;
+      for my $s ( @$list ) {
+        if ( ( $s->{ name } // '' ) eq $snap_full ) { $found = 1; last; }
+      }
+      die "Error :: Snapshot \"$snap\" not found for volume \"$volname\"\n" unless $found;
+    }
+    1;
+  };
+
+  if ( !$ok ) {
+    push @$blockers, $snap if ref($blockers) eq 'ARRAY';
+    return 0;
+  }
   return 1;
 }
 
@@ -2766,18 +2851,21 @@ sub volume_import {
     while ( $remaining > 0 ) {
       my $to_read = $remaining < $chunk ? $remaining : $chunk;
       my $got = read( $fh, $buf, $to_read );
-      last if !$got;
+      die "Error :: volume_import: read failed after " . ( $size_bytes - $remaining ) . " bytes.\n" if !defined $got;
+      last if $got == 0;
       my $w = syswrite( $dev, $buf, $got );
       die "Error :: volume_import: write failed after " . ( $size_bytes - $remaining ) . " bytes.\n" if !defined $w || $w != $got;
       $remaining -= $got;
     }
+    die "Error :: volume_import: unexpected end of input after " . ( $size_bytes - $remaining ) . " of $size_bytes bytes.\n"
+      if $remaining > 0;
     close( $dev );
     $class->deactivate_volume( $storeid, $scfg, $volname, undef, {} );
   };
-  if ( $@ ) {
+  if ( my $err = $@ ) {
     eval { $class->deactivate_volume( $storeid, $scfg, $volname, undef, {} ); };
     eval { $class->nimble_remove_volume( $scfg, $volname, $storeid ); };
-    die $@;
+    die $err;
   }
   return "$storeid:$volname";
 }
@@ -2802,16 +2890,19 @@ sub volume_export {
     while ( $remaining > 0 ) {
       my $to_read = $remaining < $chunk ? $remaining : $chunk;
       my $got = sysread( $dev, $buf, $to_read );
-      last if !$got;
-      print $fh $buf;
+      die "Error :: volume_export: read failed after " . ( $size_bytes - $remaining ) . " bytes.\n" if !defined $got;
+      last if $got == 0;
+      print $fh $buf or die "Error :: volume_export: write to stream failed after " . ( $size_bytes - $remaining ) . " bytes.\n";
       $remaining -= $got;
     }
+    die "Error :: volume_export: unexpected end of device after " . ( $size_bytes - $remaining ) . " of $size_bytes bytes.\n"
+      if $remaining > 0;
     close( $dev );
     $class->deactivate_volume( $storeid, $scfg, $volname, undef, {} );
   };
-  if ( $@ ) {
+  if ( my $err = $@ ) {
     eval { $class->deactivate_volume( $storeid, $scfg, $volname, undef, {} ); };
-    die $@;
+    die $err;
   }
   return 1;
 }
