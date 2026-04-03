@@ -20,7 +20,11 @@ jobs:
       - name: Install Perl test deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libjson-perl
+          sudo apt-get install -y -qq \
+            libjson-perl \
+            libjson-xs-perl \
+            libwww-perl \
+            liburi-perl
 
       - name: Run unit tests
         run: ./tests/run_tests.sh
