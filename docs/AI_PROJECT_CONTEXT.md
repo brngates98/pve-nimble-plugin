@@ -13,7 +13,7 @@
 
 ---
 
-## 2. Current Status (as of v0.0.12)
+## 2. Current Status (as of v0.0.13)
 
 | Area | Status | Notes |
 |------|--------|--------|
@@ -34,8 +34,8 @@
 | **APIVER 12/13 methods** | Implemented | `volume_qemu_snapshot_method` returns `’storage’` (delegates snapshot management to plugin). `qemu_blockdev_options` returns `host_device` driver spec for mapped block node, `undef` if not yet mapped. `volume_snapshot_info` reverse-maps Nimble snapshot names to PVE snapshot keys. `volume_rollback_is_possible` now preflights volume/snapshot resolvability before returning success. `rename_snapshot` stubs with a clean die. |
 | **Debian package** | Present | `libpve-storage-nimble-perl`, debian/*, scripts/build_deb.sh |
 | **CI (GitHub Actions)** | Present | checks (unit tests + plugin syntax in Docker), release (tag → build .deb → gh-release) |
-| **Unit tests** | Present | test_command_validation.t, test_retry_logic.t, test_token_cache.t (+ token_cache_test.pl); no live Nimble tests |
-| **Real-array testing** | Partial | Lab cluster: PVE 9.1.1, real HPE Nimble array, Windows Server + Ubuntu Server VMs. VM creation and snapshots confirmed working. **Snapshot rollback:** array requires **`online=false`** before **`actions/restore`** (not implied by PVE deactivate); implemented via **`nimble_volume_ensure_offline`** / **`nimble_volume_ensure_online`** in **`nimble_volume_restore`** — confirm on array. |
+| **Unit tests** | Present | test_command_validation.t, test_retry_logic.t, test_token_cache.t, test_nimble_plugin_import_export_guards.t (+ token_cache_test.pl); no live Nimble tests |
+| **Real-array testing** | Partial | Lab cluster: PVE 9.1.1, real HPE Nimble array, Windows Server + Ubuntu Server VMs. VM creation and snapshots confirmed working. **Snapshot rollback (v0.0.13+):** array requires **`online=false`** before **`actions/restore`**; plugin ensures offline, restore, then verified bring-online via **`nimble_volume_ensure_offline`** / **`nimble_volume_ensure_online`**. |
 | **debian/watch** | Done | Points at `brngates98/pve-nimble-plugin` |
 
 ---
