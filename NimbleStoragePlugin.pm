@@ -1939,9 +1939,9 @@ sub nimble_create_volume {
   my $serial = $vol->{ serial_number } or die "Error :: No serial_number in create response\n";
   $vol->{ id } or die "Error :: No id in create response\n";
   print "Info :: Volume \"$volname\" created (serial=$serial).\n";
-  my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
   my $create_err;
   eval {
+    my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
     nimble_post_access_control_record_idempotent( $scfg, $vol->{ id }, $ig_id, $storeid );
     if ( $scfg->{ volume_collection } ) {
       my $volcoll_id = nimble_get_volume_collection_id( $scfg, $scfg->{ volume_collection }, $storeid );
@@ -1954,10 +1954,7 @@ sub nimble_create_volume {
     }
   };
   if ( $create_err = $@ ) {
-    eval {
-      nimble_api_call( $scfg, 'PUT', "volumes/$vol->{ id }", { online => JSON::XS::false }, $storeid );
-      nimble_api_call( $scfg, 'DELETE', "volumes/$vol->{ id }", undef, $storeid );
-    };
+    nimble_volume_offline_then_delete_best_effort( $scfg, $vol->{ id }, $storeid, $volname );
     die $create_err;
   }
   return 1;
@@ -1992,15 +1989,78 @@ sub nimble_delete_access_control_records_for_volume_id {
   }
 }
 
-sub nimble_offline_volume_and_delete_snapshots {
+# GET v1/volumes/:id — return the volume object under response data, or undef on failure.
+sub nimble_volume_detail {
   my ( $scfg, $vol_id, $storeid ) = @_;
-  return unless defined $vol_id;
-  my $d = eval { nimble_api_call( $scfg, 'GET', "volumes/$vol_id", undef, $storeid ) };
-  if ( $d && ref( $d->{ data } ) eq 'HASH' && $d->{ data }->{ online } ) {
-    eval {
-      nimble_api_call( $scfg, 'PUT', "volumes/$vol_id", { online => JSON::XS::false }, $storeid );
-    };
+  my $r = eval { nimble_api_call( $scfg, 'GET', "volumes/$vol_id", undef, $storeid ) };
+  return undef unless $r && ref( $r->{ data } ) eq 'HASH';
+  return $r->{ data };
+}
+
+# Ensure the volume is offline on the array (PUT online=false only when GET shows online=true).
+# If PUT fails, GET again and succeed only when online is now false; otherwise die.
+# $label is for error messages (PVE volume name or "volume id …").
+sub nimble_volume_ensure_offline {
+  my ( $scfg, $vol_id, $storeid, $label ) = @_;
+  $label ||= "volume id $vol_id";
+  my $detail = nimble_volume_detail( $scfg, $vol_id, $storeid );
+  my $need_offline = 1;
+  if ($detail) {
+    $need_offline = $detail->{ online } ? 1 : 0;
   }
+  return 1 unless $need_offline;
+  eval { nimble_api_call( $scfg, 'PUT', "volumes/$vol_id", { online => JSON::XS::false }, $storeid ); };
+  if ( my $e = $@ ) {
+    $detail = nimble_volume_detail( $scfg, $vol_id, $storeid );
+    my $now_off = $detail && !$detail->{ online };
+    die "Error :: Could not take \"$label\" offline on the Nimble array: $e" unless $now_off;
+  }
+  return 1;
+}
+
+# PUT online=true with retries. activate_volume / nimble_volume_connection do not set online on the array.
+# After a successful PUT, GET volumes/:id and require online=true (matches ensure_offline asymmetry).
+sub nimble_volume_ensure_online {
+  my ( $scfg, $vol_id, $storeid, $label, $attempts ) = @_;
+  $label    ||= "volume id $vol_id";
+  $attempts //= 3;
+  my $last_err;
+  for my $attempt ( 1 .. $attempts ) {
+    eval { nimble_api_call( $scfg, 'PUT', "volumes/$vol_id", { online => JSON::XS::true }, $storeid ); };
+    if ($@) {
+      $last_err = $@;
+    } else {
+      my $d = nimble_volume_detail( $scfg, $vol_id, $storeid );
+      if ( $d && $d->{ online } ) {
+        return 1;
+      }
+      $last_err = !$d
+        ? "Error :: Nimble API: PUT online succeeded but GET volumes/$vol_id failed or returned no data"
+          . ( $attempt < $attempts ? " (will retry)\n" : "\n" )
+        : "Error :: Nimble API: PUT online succeeded but GET volumes/$vol_id still shows offline\n";
+    }
+    sleep(2) if $attempt < $attempts;
+  }
+  die "Error :: Could not bring \"$label\" back online on the Nimble array: $last_err\n";
+}
+
+# Used when create or clone post-steps fail: take the volume offline on the array (same semantics as
+# nimble_volume_ensure_offline), then DELETE. Callers are fresh POST volumes (no snapshots yet); if an
+# array policy ever created snapshots on new volumes before this runs, use nimble_remove_volume instead.
+# Each step is eval-wrapped so a failed offline attempt does not skip DELETE; errors are ignored here
+# because the caller will die with the original error.
+sub nimble_volume_offline_then_delete_best_effort {
+  my ( $scfg, $vol_id, $storeid, $label ) = @_;
+  return unless defined $vol_id && $vol_id ne '';
+  eval { nimble_volume_ensure_offline( $scfg, $vol_id, $storeid, $label ); };
+  eval { nimble_api_call( $scfg, 'DELETE', "volumes/$vol_id", undef, $storeid ); };
+}
+
+sub nimble_offline_volume_and_delete_snapshots {
+  my ( $scfg, $vol_id, $storeid, $label ) = @_;
+  return unless defined $vol_id;
+  $label ||= "volume id $vol_id";
+  nimble_volume_ensure_offline( $scfg, $vol_id, $storeid, $label );
   nimble_delete_snapshots_for_volume_id( $scfg, $vol_id, $storeid );
 }
 
@@ -2023,7 +2083,7 @@ sub nimble_remove_volume {
   }
 
   nimble_delete_access_control_records_for_volume_id( $scfg, $vol_id, $storeid );
-  nimble_offline_volume_and_delete_snapshots( $scfg, $vol_id, $storeid );
+  nimble_offline_volume_and_delete_snapshots( $scfg, $vol_id, $storeid, $volname );
 
   eval { nimble_api_call( $scfg, 'DELETE', "volumes/$vol_id", undef, $storeid ); 1 }
     or do {
@@ -2031,7 +2091,7 @@ sub nimble_remove_volume {
       if ( $e =~ /\b409\b/ || $e =~ /SM_http_conflict/ || $e =~ /SM_eperm/ ) {
         sleep(2);
         nimble_delete_access_control_records_for_volume_id( $scfg, $vol_id, $storeid );
-        nimble_offline_volume_and_delete_snapshots( $scfg, $vol_id, $storeid );
+        nimble_offline_volume_and_delete_snapshots( $scfg, $vol_id, $storeid, $volname );
         nimble_api_call( $scfg, 'DELETE', "volumes/$vol_id", undef, $storeid );
       }
       else {
@@ -2144,8 +2204,23 @@ sub nimble_volume_restore {
     }
   }
   die "Error :: Snapshot \"$snap\" not found\n" unless $snap_id;
+  # Nimble requires the volume to be offline before restore (SM_vol_not_offline_on_restore).
+  # deactivate_volume only removes the iSCSI ACL; it does not set online=false on the array.
+  nimble_volume_ensure_offline( $scfg, $vol_id, $storeid, $volname );
   # HPE REST API: POST v1/volumes/id/actions/restore with id and base_snap_id (both mandatory)
-  nimble_api_call( $scfg, 'POST', "volumes/$vol_id/actions/restore", { id => $vol_id, base_snap_id => $snap_id }, $storeid );
+  my $restore_err;
+  eval {
+    nimble_api_call( $scfg, 'POST', "volumes/$vol_id/actions/restore", { id => $vol_id, base_snap_id => $snap_id }, $storeid );
+  };
+  $restore_err = $@;
+  eval { nimble_volume_ensure_online( $scfg, $vol_id, $storeid, $volname, 3 ); };
+  my $online_err = $@;
+  if ($restore_err) {
+    warn "Warning :: Also could not bring volume \"$volname\" back online after failed restore: $online_err\n"
+      if $online_err;
+    die $restore_err;
+  }
+  die $online_err if $online_err;
   print "Info :: Volume \"$volname\" restored from snapshot \"$snap\".\n";
   return 1;
 }
@@ -2167,9 +2242,9 @@ sub nimble_clone_from_snapshot {
   $r = nimble_api_call( $scfg, 'POST', 'volumes', $body, $storeid );
   my $vol = $r->{ data } || $r;
   my $vol_id = $vol->{ id } or die "Error :: Clone did not return volume id.\n";
-  my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
   my $clone_err;
   eval {
+    my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
     nimble_post_access_control_record_idempotent( $scfg, $vol_id, $ig_id, $storeid );
     if ( $scfg->{ volume_collection } ) {
       my $volcoll_id = nimble_get_volume_collection_id( $scfg, $scfg->{ volume_collection }, $storeid );
@@ -2182,10 +2257,7 @@ sub nimble_clone_from_snapshot {
     }
   };
   if ( $clone_err = $@ ) {
-    eval {
-      nimble_api_call( $scfg, 'PUT', "volumes/$vol_id", { online => JSON::XS::false }, $storeid );
-      nimble_api_call( $scfg, 'DELETE', "volumes/$vol_id", undef, $storeid );
-    };
+    nimble_volume_offline_then_delete_best_effort( $scfg, $vol_id, $storeid, $new_volname );
     die $clone_err;
   }
   print "Info :: Cloned volume \"$new_volname\" from \"$source_volname\" snapshot \"$snap_name\".\n";

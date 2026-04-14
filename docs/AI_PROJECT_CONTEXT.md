@@ -35,7 +35,7 @@
 | **Debian package** | Present | `libpve-storage-nimble-perl`, debian/*, scripts/build_deb.sh |
 | **CI (GitHub Actions)** | Present | checks (unit tests + plugin syntax in Docker), release (tag → build .deb → gh-release) |
 | **Unit tests** | Present | test_command_validation.t, test_retry_logic.t, test_token_cache.t (+ token_cache_test.pl); no live Nimble tests |
-| **Real-array testing** | Partial | Lab cluster: PVE 9.1.1, real HPE Nimble array, Windows Server + Ubuntu Server VMs. VM creation and snapshots confirmed working. **Snapshot rollback is failing** — under investigation. |
+| **Real-array testing** | Partial | Lab cluster: PVE 9.1.1, real HPE Nimble array, Windows Server + Ubuntu Server VMs. VM creation and snapshots confirmed working. **Snapshot rollback:** array requires **`online=false`** before **`actions/restore`** (not implied by PVE deactivate); implemented via **`nimble_volume_ensure_offline`** / **`nimble_volume_ensure_online`** in **`nimble_volume_restore`** — confirm on array. |
 | **debian/watch** | Done | Points at `brngates98/pve-nimble-plugin` |
 
 ---
@@ -49,7 +49,7 @@ pve-nimble-plugin/
 ├── CONTRIBUTING.md
 ├── LICENSE
 ├── docs/
-│   ├── README.md              # Short pointer to main README
+│   ├── README.md              # Documentation index (guides, API, dev docs)
 │   ├── 00-SETUP-FULLY-PROTECTED-STORAGE.md  # Step-by-step setup guide (zero to protected storage)
 │   ├── AI_PROJECT_CONTEXT.md  # This file (AI/context)
 │   ├── API_VALIDATION.md      # Nimble REST API call validation vs HPE docs
@@ -109,7 +109,7 @@ Use this file when implementing or validating API calls instead of relying only 
 
 ## 6. What Might Need Work (when resuming)
 
-- **Snapshot rollback is failing on real array** — confirmed broken in lab testing (PVE 9.1.1 + real Nimble). The code path is `volume_snapshot_rollback` → `nimble_volume_restore` → `POST volumes/:id/actions/restore`. Needs debug logging and a test to identify whether the failure is in the API call, the volume offline/online sequence, or the response handling. Documentation for the rollback workflow also needs to be written once the fix is confirmed.
+- **Snapshot rollback (array `online` flag)** — Rollback uses `volume_snapshot_rollback` → `nimble_volume_restore` → GET/PUT offline → `POST volumes/:id/actions/restore` → PUT online (retries). Helpers: `nimble_volume_detail`, `nimble_volume_ensure_offline`, `nimble_volume_ensure_online` (see `docs/API_VALIDATION.md` § Snapshot rollback). **Real-array re-test** recommended after deploy.
 - **Nimble API quirks:** Response shapes (e.g. list vs single object, pagination) may need adjustment per Nimble firmware; error codes/messages might need better handling.
 - **Status/capacity:** `status()` uses pools API; field names (`capacity`, `usage`, etc.) may vary by Nimble version—verify and adjust if needed.
 - **Changelog:** `_deb.yml` generates `debian/changelog` from git tags and history. Pushing a tag runs the release workflow and produces the .deb.

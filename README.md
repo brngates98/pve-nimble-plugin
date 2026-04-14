@@ -182,12 +182,15 @@ systemctl restart pvedaemon pveproxy pvestatd
 - Veeam Backup & Replication V13+ compatible (`raw+size` import/export)
 - Token cache under `/etc/pve/priv/nimble/` (cluster-safe)
 
-## Docs
+## Documentation
 
-- [Setup guide: fully protected storage](docs/00-SETUP-FULLY-PROTECTED-STORAGE.md)
-- [Storage features comparison](docs/STORAGE_FEATURES_COMPARISON.md)
-- [Nimble API reference](docs/NIMBLE_API_REFERENCE.md)
-- [Contributor / AI context](docs/AI_PROJECT_CONTEXT.md)
+**Index:** [docs/README.md](docs/README.md) — guides, API docs, and developer material in one place (explains the `00-…` guide name and what each file is for).
+
+| Audience | Start here |
+|----------|------------|
+| **Operators** | This README (install, config, troubleshooting). [Full setup walkthrough](docs/00-SETUP-FULLY-PROTECTED-STORAGE.md). [Feature comparison vs other PVE storage](docs/STORAGE_FEATURES_COMPARISON.md). |
+| **API / integration** | [Nimble REST reference (in-repo)](docs/NIMBLE_API_REFERENCE.md), [plugin ↔ API validation](docs/API_VALIDATION.md). |
+| **Contributors / tooling** | [CONTRIBUTING.md](CONTRIBUTING.md), [AI / project context](docs/AI_PROJECT_CONTEXT.md), [tests](tests/README.md). |
 
 ## License
 
