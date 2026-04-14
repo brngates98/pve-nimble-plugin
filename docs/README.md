@@ -22,7 +22,6 @@ Use this page to choose **guides** vs **API / development** material without hun
 |-----|------------|
 | **[NIMBLE_API_REFERENCE.md](NIMBLE_API_REFERENCE.md)** | In-repo extract of the HPE Nimble REST API (paths, `data` envelope, volumes/snapshots/restore/delete, iSCSI-related notes). |
 | **[API_VALIDATION.md](API_VALIDATION.md)** | How `NimbleStoragePlugin.pm` maps to that API: endpoints used, restore vs clone, snapshot rollback (offline/online on the array), delete paths, token retry. |
-| **[CLAUDE_PROMPT_HPE_API_VALIDATION.md](CLAUDE_PROMPT_HPE_API_VALIDATION.md)** | Copy-paste prompt for Claude to audit plugin logic against official HPE REST docs (and update validation notes). |
 
 Official HPE docs are linked from those files when you need the full reference.
 
