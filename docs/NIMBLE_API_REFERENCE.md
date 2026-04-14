@@ -89,7 +89,7 @@ Other sets in full docs: active_directory_memberships, alarms, application_serve
 
 - **Request (data):** `id` (mandatory; volume to restore), `base_snap_id` (mandatory).
 - **Normal response:** 200.
-- **Prerequisite:** The volume must be **offline** on the array (`online` false). Otherwise the array may return **409** with code **`SM_vol_not_offline_on_restore`**. Proxmox **`deactivate_volume`** only removes host iSCSI mapping and the Nimble **access_control_record**; it does **not** set **`online=false`**. The plugin therefore uses **`nimble_volume_ensure_offline`** (GET `volumes/:id`, then PUT `online=false` if needed, with a GET verify if PUT fails) before restore, and **`nimble_volume_ensure_online`** (PUT `online=true` with retries) after a successful restore so **`activate_volume`** can attach again (**`activate_volume`** does not set **`online`** on the array).
+- **Prerequisite:** The volume must be **offline** on the array (`online` false). Otherwise the array may return **409** with code **`SM_vol_not_offline_on_restore`**. PUT **`online=false`** can also return **409** / **`SM_vol_has_connections`** while any initiator still has an active iSCSI session to the volume. Before **`nimble_volume_ensure_offline`**, the plugin runs **`nimble_volume_prepare_restore_disconnect`**: **`unmap_volume`**, **`nimble_iscsi_logout_volume_local`** (per-portal **`iscsiadm --logout`** plus session fallback), and **DELETE all `access_control_records`** for the volume (every initiator group, so multi-initiator peers lose ACL too). Then **`nimble_volume_ensure_online`** after restore; the next **`activate_volume`** re-posts ACL and maps again.
 
 **Read — GET v1/volumes**, GET v1/volumes?name=...  
 **Update — PUT v1/volumes/id** (e.g. `size`, `name`)  

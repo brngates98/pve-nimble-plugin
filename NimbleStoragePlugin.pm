@@ -1485,6 +1485,45 @@ sub nimble_iscsi_login_target_on_portals {
   }
 }
 
+# Best-effort logout for this volume's per-target IQN (mirrors portal loop used for login).
+# Nimble returns 409 SM_vol_has_connections if PUT online=false while initiators are still connected.
+sub nimble_iscsi_logout_volume_local {
+  my ( $class, $scfg, $volname, $storeid ) = @_;
+  my $volume = $class->nimble_get_volume_info( $scfg, $volname, $storeid );
+  return 0 unless $volume && length( $volume->{ target_name } // '' );
+  my $iqn = nimble_untaint_iscsiadm_scalar( $volume->{ target_name } );
+  return 0 unless length($iqn) && $iqn =~ m/^iqn\./i;
+  my $iscsiadm = nimble_iscsiadm_path();
+  return 0 unless -x $iscsiadm;
+  for my $portal ( nimble_iscsi_node_portals_for_target($iqn) ) {
+    my $p = nimble_untaint_iscsiadm_scalar($portal);
+    next unless length $p;
+    eval {
+      run_command(
+        [ $iscsiadm, '-m', 'node', '-T', $iqn, '-p', $p, '--logout' ],
+        timeout => 45,
+        quiet   => 1
+      );
+    };
+  }
+  if ( nimble_iscsi_target_in_sessions( $iqn, 0 ) ) {
+    eval {
+      run_command( [ $iscsiadm, '-m', 'session', '-u', '-T', $iqn ], timeout => 45, quiet => 1 );
+    };
+  }
+  return 1;
+}
+
+# Before PUT volumes/:id online=false (restore / strict offline): drop host mappings and array ACLs so
+# no initiator has an active path (avoids SM_vol_has_connections). Re-ACL happens on next activate_volume.
+sub nimble_volume_prepare_restore_disconnect {
+  my ( $class, $scfg, $vol_id, $storeid, $volname ) = @_;
+  return unless defined $vol_id && $vol_id ne '' && length($volname);
+  eval { $class->unmap_volume( $storeid, $scfg, $volname, undef ); };
+  eval { nimble_iscsi_logout_volume_local( $class, $scfg, $volname, $storeid ); };
+  nimble_delete_access_control_records_for_volume_id( $scfg, $vol_id, $storeid );
+}
+
 ### Storage activate only: sendtargets (quiet) + automatic startup + global login (can exit 15 if some portals already logged in — harmless).
 sub run_iscsi_discovery_and_login {
   my ( $storeid, $scfg, $ips_ref ) = @_;
@@ -2328,7 +2367,10 @@ sub nimble_volume_restore {
   }
   die "Error :: Snapshot \"$snap\" not found\n" unless $snap_id;
   # Nimble requires the volume to be offline before restore (SM_vol_not_offline_on_restore).
-  # deactivate_volume only removes the iSCSI ACL; it does not set online=false on the array.
+  # PUT online=false fails with SM_vol_has_connections while any initiator still has a session.
+  # Unmap + iscsi logout + remove all access_control_records (this node and multi_initiator peers),
+  # then take the volume offline on the array. Next activate_volume re-posts ACL and maps again.
+  nimble_volume_prepare_restore_disconnect( $class, $scfg, $vol_id, $storeid, $volname );
   nimble_volume_ensure_offline( $scfg, $vol_id, $storeid, $volname );
   # HPE REST API: POST v1/volumes/id/actions/restore with id and base_snap_id (both mandatory)
   my $restore_err;
