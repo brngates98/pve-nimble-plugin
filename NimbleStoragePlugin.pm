@@ -2174,23 +2174,51 @@ sub nimble_volume_detail {
 }
 
 # Ensure the volume is offline on the array (PUT online=false only when GET shows online=true).
-# If PUT fails, GET again and succeed only when online is now false; otherwise die.
+# If PUT fails with 409 / SM_vol_has_connections, Nimble often still has another LUN in the same cgroup
+# connected (error text cites sibling vol=…); local disconnect on this volume is not enough. Retry with
+# PUT { online: false, force: true } (HPE volume.force — forcibly offline).
 # $label is for error messages (PVE volume name or "volume id …").
 sub nimble_volume_ensure_offline {
   my ( $scfg, $vol_id, $storeid, $label ) = @_;
   $label ||= "volume id $vol_id";
   my $detail = nimble_volume_detail( $scfg, $vol_id, $storeid );
-  my $need_offline = 1;
-  if ($detail) {
-    $need_offline = $detail->{ online } ? 1 : 0;
+  return 1 unless !$detail || $detail->{ online };
+
+  my $is_offline = sub {
+    my $d = nimble_volume_detail( $scfg, $vol_id, $storeid );
+    return $d && !$d->{ online };
+  };
+
+  my $try_force_offline = sub {
+    eval {
+      nimble_api_call(
+        $scfg, 'PUT', "volumes/$vol_id",
+        { online => JSON::XS::false, force => JSON::XS::true },
+        $storeid
+      );
+      1;
+    };
+    return 1 if $is_offline->();
+    my $ef = $@;
+    die "Error :: Could not take \"$label\" offline on the Nimble array: $ef" if $ef;
+    die "Error :: Could not take \"$label\" offline on the Nimble array (still online after forced PUT)\n";
+  };
+
+  eval { nimble_api_call( $scfg, 'PUT', "volumes/$vol_id", { online => JSON::XS::false }, $storeid ); 1 };
+  my $e1 = $@;
+  return 1 if $is_offline->();
+
+  if ($e1) {
+    return 1 if $is_offline->();
+    if ( $e1 =~ /SM_vol_has_connections|\b409\b|SM_http_conflict/i ) {
+      $try_force_offline->();
+      return 1;
+    }
+    die "Error :: Could not take \"$label\" offline on the Nimble array: $e1";
   }
-  return 1 unless $need_offline;
-  eval { nimble_api_call( $scfg, 'PUT', "volumes/$vol_id", { online => JSON::XS::false }, $storeid ); };
-  if ( my $e = $@ ) {
-    $detail = nimble_volume_detail( $scfg, $vol_id, $storeid );
-    my $now_off = $detail && !$detail->{ online };
-    die "Error :: Could not take \"$label\" offline on the Nimble array: $e" unless $now_off;
-  }
+
+  # HTTP success but array still shows online (unusual): forced offline.
+  $try_force_offline->();
   return 1;
 }
 
