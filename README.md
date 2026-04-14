@@ -50,10 +50,10 @@ pvesm add nimble <storage_id> \
   --address https://<nimble_ip_or_fqdn> \
   --username <user> \
   --password '<password>' \
-  --content images
+  --content images,rootdir
 ```
 
-Then in the Proxmox UI: **Datacenter → Storage** — your Nimble storage appears. Create a VM and add a disk from this storage.
+Use `images` only if you do not want LXC root disks on this store. Then in the Proxmox UI: **Datacenter → Storage** — your Nimble storage appears. Create a VM or container with storage on this pool.
 
 ## Configuration Options
 
@@ -78,10 +78,46 @@ Then in the Proxmox UI: **Datacenter → Storage** — your Nimble storage appea
 nimble: my-nimble
   address https://nimble.example.com
   username admin
-  content images
+  content images,rootdir
   # initiator_group my-pve-group   # optional
   # volume_collection pve-vols      # optional
 ```
+
+## Feature comparison (vs other Proxmox storage)
+
+How the **Nimble plugin** compares to common Proxmox storage types (NFS, LVM / LVM-thin, kernel iSCSI, Ceph RBD). ✅ = native / built-in, ⚠️ = depends on extra layer or setup, ❌ = not supported.
+
+| Feature | Nimble plugin | NFS | LVM / LVM-thin | iSCSI (kernel) | Ceph RBD |
+|--------|----------------|-----|----------------|----------------|----------|
+| **Snapshots** | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ |
+| **VM state snapshots (vmstate)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Clones** | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ |
+| **Thin provisioning** | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ |
+| **Block-level performance** | ✅ | ❌ | ✅ | ✅ | ✅ |
+| **Shared storage** | ✅ | ✅ | ⚠️ | ✅ | ✅ |
+| **Automatic volume management** | ✅ | ❌ | ❌ | ❌ | ✅ |
+| **Multi-path I/O** | ✅ | ❌ | ⚠️ | ⚠️ | ❌ |
+| **Container storage (rootdir)** | ✅ | ✅ | ✅ | ❌ | ✅ |
+| **Backup storage (vzdump)** | ❌ | ✅ | ❌ | ❌ | ❌ |
+| **ISO storage** | ❌ | ✅ | ❌ | ❌ | ❌ |
+| **Raw image format** | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+### Content types (what each storage can hold)
+
+| Content type | Nimble plugin | NFS | LVM / LVM-thin | iSCSI (kernel) | Ceph RBD |
+|-------------|----------------|-----|----------------|----------------|----------|
+| **VM disks** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **CT volumes (rootdir)** | ✅ | ✅ | ✅ | ❌¹ | ✅ |
+| **Backups (vzdump)** | ❌ | ✅ | ❌ | ❌ | ❌ |
+| **ISO images** | ❌ | ✅ | ❌ | ❌ | ❌ |
+| **CT templates (vztmpl)** | ❌ | ✅ | ❌ | ❌ | ❌ |
+| **Snippets** | ❌ | ✅ | ❌ | ❌ | ❌ |
+
+¹ *Plain* PVE iSCSI storage does not expose `rootdir`; use LVM (or similar) on top of the LUN, or a plugin like this one that manages volumes and presents block devices.
+
+Per-storage narratives (when to pick NFS vs RBD vs Nimble, and so on) live in **[docs/STORAGE_FEATURES_COMPARISON.md](docs/STORAGE_FEATURES_COMPARISON.md)**.
+
+**Contributors:** Keep the two tables above in sync with the same tables in `docs/STORAGE_FEATURES_COMPARISON.md` when you change either copy (see [CONTRIBUTING.md](CONTRIBUTING.md#documentation)).
 
 ## Multipath (optional)
 
@@ -188,7 +224,7 @@ systemctl restart pvedaemon pveproxy pvestatd
 
 | Audience | Start here |
 |----------|------------|
-| **Operators** | This README (install, config, troubleshooting). [Full setup walkthrough](docs/00-SETUP-FULLY-PROTECTED-STORAGE.md). [Feature comparison vs other PVE storage](docs/STORAGE_FEATURES_COMPARISON.md). |
+| **Operators** | This README (install, config, feature comparison tables, troubleshooting). [Full setup walkthrough](docs/00-SETUP-FULLY-PROTECTED-STORAGE.md). [Extended feature comparison + storage-type guide](docs/STORAGE_FEATURES_COMPARISON.md). |
 | **API / integration** | [Nimble REST reference (in-repo)](docs/NIMBLE_API_REFERENCE.md), [plugin ↔ API validation](docs/API_VALIDATION.md). |
 | **Contributors / tooling** | [CONTRIBUTING.md](CONTRIBUTING.md), [AI / project context](docs/AI_PROJECT_CONTEXT.md), [tests](tests/README.md). |
 

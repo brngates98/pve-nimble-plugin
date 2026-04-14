@@ -7,7 +7,7 @@
 ## 1. What This Project Is
 
 - **Name:** Proxmox VE plugin for **HPE Nimble Storage** over **iSCSI**.
-- **Role:** Custom PVE storage backend. Lets Proxmox create, delete, resize, snapshot, and present Nimble volumes as VM disks (raw, iSCSI, optional multipath).
+- **Role:** Custom PVE storage backend. Lets Proxmox create, delete, resize, snapshot, and present Nimble volumes as VM disks and LXC root volumes (`rootdir`, raw block, same `vm-<id>-disk-*` naming as VMs).
 - **Language:** Perl. Single main module: `NimbleStoragePlugin.pm`, implementing the PVE storage plugin API.
 - **Origin:** Cloned structure and patterns from **pve-purestorage-plugin** (Pure Storage array plugin). Same overall flow: REST API to array, token auth, volume CRUD, initiator/ACL mapping, multipath, Proxmox storage interface.
 
@@ -18,6 +18,7 @@
 | Area | Status | Notes |
 |------|--------|--------|
 | **Core plugin** | Implemented | Create/delete/resize/rename volumes, list, status, activate/deactivate, map/unmap |
+| **LXC (`rootdir`)** | Implemented | Added as **`rootdir`** in **`plugindata` → `content`** alongside **`images`** and **`none`**; raw block only (no `subvol` format). Same code paths as VM disks; real-array CT smoke test recommended. |
 | **list_images / detach** | Implemented | Honors PVE’s `vollist` and `vmid` like RBD: explicit volids (e.g. `unusedN:` in qemu config) are listed for reattach; without `vollist`, results filter by `vmid`. |
 | **list_images caching** | Implemented | Volume list cached in `$cache->{nimble}{$storeid}` during a single PVE operation to avoid redundant REST calls. Returns a shallow copy to prevent cache mutation. |
 | **ACL on activate (initiator_group set)** | Fixed | `nimble_ensure_volume_acl_for_current_node` used to return immediately when `initiator_group` was set, so **no** access_control_record was created; LUN never presented → timeout waiting for disk. Now ACL is ensured for the configured group as well as for auto `pve-<nodename>`. |
@@ -30,7 +31,7 @@
 | **Device discovery** | Implemented | **3-tier fallback:** `/dev/disk/by-id/wwn-0x<api_serial>`, then any `by-id` name containing the API `serial_number` (needed for multipath dm — often no sysfs `device/serial`), then sysfs serial match. |
 | **Auto iSCSI discovery** | Implemented | **Default on** for **`auto_iscsi_discovery`** on **activate_storage** (`no`/`0` disables). **`map_volume`** mirrors manual PVE iSCSI (portal + per-volume IQN + LUN 0): portal list = **GET subnets + GET subnets/:id per subnet** (authoritative), then **network_interfaces** fallback, optional **`iscsi_discovery_ips`**, then **tcp session IPs from `iscsiadm`** (last resort); sendtargets + per-target login; **`node.startup=automatic`**; **`iscsiadm -m session --rescan`**; long wait + periodic SCSI rescan; device by **serial**; `multipath -v2`. |
 | **Volume import/export** | Implemented | `raw+size` for backup/restore (e.g. Veeam V13+); size rounded up to full MB for odd-sector compatibility |
-| **Array snapshot sync** | Implemented | `nimble_sync_array_snapshots` runs from `status()` (throttled to once per 30s per storage). Imports array-created snapshots into PVE VM configs so they appear in the Proxmox UI snapshot list. Array snaps get `nimble<epoch>` PVE keys. |
+| **Array snapshot sync** | Implemented | `nimble_sync_array_snapshots` runs from `status()` (throttled to once per 30s per storage). Imports array-created snapshots into PVE VM configs so they appear in the Proxmox UI snapshot list. Array snaps get `nimble<epoch>` PVE keys. **QEMU VMs only;** CT root volumes match the `vm-*` name filter but are skipped (no `LXCConfig` sync—`PVE::QemuConfig` path no-ops in `eval` for non-VM IDs). |
 | **APIVER 12/13 methods** | Implemented | `volume_qemu_snapshot_method` returns `’storage’` (delegates snapshot management to plugin). `qemu_blockdev_options` returns `host_device` driver spec for mapped block node, `undef` if not yet mapped. `volume_snapshot_info` reverse-maps Nimble snapshot names to PVE snapshot keys. `volume_rollback_is_possible` now preflights volume/snapshot resolvability before returning success. `rename_snapshot` stubs with a clean die. |
 | **Debian package** | Present | `libpve-storage-nimble-perl`, debian/*, scripts/build_deb.sh |
 | **CI (GitHub Actions)** | Present | checks (unit tests + plugin syntax in Docker), release (tag → build .deb → gh-release) |
@@ -70,7 +71,7 @@ pve-nimble-plugin/
 
 ## 4. How the Plugin Fits Together
 
-- **Config (storage.cfg):** `address`, `username` (legacy `nimble_user` is merged into `username` in `check_config`), **`password`** (stored **in `storage.cfg`** like TrueNAS **`api_key`** / Pure **`token`**—cluster-replicated), optional `initiator_group`, optional `vnprefix`, `pool_name`, optional **`volume_collection`**, `check_ssl`, `token_ttl`, `debug`, optional **`auto_iscsi_discovery`** (default **on**; **`no`**/**`0`** disables activate-time discovery), optional **`storeid`** (auto-set in **`check_config`**). **`plugindata → sensitive-properties`**: **`{}`** (empty). **`nimble_api_credentials`** uses **`$scfg->{password}`** first, then priv **`.pw`** files. **`on_add_hook` / `on_update_hook` / `on_update_hook_full`** mirror password changes into **`priv/storage/<storeid>.pw`** (and legacy paths) for compatibility. Do not add undeclared keys to **`properties()`** or PVE fails SectionConfig validation.
+- **Config (storage.cfg):** `address`, `username` (legacy `nimble_user` is merged into `username` in `check_config`), **`password`** (stored **in `storage.cfg`** like TrueNAS **`api_key`** / Pure **`token`**—cluster-replicated), optional `initiator_group`, optional `vnprefix`, `pool_name`, optional **`volume_collection`**, `check_ssl`, `token_ttl`, `debug`, optional **`auto_iscsi_discovery`** (default **on**; **`no`**/**`0`** disables activate-time discovery), optional **`storeid`** (auto-set in **`check_config`**), optional **`content`** (plugin defaults: **`images`**, **`rootdir`**, **`none`**; narrow with e.g. `content images` if you do not want CT roots on that store). **`plugindata → sensitive-properties`**: **`{}`** (empty). **`nimble_api_credentials`** uses **`$scfg->{password}`** first, then priv **`.pw`** files. **`on_add_hook` / `on_update_hook` / `on_update_hook_full`** mirror password changes into **`priv/storage/<storeid>.pw`** (and legacy paths) for compatibility. Do not add undeclared keys to **`properties()`** or PVE fails SectionConfig validation.
 - **Nimble API base:** `https://<address>:5392/v1/`. Auth: POST `tokens` with username/password → use `session_token` as `X-Auth-Token` on later requests. List responses may use `data: { items: [ ... ] }`; `nimble_data_as_list` unwraps `items`. Discovery portals: GET **`subnets`** then **GET `subnets/:id` for each row** (merge), collect **`discovery_ip`** (type `data` preferred); fallbacks: **`network_interfaces`** + **`network_interfaces/:id`**, optional **`iscsi_discovery_ips`**, then **`iscsiadm` tcp session IPs** last. Pure plugin differs: API **connections** + no `iscsiadm` in `map_volume` ([pve-purestorage-plugin](https://github.com/kolesa-team/pve-purestorage-plugin)).
 - **Volume naming:** `nimble_volname(scfg, volname, [snapname])` = optional prefix + volname (e.g. `vm-100-disk-0`) + optional `.snap-<name>` for snapshots.
 - **Key API calls:** volumes (GET/POST/PUT/DELETE), access_control_records (POST/DELETE), snapshots (POST create, GET by name or full list, DELETE), volume restore (POST with base_snap_id), **subnets** / **subnets/:id**, **network_interfaces** / **network_interfaces/:id** (discovery IP fallbacks). **Pure-aligned lifecycle:** `nimble_volume_connection($mode)` mirrors `purestorage_volume_connection` (connect before map, disconnect after unmap). **`nimble_remove_volume`** = Pure’s `purestorage_remove_volume` order (local DM cleanup → revoke all ACLs for volume → Nimble offline/snapshots → DELETE). **`nimble_resolve_initiator_group_id_no_create`** supports disconnect without creating groups. **`filesystem_path`** optional 4th arg `$storeid` + **`nimble_effective_storeid`** for API login; **`on_update_hook_full`** mirrors **`password`** to priv files (PVE signature: **`$opts`**, **`$delete`**, **`$sensitive`**).
@@ -136,7 +137,7 @@ See `.cursor/rules/releases.mdc` for the full release rule.
 - **Install (manual):** Copy `NimbleStoragePlugin.pm` to `/usr/share/perl5/PVE/Storage/Custom/` on a PVE node and restart pvedaemon/pveproxy. Or install the built .deb.
 - **Scripted install:** `scripts/install-pve-nimble-plugin.sh` — single-node or cluster-wide (all nodes via SSH), from APT repo or a specific GitHub release .deb; supports `--dry-run`, `--yes`, `--all-nodes` (same pattern as Blockbridge’s get script).
 - **Add storage (example):**  
-  `pvesm add nimble <id> --address https://<nimble> --username <u> --password <p> --initiator_group <name> --content images`
+  `pvesm add nimble <id> --address https://<nimble> --username <u> --password <p> --initiator_group <name> --content images,rootdir`
 
 ---
 
@@ -148,4 +149,4 @@ See `.cursor/rules/releases.mdc` for the full release rule.
 
 ---
 
-*Last updated: v0.0.12 — multipath alias management, APIVER 12/13 methods, list_images caching, array snapshot sync; real-array test results (PVE 9.1.1). Update this file when you make significant changes or when status/next steps change.*
+*Last updated: rootdir (LXC) support in plugindata; doc refresh. Prior: v0.0.12+ — multipath alias management, APIVER 12/13 methods, list_images caching, array snapshot sync; real-array test results (PVE 9.1.1). Update this file when you make significant changes or when status/next steps change.*

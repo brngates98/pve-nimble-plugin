@@ -85,7 +85,7 @@ sub type {
 
 sub plugindata {
   return {
-    content => [ { images => 1, none => 1 }, { images => 1 } ],
+    content => [ { images => 1, rootdir => 1, none => 1 }, { images => 1, rootdir => 1 } ],
     format  => [ { raw    => 1 },            "raw" ],
     # Like TrueNAS (api_key) / Pure (token): `password` is a normal option stored in storage.cfg (pmxcfs).
     # Session tokens still cache under /etc/pve/priv/nimble/. Legacy: priv .pw files and hooks mirror on update.
@@ -2346,7 +2346,8 @@ sub alloc_image {
   my ( $class, $storeid, $scfg, $vmid, $fmt, $name, $size ) = @_;
   die "Error :: Unsupported format ($fmt).\n" if $fmt ne 'raw';
   if ( defined( $name ) ) {
-    die "Error :: Illegal name \"$name\" - should be vm-$vmid-(disk-*|cloudinit|state-*).\n" if $name !~ m/^vm-$vmid-(disk-|cloudinit|state-)/;
+    die "Error :: Illegal name \"$name\" - should be vm-$vmid-disk-* (or cloudinit / state-* for QEMU VM disks).\n"
+      if $name !~ m/^vm-$vmid-(disk-|cloudinit|state-)/;
   } else {
     $name = $class->find_free_diskname( $storeid, $scfg, $vmid );
   }
@@ -2412,6 +2413,7 @@ sub nimble_sync_array_snapshots {
   return unless %by_vmid;
 
   for my $vmid ( sort keys %by_vmid ) {
+    # Skips CT IDs: PVE::QemuConfig->load_config dies for LXC containers; snapshot sync is QEMU-only.
     my @vm_vols = grep { $vol_map{ $_ }{ vmid } eq $vmid } keys %vol_map;
 
     # Find consistent snapshot groups: all volumes for this VM covered within 60s.
