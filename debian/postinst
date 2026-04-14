@@ -4,6 +4,10 @@ set -e
 # After fresh install or dpkg/apt upgrade, Proxmox must reload the custom storage plugin
 # (Perl loads NimbleStoragePlugin.pm at process start). Use deb-systemd-invoke when present
 # (Debian maintainer-script integration with systemd).
+#
+# Same units as kolesa-team/pve-purestorage-plugin debian/postinst (try-restart order), except we omit
+# pve-cluster — it reloads corosync/quorum and can block apt for a long time on cluster nodes.
+# Ref: https://github.com/kolesa-team/pve-purestorage-plugin/blob/main/debian/postinst
 restart_pve_stack() {
   local cmd
   if command -v deb-systemd-invoke >/dev/null 2>&1; then
@@ -11,8 +15,6 @@ restart_pve_stack() {
   else
     cmd=(systemctl)
   fi
-  # Typical dependency order: cluster → API/stat → UI/scheduler
-  "${cmd[@]}" try-restart pve-cluster.service 2>/dev/null || true
   "${cmd[@]}" try-restart pvedaemon.service 2>/dev/null || true
   "${cmd[@]}" try-restart pvestatd.service 2>/dev/null || true
   "${cmd[@]}" try-restart pveproxy.service 2>/dev/null || true
