@@ -968,6 +968,129 @@ sub nimble_data_as_list {
   return [];
 }
 
+# GET v1/pools list rows may omit capacity (summary-only). GET v1/pools/:id returns full pool (SDK: capacity, usage, free_space in bytes).
+
+# storage.cfg pool_name may match pool name, search_name, or full_name; GET arrays rows often only have pool_id / pool_name.
+sub nimble_pool_identifier_matches_want {
+  my ( $row, $want ) = @_;
+  return 1 if !defined $want || $want eq '';
+  return 0 unless $row && ref($row) eq 'HASH';
+  return 1
+    if ( $row->{ name } // '' ) eq $want
+    || ( $row->{ search_name } // '' ) eq $want
+    || ( $row->{ full_name } // '' ) eq $want
+    # pool_name: on pool rows the pool's own name is `name`; `pool_name` appears on array/volume-style rows — included so one helper serves both.
+    || ( $row->{ pool_name } // '' ) eq $want;
+  return 0;
+}
+
+# Include an array in status fallback when pool_name is set: match identifier on the array row, or link via pool_id / pool_name to pools in @use.
+sub nimble_array_matches_status_pools {
+  my ( $a, $want, $use_pools ) = @_;
+  return 1 if !defined $want || $want eq '';
+  return 0 unless ref($a) eq 'HASH';
+  return 1 if nimble_pool_identifier_matches_want( $a, $want );
+  return 0 unless ref($use_pools) eq 'ARRAY' && @$use_pools;
+  my $apid = $a->{ pool_id } // '';
+  if ( $apid ne '' ) {
+    for my $p ( @$use_pools ) {
+      next unless ref($p) eq 'HASH';
+      my $pid = $p->{ id } // '';
+      return 1 if $pid ne '' && $apid eq $pid;
+    }
+  }
+  my $pn = $a->{ pool_name } // '';
+  if ( $pn ne '' ) {
+    for my $p ( @$use_pools ) {
+      next unless ref($p) eq 'HASH';
+      return 1 if $pn eq ( $p->{ name } // '' )
+        || $pn eq ( $p->{ search_name } // '' )
+        || $pn eq ( $p->{ full_name } // '' );
+    }
+  }
+  return 0;
+}
+
+sub nimble_pool_usage_bytes {
+  my ($p) = @_;
+  return 0 unless $p && ref($p) eq 'HASH';
+  my $u = $p->{usage};
+  if ( ref($u) eq 'HASH' ) {
+    return 0 + ( $u->{ compressed_usage } // $u->{ uncompressed_usage } // 0 );
+  }
+  return 0 + ( $u // 0 );
+}
+
+sub nimble_pool_capacity_bytes {
+  my ($p) = @_;
+  return 0 unless $p && ref($p) eq 'HASH';
+  my $c = 0 + ( $p->{ capacity } // 0 );
+  return $c if $c > 0;
+  my $free = 0 + ( $p->{ free_space } // 0 );
+  my $used = nimble_pool_usage_bytes($p);
+  my $sum = $free + $used;
+  # Known limitation: if API omits capacity and only uncompressed_usage is present, free_space (physical) + uncompressed (logical) can overstate physical total vs compression.
+  return $sum if $sum > 0;
+  return 0;
+}
+
+sub nimble_pool_used_bytes {
+  my ($p) = @_;
+  return 0 unless $p && ref($p) eq 'HASH';
+  if ( $p->{ usage_valid } ) {
+    my $u = nimble_pool_usage_bytes($p);
+    return $u if $u > 0;
+    return 0;    # honour API: empty pool with valid zero usage (do not derive from cap - free_space)
+  }
+  my $cap = nimble_pool_capacity_bytes($p);
+  my $free = 0 + ( $p->{ free_space } // 0 );
+  if ( $cap > 0 && $free >= 0 && $free <= $cap ) {
+    return $cap - $free;
+  }
+  # usage_valid false and cap/free_space path unavailable
+  return nimble_pool_usage_bytes($p);
+}
+
+sub nimble_hydrate_pool_for_capacity {
+  my ( $scfg, $storeid, $p ) = @_;
+  return unless ref($p) eq 'HASH' && $p->{ id };
+  return if nimble_pool_capacity_bytes($p) > 0;
+  my $r = eval { nimble_api_call( $scfg, 'GET', "pools/$p->{id}", undef, $storeid ) };
+  return unless $r && ref( $r->{ data } ) eq 'HASH';
+  %$p = ( %$p, %{ $r->{ data } } );
+}
+
+# When pool list/detail still yield no capacity (some firmware/API paths), sum array usable capacity for the group (optional pool_name filter vs @use_pools).
+sub nimble_status_arrays_fallback_bytes {
+  my ( $scfg, $storeid, $pool_name, $use_pools ) = @_;
+  my $r = eval { nimble_api_call( $scfg, 'GET', 'arrays', undef, $storeid ) };
+  return ( 0, 0 ) unless $r;
+  my $list = nimble_data_as_list( $r->{ data } );
+  my ( $total, $used ) = ( 0, 0 );
+  for my $a ( @$list ) {
+    next unless ref($a) eq 'HASH';
+    if ( defined $pool_name && $pool_name ne '' ) {
+      next unless nimble_array_matches_status_pools( $a, $pool_name, $use_pools );
+    }
+    my $ua = 0 + ( $a->{ usable_capacity_bytes } // 0 );
+    $total += $ua;
+    next if $ua <= 0;
+    my $avail = 0 + ( $a->{ available_bytes } // 0 );
+    my $u = 0;
+    if ( $a->{ usage_valid } ) {
+      $u = nimble_pool_usage_bytes($a);
+    }
+    if ( $u <= 0 && ( ( $a->{ vol_usage_bytes } // 0 ) + ( $a->{ snap_usage_bytes } // 0 ) ) > 0 ) {
+      $u = 0 + ( $a->{ vol_usage_bytes } // 0 ) + ( $a->{ snap_usage_bytes } // 0 );
+    }
+    if ( $u <= 0 && $avail >= 0 && $avail <= $ua ) {
+      $u = $ua - $avail;
+    }
+    $used += $u if $u > 0;
+  }
+  return ( $total, $used );
+}
+
 # GET subnets/:id returns full subnet (type, discovery_ip, etc.). Always merge into list rows so discovery
 # uses the same fields the API documents—no reliance on list view being summary or full.
 sub nimble_fetch_subnet_by_id {
@@ -2509,25 +2632,42 @@ sub status {
   eval {
     my $r    = nimble_api_call( $scfg, 'GET', 'pools', undef, $storeid );
     my $list = nimble_data_as_list( $r->{ data } );
-    for my $p ( @$list ) {
-      $total += ( $p->{ capacity } || 0 );
-      if ( $p->{ usage_valid } && defined $p->{ usage } ) {
-        # API: usage is NsBytes (number); some versions return nested { compressed_usage, uncompressed_usage }
-        my $u = $p->{ usage };
-        $used += ( ref($u) eq 'HASH' )
-          ? ( $u->{ compressed_usage } || $u->{ uncompressed_usage } || 0 )
-          : ( 0 + $u );
+    my @pools = grep { ref($_) eq 'HASH' } @$list;
+    for my $p (@pools) {
+      nimble_hydrate_pool_for_capacity( $scfg, $storeid, $p );
+    }
+    my $want = $scfg->{ pool_name };
+    my @use = @pools;
+    if ( defined $want && $want ne '' ) {
+      my @m = grep { nimble_pool_identifier_matches_want( $_, $want ) } @pools;
+      if (@m) {
+        @use = @m;
+      }
+      else {
+        warn "Warning :: Nimble storage \"$storeid\" status: pool_name \"$want\" not found in pools list; using all pools.\n";
       }
     }
+    for my $p (@use) {
+      $total += nimble_pool_capacity_bytes($p);
+      $used  += nimble_pool_used_bytes($p);
+    }
+    if ( $total <= 0 ) {
+      my ( $at, $au ) = nimble_status_arrays_fallback_bytes( $scfg, $storeid, $scfg->{ pool_name }, \@use );
+      if ( $at > 0 ) {
+        $total = $at;
+        # Always take fallback usage (may be 0); avoids leaving stale pool-path $used when $total was 0 before fallback.
+        $used = $au;
+      }
+    }
+    $used = $total if $used > $total;
     1;
   };
   if ( my $err = $@ ) {
     chomp($err);
     warn "Warning :: Nimble storage \"$storeid\" status (pools API): $err\n";
-    # Avoid GUI "unknown" from a hard die; report inactive with minimal placeholder totals.
-    return ( 1, 0, 0, 0 );
+    # Inactive storage: active=0; totals zero (PVE treats inactive without requiring a fake 1-byte total).
+    return ( 0, 0, 0, 0 );
   }
-  $total = 1 if $total <= 0;
   my $free = $total - $used;
   $free = 0 if $free < 0;
 

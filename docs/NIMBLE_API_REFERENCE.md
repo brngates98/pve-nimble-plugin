@@ -125,6 +125,8 @@ Other sets in full docs: active_directory_memberships, alarms, application_serve
 **Read — GET v1/pools**
 
 - **Response (data):** Array of pool objects. Key fields: `id`, `name`, **`capacity`** (bytes), **`usage`** (bytes; NsBytes), **`usage_valid`**, `free_space`, `savings_*`, `snap_count`, `vol_count`, etc.
+- **List vs detail:** List responses may omit or zero **`capacity`** (summary rows). Use **GET v1/pools/:id** for full fields when **`capacity`** / **`free_space`** are missing; the plugin hydrates each pool in **`status()`** when needed. If pools still yield no totals, **`status()`** falls back to **GET v1/arrays** (per-array **`usable_capacity_bytes`**, **`available_bytes`**, **`usage`**, filtered against configured **`pool_name`** and the pool rows used for the primary sum—see **`nimble_array_matches_status_pools`** in the plugin).
+- **Derived capacity caveat:** When **`capacity`** is derived as **`free_space + usage`** and **`usage`** is only available as **`uncompressed_usage`** (logical) while **`free_space`** is physical, the sum can **overstate** physical total versus arrays that report **`compressed_usage`**. Prefer API **`capacity`** or **`compressed_usage`** when present.
 - **Normal response:** 200.
 
 ---
@@ -178,6 +180,8 @@ The plugin uses **subnets** (and optional **network_interfaces** fallback) to bu
 | List snapshots | GET | snapshots?name=... | — |
 | Delete snapshot | DELETE | snapshots/:id | — |
 | List pools | GET | pools | — |
+| Pool detail (capacity when list is summary) | GET | pools/:id | — |
+| List arrays (status capacity fallback) | GET | arrays | — |
 | Get iSCSI discovery IPs (auto_iscsi_discovery) | GET | subnets, subnets/:id | — |
 
 ---
