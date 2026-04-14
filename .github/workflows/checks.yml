@@ -1,5 +1,10 @@
 name: Checks
 
+# Opt into Node.js 24 for JavaScript actions (Node 20 deprecated on runners; default switches June 2026).
+# See https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   push:
     branches: [main]
@@ -15,7 +20,7 @@ jobs:
     name: Unit tests
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Perl test deps
         run: |
@@ -33,7 +38,7 @@ jobs:
     name: Plugin syntax (bookworm + Proxmox PVE 8)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Verify NimbleStoragePlugin.pm in Docker
         run: |
@@ -44,7 +49,7 @@ jobs:
     name: Plugin syntax (trixie + Proxmox PVE 9)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Verify NimbleStoragePlugin.pm in Docker
         run: |
