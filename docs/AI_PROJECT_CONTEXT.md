@@ -13,7 +13,7 @@
 
 ---
 
-## 2. Current Status (as of v0.0.13)
+## 2. Current Status (as of v0.0.15)
 
 | Area | Status | Notes |
 |------|--------|--------|
@@ -36,7 +36,7 @@
 | **Debian package** | Present | `libpve-storage-nimble-perl`, debian/*, scripts/build_deb.sh. **`postinst`** **try-restarts** **`pvedaemon`**, **`pvestatd`**, **`pveproxy`**, **`pvescheduler`** — same as [pve-purestorage-plugin `debian/postinst`](https://github.com/kolesa-team/pve-purestorage-plugin/blob/main/debian/postinst) but **without** **`pve-cluster`** (Pure includes cluster; we omit it to avoid long **`apt`** stalls). **`install-pve-nimble-plugin.sh`** uses the same four units. |
 | **CI (GitHub Actions)** | Present | checks (unit tests + plugin syntax in Docker), release (tag → build .deb → gh-release) |
 | **Unit tests** | Present | test_command_validation.t, test_retry_logic.t, test_token_cache.t, test_nimble_plugin_import_export_guards.t (+ token_cache_test.pl); no live Nimble tests |
-| **Real-array testing** | Partial | Lab cluster: PVE 9.1.1, real HPE Nimble array, Windows Server + Ubuntu Server VMs. VM creation and snapshots confirmed working. **Snapshot rollback (v0.0.13+):** array requires **`online=false`** before **`actions/restore`**; plugin ensures offline, restore, then verified bring-online via **`nimble_volume_ensure_offline`** / **`nimble_volume_ensure_online`**. |
+| **Real-array testing** | Partial | Lab cluster: PVE 9.1.1, real HPE Nimble array. VM creation and snapshots confirmed. **Rollback (v0.0.15+):** **`nimble_volume_prepare_restore_disconnect`** before **`nimble_volume_ensure_offline`** (avoids **`SM_vol_has_connections`**). **Move disk + delete source (v0.0.15+):** **`nimble_remove_volume`** uses the same disconnect prep, multi-round snapshot purge, and **DELETE** retry for **409**/**`SM_eperm`**. |
 | **debian/watch** | Done | Points at `brngates98/pve-nimble-plugin` |
 
 ---
