@@ -93,7 +93,7 @@ Other sets in full docs: active_directory_memberships, alarms, application_serve
 
 **Read — GET v1/volumes**, GET v1/volumes?name=...  
 **Update — PUT v1/volumes/id** (e.g. `size`, `name`)  
-**Delete — DELETE v1/volumes/id** — The plugin always attempts **`online=false`** (via **`nimble_volume_ensure_offline`** or **`nimble_volume_offline_then_delete_best_effort`**) before DELETE; see `docs/API_VALIDATION.md` (volume delete / code inventory).
+**Delete — DELETE v1/volumes/id** — **`nimble_remove_volume`** runs **`nimble_volume_prepare_restore_disconnect`** (unmap, iSCSI logout, all ACRs), purges snapshots (multi-round), **`nimble_volume_ensure_offline`**, purges snapshots again, then **DELETE**. **`free_image`** (e.g. move-disk “delete source”) uses this path. **409** / **`SM_eperm`** often meant lingering snapshots or initiators; see **`docs/API_VALIDATION.md`** (volume delete). **`nimble_volume_offline_then_delete_best_effort`** only offlines then **DELETE** (orphan cleanup).
 
 ---
 

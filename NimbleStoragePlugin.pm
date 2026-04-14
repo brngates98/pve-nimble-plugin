@@ -2122,19 +2122,33 @@ sub nimble_create_volume {
   return 1;
 }
 
-# Nimble-specific: offline + child snapshots before DELETE (Pure destroy does not need this step).
+# Nimble-specific: remove snapshots for this vol_id (multi-round; logs failed DELETEs).
+# Newest-first tends to work better when snapshots form a chain; rounds catch API lag.
 sub nimble_delete_snapshots_for_volume_id {
   my ( $scfg, $vol_id, $storeid ) = @_;
   return unless defined $vol_id;
-  my $enc_vid = uri_escape($vol_id);
-  my $r = eval { nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$enc_vid", undef, $storeid ) };
-  $r = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) } unless $r;
-  return unless $r;
-  my $list = nimble_data_as_list( $r->{ data } );
-  for my $s ( @$list ) {
-    next unless ref($s) eq 'HASH' && defined $s->{ id };
-    next unless ( $s->{ vol_id } // '' ) eq $vol_id;
-    eval { nimble_api_call( $scfg, 'DELETE', "snapshots/" . $s->{ id }, undef, $storeid ); };
+  my $max_rounds = 5;
+  for my $round ( 1 .. $max_rounds ) {
+    my $enc_vid = uri_escape($vol_id);
+    my $r = eval { nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$enc_vid", undef, $storeid ) };
+    $r = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) } unless $r;
+    last unless $r;
+    my $list = nimble_data_as_list( $r->{ data } );
+    my @snaps;
+    for my $s ( @$list ) {
+      next unless ref($s) eq 'HASH' && defined $s->{ id };
+      next unless ( $s->{ vol_id } // '' ) eq $vol_id;
+      push @snaps, $s;
+    }
+    last unless @snaps;
+    @snaps = sort { ( $b->{ creation_time } // 0 ) <=> ( $a->{ creation_time } // 0 ) } @snaps;
+    for my $s (@snaps) {
+      eval { nimble_api_call( $scfg, 'DELETE', "snapshots/" . $s->{ id }, undef, $storeid ); 1 };
+      if ( my $e = $@ ) {
+        warn "Warning :: Nimble DELETE snapshots/" . $s->{ id } . " (vol_id=$vol_id): $e";
+      }
+    }
+    sleep(1) if $round < $max_rounds;
   }
 }
 
@@ -2218,10 +2232,12 @@ sub nimble_volume_offline_then_delete_best_effort {
   eval { nimble_api_call( $scfg, 'DELETE', "volumes/$vol_id", undef, $storeid ); };
 }
 
+# Purge snapshots, take volume offline, purge again (stragglers / array quiesce). Used before DELETE volume.
 sub nimble_offline_volume_and_delete_snapshots {
   my ( $scfg, $vol_id, $storeid, $label ) = @_;
   return unless defined $vol_id;
   $label ||= "volume id $vol_id";
+  nimble_delete_snapshots_for_volume_id( $scfg, $vol_id, $storeid );
   nimble_volume_ensure_offline( $scfg, $vol_id, $storeid, $label );
   nimble_delete_snapshots_for_volume_id( $scfg, $vol_id, $storeid );
 }
@@ -2233,6 +2249,10 @@ sub nimble_remove_volume {
   my ( $class, $scfg, $volname, $storeid ) = @_;
   my ( $vol_id, $vol ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   die "Error :: Volume \"$volname\" not found\n" unless $vol_id;
+
+  # Disk move with "delete source" often still has iSCSI sessions; without logout, offline/DELETE can
+  # fail (SM_vol_has_connections / SM_eperm). Same disconnect as snapshot-restore prep.
+  nimble_volume_prepare_restore_disconnect( $class, $scfg, $vol_id, $storeid, $volname );
 
   my ( $path, $wwid ) = $class->get_device_path_wwid( $scfg, $volname, $storeid );
   my $wwid_safe = nimble_untaint_multipath_wwid($wwid);
@@ -2251,7 +2271,8 @@ sub nimble_remove_volume {
     or do {
       my $e = $@ || '';
       if ( $e =~ /\b409\b/ || $e =~ /SM_http_conflict/ || $e =~ /SM_eperm/ ) {
-        sleep(2);
+        sleep(3);
+        nimble_volume_prepare_restore_disconnect( $class, $scfg, $vol_id, $storeid, $volname );
         nimble_delete_access_control_records_for_volume_id( $scfg, $vol_id, $storeid );
         nimble_offline_volume_and_delete_snapshots( $scfg, $vol_id, $storeid, $volname );
         nimble_api_call( $scfg, 'DELETE', "volumes/$vol_id", undef, $storeid );
