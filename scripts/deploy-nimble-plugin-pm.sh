@@ -34,6 +34,15 @@ DRY_RUN=0
 ALL_NODES=0
 VERBOSE=0
 
+# Idempotent defaults for set -u / partial sourcing (e.g. snippet in a host upgrade script).
+ensure_env() {
+    PLUGIN_URL="${PLUGIN_URL:-$DEFAULT_PLUGIN_URL}"
+    DEPLOY_SCRIPT_URL="${DEPLOY_SCRIPT_URL:-$DEFAULT_DEPLOY_SCRIPT_URL}"
+    DRY_RUN="${DRY_RUN:-0}"
+    ALL_NODES="${ALL_NODES:-0}"
+    VERBOSE="${VERBOSE:-0}"
+}
+
 log() { printf '%b\n' "$*"; }
 fail() { log "ERROR: $*"; exit 1; }
 
@@ -83,7 +92,8 @@ download_to_file() {
 }
 
 install_plugin_file() {
-    local url="$1"
+    local url="${1:-}"
+    [[ -n "$url" ]] || fail "install_plugin_file: missing URL"
     local tmp
     tmp="$(mktemp "${TMPDIR:-/tmp}/nimble-plugin.XXXXXX")"
     # shellcheck disable=SC2064
@@ -96,7 +106,7 @@ install_plugin_file() {
         fail "Download does not look like NimbleStoragePlugin.pm (missing expected package line)"
     fi
 
-    if [[ "$DRY_RUN" -eq 1 ]]; then
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
         log "DRY-RUN: would install to $TARGET and restart: ${RESTART_SERVICES[*]}"
         return
     fi
@@ -129,7 +139,8 @@ is_cluster() {
 is_cluster_quorate() {
     perl -MJSON -0777 -e '
         my $j = from_json(<STDIN>);
-        exit(defined($j->{cluster}->{quorate}) ? 0 : 1);
+        my $c = $j->{cluster};
+        exit( ($c && $c->{quorate}) ? 0 : 1 );
     ' "$PVE_MEMBERS_FILE"
 }
 
@@ -143,13 +154,18 @@ preflight() {
 }
 
 deploy_local() {
+    ensure_env
     install_plugin_file "$PLUGIN_URL"
 }
 
 # Run single-node deploy on a peer via SSH (script fetched from DEPLOY_SCRIPT_URL)
 remote_deploy_via_curl() {
-    local ip="$1"
-    local url="$2"
+    ensure_env
+    local ip="${1:-}"
+    local url="${2:-}"
+    [[ -n "$ip" ]] || fail "remote_deploy_via_curl: missing node IP"
+    url="${url:-$PLUGIN_URL}"
+    [[ -n "$url" ]] || fail "remote_deploy_via_curl: missing plugin URL"
     local rcmd
     rcmd=$(printf 'command -v curl >/dev/null || { echo "remote: need curl" >&2; exit 1; }; curl -fsSL %q | bash -s -- -u %q' \
         "$DEPLOY_SCRIPT_URL" "$url")
@@ -157,10 +173,12 @@ remote_deploy_via_curl() {
 }
 
 main() {
+    ensure_env
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -u|--url)
-                PLUGIN_URL="${2:?}"
+                [[ $# -ge 2 && -n "${2-}" ]] || fail "Option $1 requires a non-empty URL"
+                PLUGIN_URL="$2"
                 shift 2
                 ;;
             -a|--all-nodes)
@@ -185,10 +203,10 @@ main() {
         esac
     done
 
-    [[ "$VERBOSE" -eq 1 ]] && set -x
+    [[ "${VERBOSE:-0}" -eq 1 ]] && set -x
     preflight
 
-    if [[ "$ALL_NODES" -eq 0 ]]; then
+    if [[ "${ALL_NODES:-0}" -eq 0 ]]; then
         deploy_local
         log "Done."
         exit 0
@@ -216,7 +234,7 @@ main() {
             deploy_local
         else
             log "=== Remote node ($ip) ==="
-            if [[ "$DRY_RUN" -eq 1 ]]; then
+            if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
                 log "DRY-RUN: would ssh root@$ip: curl $DEPLOY_SCRIPT_URL | bash -s -- -u <PLUGIN_URL>"
                 continue
             fi
