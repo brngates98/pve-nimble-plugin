@@ -1756,6 +1756,15 @@ sub nimble_post_access_control_record_idempotent {
   return 1;
 }
 
+# access_control_record list/detail may expose vol_id or volume_id depending on firmware / row shape.
+sub nimble_acr_vol_id {
+  my ($acr) = @_;
+  return undef unless ref($acr) eq 'HASH';
+  return $acr->{ vol_id } if defined $acr->{ vol_id };
+  return $acr->{ volume_id } if defined $acr->{ volume_id };
+  return undef;
+}
+
 # Check if volume already has an access_control_record for the given initiator group.
 sub nimble_volume_has_acl_for_ig {
   my ( $scfg, $vol_id, $ig_id, $storeid ) = @_;
@@ -1767,7 +1776,7 @@ sub nimble_volume_has_acl_for_ig {
   my $list = nimble_data_as_list( $r->{ data } );
   for my $acr ( @$list ) {
     next unless ref($acr) eq 'HASH';
-    my $a_vid = $acr->{ vol_id };
+    my $a_vid = nimble_acr_vol_id($acr);
     my $a_ig  = $acr->{ initiator_group_id };
     next unless defined $a_vid && defined $a_ig;
     return 1 if "$a_vid" eq "$vol_id" && "$a_ig" eq "$ig_id";
@@ -1816,7 +1825,8 @@ sub nimble_volume_connection {
   my $list = nimble_data_as_list( $r->{ data } );
   for my $acr ( @$list ) {
     next unless ref($acr) eq 'HASH' && defined $acr->{ id };
-    next unless ( $acr->{ vol_id } // '' ) eq $vol_id && ( $acr->{ initiator_group_id } // '' ) eq $ig_id;
+    my $acr_vid = nimble_acr_vol_id($acr) // '';
+    next unless $acr_vid eq $vol_id && ( $acr->{ initiator_group_id } // '' ) eq $ig_id;
     eval { nimble_api_call( $scfg, 'DELETE', "access_control_records/" . $acr->{ id }, undef, $storeid ); };
   }
   return 1;
@@ -2160,7 +2170,8 @@ sub nimble_delete_access_control_records_for_volume_id {
   my $list = nimble_data_as_list( $r->{ data } );
   for my $acr ( @$list ) {
     next unless ref($acr) eq 'HASH' && defined $acr->{ id };
-    next unless ( $acr->{ vol_id } // '' ) eq $vol_id;
+    my $acr_vid = nimble_acr_vol_id($acr) // '';
+    next unless $acr_vid eq $vol_id;
     eval { nimble_api_call( $scfg, 'DELETE', "access_control_records/" . $acr->{ id }, undef, $storeid ); };
   }
 }
@@ -2607,10 +2618,29 @@ sub nimble_sync_array_snapshots {
   print "Debug :: nimble_sync [$storeid]: " . scalar( keys %vol_map ) . " PVE volumes found\n" if $debug >= 1;
   return unless %vol_map;
 
-  # All snapshots on the array; filter client-side to our volumes
-  my $sr    = nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid );
-  my $snaps = nimble_data_as_list( $sr->{ data } );
-  print "Debug :: nimble_sync [$storeid]: " . scalar( @$snaps ) . " total array snapshots\n" if $debug >= 1;
+  # Prefer one GET snapshots (all rows) when the array allows it. Some firmware returns 400 unless
+  # vol_id / vol_name / serial_number / app_uuid / id / Advanced Criteria is present (SM_missing_arg).
+  my @snaps;
+  my $sr = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) };
+  if ( $sr && ref($sr) eq 'HASH' ) {
+    @snaps = @{ nimble_data_as_list( $sr->{ data } ) };
+  } else {
+    my %vid_done;
+    for my $entry ( values %vol_map ) {
+      my $vid = $entry->{ id };
+      next unless defined $vid && length( $vid );
+      next if $vid_done{ $vid }++;
+      my $enc = uri_escape($vid);
+      my $r   = eval { nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$enc", undef, $storeid ) };
+      next unless $r && ref($r) eq 'HASH';
+      push @snaps, @{ nimble_data_as_list( $r->{ data } ) };
+    }
+    print "Debug :: nimble_sync [$storeid]: bulk GET snapshots unavailable; merged "
+      . scalar(@snaps)
+      . " snapshot(s) from per-volume GET\n" if $debug >= 1;
+  }
+  print "Debug :: nimble_sync [$storeid]: " . scalar(@snaps) . " total array snapshots (after fetch)\n" if $debug >= 1;
+  my $snaps = \@snaps;
 
   # Group: vmid => full_vol_name => [ { id, name, creation_time }, ... ]
   my %by_vmid;

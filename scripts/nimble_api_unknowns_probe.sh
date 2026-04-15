@@ -267,11 +267,12 @@ else
       get_filtered_http_code: $http_filt,
       get_all_ok: false,
       get_all_error_snippet: $snip,
+      snapshots_read_requires_query_filter: ($snip | test("SM_missing_arg")),
       snapshot_count_all: null,
       snapshot_count_server_filtered: $count_filtered,
       snapshot_count_client_filtered_on_full_list: null,
       server_filter_matches_client_enumeration: null,
-      note: "get_all_snapshots_non_2xx_client_counts_skipped_use_filtered_row_only"
+      note: (if ($snip | test("SM_missing_arg")) then "firmware_rejects_unfiltered_GET_snapshots_plugin_sync_uses_per_vol_id_GET" else "get_all_snapshots_non_2xx_client_counts_skipped_use_filtered_row_only" end)
     }')
   fi
 fi
@@ -298,7 +299,8 @@ else
     -H "X-Auth-Token: $TOKEN" \
     --data-urlencode "vol_id=$VOL_ID")
   count_acr_f=$(jq "$jq_nimble_list | length" "$TMP/acr_filt.json")
-  count_acr_manual=$(jq --arg vid "$VOL_ID" "$jq_nimble_list | map(select(((.vol_id // null) | tostring) == \$vid)) | length" "$TMP/acr_all.json")
+  # List rows may use vol_id and/or volume_id (match plugin-style string compare).
+  count_acr_manual=$(jq --arg vid "$VOL_ID" "$jq_nimble_list | map(select(((.vol_id // .volume_id // null) | tostring) == \$vid)) | length" "$TMP/acr_all.json")
   acr_match=$(( count_acr_manual == count_acr_f ? 1 : 0 ))
   ACR_JSON=$(jq -n \
     --arg vid "$VOL_ID" \
@@ -315,7 +317,8 @@ else
       acr_count_all: $count_all,
       acr_count_server_filtered: $count_f,
       acr_count_client_filtered_on_full_list: $count_manual,
-      server_filter_matches_client_enumeration: ($match == 1)
+      server_filter_matches_client_enumeration: ($match == 1),
+      client_filter_uses_fields: ["vol_id", "volume_id"]
     }')
 fi
 
