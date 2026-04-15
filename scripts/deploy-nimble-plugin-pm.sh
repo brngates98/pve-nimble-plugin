@@ -57,8 +57,15 @@ Usage: ${0##*/} [options]
   -h, --help        This help
 
 Environment:
-  PLUGIN_URL           Same as --url
-  DEPLOY_SCRIPT_URL    Used with --all-nodes on SSH peers (default: main script on GitHub)
+  PLUGIN_URL              Same as --url
+  DEPLOY_SCRIPT_URL       Used with --all-nodes on SSH peers (default: main script on GitHub)
+  SSH_CONNECT_TIMEOUT     Seconds (default: 15); SSH to peers will not hang forever
+  CURL_CONNECT_TIMEOUT    Seconds (default: 20)
+  CURL_MAX_TIME           Max seconds per download (default: 120)
+
+  --all-nodes needs passwordless SSH: root@<each cluster IP> from this host (ssh-copy-id).
+  Local node is detected by matching this host name to the nodename in /etc/pve/.members
+  (hostname -s), then by cluster IP on an interface — corosync-only IPs need SSH on that net.
 
 Examples:
   curl -fsSL .../deploy-nimble-plugin-pm.sh | sudo bash
@@ -82,10 +89,13 @@ restart_pve_stack() {
 download_to_file() {
     local url="$1"
     local out="$2"
+    # Defaults avoid hanging forever when GitHub (or a mirror) is unreachable.
+    local ct="${CURL_CONNECT_TIMEOUT:-20}"
+    local mt="${CURL_MAX_TIME:-120}"
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL -o "$out" -- "$url"
+        curl -fsSL --connect-timeout "$ct" --max-time "$mt" -o "$out" -- "$url"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q -O "$out" -- "$url"
+        wget -q --timeout="$mt" -O "$out" -- "$url"
     else
         fail "Need curl or wget to download"
     fi
@@ -118,13 +128,13 @@ install_plugin_file() {
     restart_pve_stack
 }
 
+# One line per node: nodename<TAB>ip (nodename matches "hostname -s" on that node for local detection).
 enumerate_cluster_nodes() {
     perl -MJSON -0777 -e '
         my $j = from_json(<STDIN>);
-        my %seen;
-        for (values %{$j->{nodelist}}) {
-            my $ip = $_->{ip} // next;
-            print "$ip\n" unless $seen{$ip}++;
+        for my $name (sort keys %{$j->{nodelist}}) {
+            my $ip = $j->{nodelist}{$name}{ip} // next;
+            print "$name\t$ip\n";
         }
     ' "$PVE_MEMBERS_FILE"
 }
@@ -166,10 +176,18 @@ remote_deploy_via_curl() {
     [[ -n "$ip" ]] || fail "remote_deploy_via_curl: missing node IP"
     url="${url:-$PLUGIN_URL}"
     [[ -n "$url" ]] || fail "remote_deploy_via_curl: missing plugin URL"
+    local ct="${CURL_CONNECT_TIMEOUT:-20}"
+    local mt="${CURL_MAX_TIME:-120}"
     local rcmd
-    rcmd=$(printf 'command -v curl >/dev/null || { echo "remote: need curl" >&2; exit 1; }; curl -fsSL %q | bash -s -- -u %q' \
-        "$DEPLOY_SCRIPT_URL" "$url")
-    ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "root@${ip}" "$rcmd"
+    rcmd=$(printf 'command -v curl >/dev/null || { echo "remote: need curl" >&2; exit 1; }; curl -fsSL --connect-timeout %q --max-time %q %q | bash -s -- -u %q' \
+        "$ct" "$mt" "$DEPLOY_SCRIPT_URL" "$url")
+    local ssh_to="${SSH_USER:-root}@${ip}"
+    log "SSH $ssh_to (timeout ${SSH_CONNECT_TIMEOUT:-15}s) — if this hangs, fix root SSH keys / use the corosync IP your nodes listen on."
+    ssh -o BatchMode=yes \
+        -o StrictHostKeyChecking=accept-new \
+        -o ConnectTimeout="${SSH_CONNECT_TIMEOUT:-15}" \
+        -o ConnectionAttempts=1 \
+        "$ssh_to" "$rcmd"
 }
 
 main() {
@@ -216,31 +234,45 @@ main() {
     is_cluster || fail "Not in a cluster — run without --all-nodes"
     is_cluster_quorate || fail "Cluster is not quorate — refusing."
 
-    mapfile -t node_ips < <(enumerate_cluster_nodes)
-    [[ ${#node_ips[@]} -gt 0 ]] || fail "No nodes in $PVE_MEMBERS_FILE"
-
     mapfile -t local_ips < <(local_ipv4_list)
+    local hn_short hn_long
+    hn_short="$(hostname -s 2>/dev/null || hostname)"
+    hn_long="$(hostname -f 2>/dev/null || hostname)"
 
-    local ip is_local
-    for ip in "${node_ips[@]}"; do
+    local node_count=0
+    while IFS=$'\t' read -r nodename ip; do
+        [[ -n "${ip:-}" ]] || continue
+        node_count=$((node_count + 1))
+    done < <(enumerate_cluster_nodes)
+    [[ "$node_count" -gt 0 ]] || fail "No nodes in $PVE_MEMBERS_FILE"
+
+    log "Cluster: $node_count node(s). This host: nodename ~ '$hn_short' / '$hn_long'."
+
+    local is_local lip
+    while IFS=$'\t' read -r nodename ip; do
+        [[ -n "${ip:-}" ]] || continue
+
         is_local=0
-        local lip
-        for lip in "${local_ips[@]}"; do
-            [[ "$ip" == "$lip" ]] && { is_local=1; break; }
-        done
+        if [[ "$nodename" == "$hn_short" || "$nodename" == "$hn_long" || "$nodename" == "$(hostname)" ]]; then
+            is_local=1
+        else
+            for lip in "${local_ips[@]}"; do
+                [[ "$ip" == "$lip" ]] && { is_local=1; break; }
+            done
+        fi
 
         if [[ "$is_local" -eq 1 ]]; then
-            log "=== Local node ($ip) ==="
+            log "=== Local node $nodename ($ip) ==="
             deploy_local
         else
-            log "=== Remote node ($ip) ==="
+            log "=== Remote node $nodename ($ip) ==="
             if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
                 log "DRY-RUN: would ssh root@$ip: curl $DEPLOY_SCRIPT_URL | bash -s -- -u <PLUGIN_URL>"
                 continue
             fi
             remote_deploy_via_curl "$ip" "$PLUGIN_URL"
         fi
-    done
+    done < <(enumerate_cluster_nodes)
 
     log "Done (all nodes)."
 }
