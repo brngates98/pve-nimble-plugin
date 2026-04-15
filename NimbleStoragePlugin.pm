@@ -379,6 +379,19 @@ sub nimble_volname {
   return $name;
 }
 
+# True if this Nimble snapshot row was created by Proxmox through this plugin (POST snapshots with
+# nimble_volname(vol, snap) => prefix+volname.snap-<name>). Those snaps are already represented in
+# the VM config under the user snapshot name; nimble_sync_array_snapshots must not also treat them
+# as array-only imports (nimble<epoch>), or the GUI shows two entries for one LUN snapshot.
+sub nimble_array_snapshot_is_pve_ui_snapshot {
+  my ( $scfg, $pve_volname, $array_snap_name ) = @_;
+  return 0 unless defined $array_snap_name && length $array_snap_name;
+  my $base = nimble_volname( $scfg, $pve_volname );
+  return 0 unless index( $array_snap_name, "$base." ) == 0;
+  my $suffix = substr( $array_snap_name, length($base) + 1 );
+  return ( $suffix =~ /^snap-/ ) ? 1 : 0;
+}
+
 # Trim / de-space / casefold for comparing API serial_number to sysfs VPD serial.
 sub nimble_serial_normalize {
   my ($s) = @_;
@@ -2922,6 +2935,8 @@ sub nimble_sync_array_snapshots {
   for my $s ( @$snaps ) {
     my $vname = nimble_snapshot_effective_vol_name( $s, undef );
     next unless length($vname) && exists $vol_map{ $vname };
+    next
+      if nimble_array_snapshot_is_pve_ui_snapshot( $scfg, $vol_map{ $vname }{ volname }, $s->{ name } // '' );
     my $vmid = $vol_map{ $vname }{ vmid };
     my $ctime = nimble_snapshot_effective_creation_time($s);
     push @{ $by_vmid{ $vmid }{ $vname } }, {
