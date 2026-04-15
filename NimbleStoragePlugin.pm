@@ -3046,7 +3046,8 @@ sub volume_snapshot_info {
   my ( $class, $scfg, $storeid, $volname ) = @_;
   my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   return {} unless $vol_id;
-  my $r = eval { nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$vol_id", undef, $storeid ) };
+  my $enc_vid = uri_escape($vol_id);
+  my $r = eval { nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$enc_vid", undef, $storeid ) };
   return {} unless $r;
   my $list = nimble_data_as_list( $r->{ data } );
   # Compute the array-side base name (prefix + volname, no snap suffix) once.
