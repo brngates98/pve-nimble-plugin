@@ -182,7 +182,21 @@ if [[ -n "$PROBE_ID" ]]; then
     --argjson get_volumes_path "$(wrap_probe "$VOL_P" "$TMP/probe_vol.json")" \
     --argjson get_snapshot_collection "$COLL_JSON" \
     --arg scid "${SCID:-}" \
-    '{
+    '
+    def merge_skip_null(base; patch):
+      reduce (patch | to_entries[]) as $e (base;
+        if $e.value == null then .
+        elif ($e.key == "snap_collection_id" and ($e.value|tostring) == "") then .
+        else . + {($e.key): $e.value}
+        end
+      );
+    def snap_fields(o): o | {creation_time, last_modified, snap_collection_id, name};
+    ($list_row // {}) as $L |
+    snap_fields($get_snapshots_path | del(.http)) as $P |
+    snap_fields($get_snapshots_query | del(.http)) as $Q |
+    snap_fields($get_volumes_path | del(.http)) as $V |
+    merge_skip_null($L; $P) | merge_skip_null(.; $Q) | merge_skip_null(.; $V) as $merged |
+    {
       chosen_snapshot_id: $sid,
       list_row_from_vol_filter: $list_row,
       snap_collection_id_used: (if ($scid|length) > 0 then $scid else null end),
@@ -190,7 +204,14 @@ if [[ -n "$PROBE_ID" ]]; then
       GET_snapshots_id_query: $get_snapshots_query,
       GET_volumes_id_path: $get_volumes_path,
       GET_snapshot_collection_id_path: $get_snapshot_collection,
-      note: "If list_row has null creation_time but GET_volumes_id_path or GET_snapshots_id_path shows creation_time, the plugin can display Nimble time in PVE after hydration."
+      simulated_plugin_merge_after_hydration: {
+        creation_time: $merged.creation_time,
+        last_modified: $merged.last_modified,
+        snap_collection_id: $merged.snap_collection_id,
+        name: $merged.name,
+        note: "Merge order: list row, then GET snapshots/:id, then GET snapshots?id=, then GET volumes/:id — only non-null patch keys apply (matches NimbleStoragePlugin nimble_merge_snapshot_hash_skip_undef)."
+      },
+      note: "List samples in snapshots_per_volume stay null: raw GET snapshots?vol_id=. If simulated_plugin_merge_after_hydration.creation_time is set, the plugin can show that time in PVE after deploy."
     }')
 fi
 

@@ -1021,6 +1021,15 @@ sub nimble_epoch_from_snapshot_name {
       return $epoch if defined $epoch && $epoch >= NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH;
     };
   }
+  # Volume-collection / schedule style: ...-YYYY-MM-DD::HH:MM:SS[.fff] (e.g. test-collection-Schedule-new-2026-04-14::21:10:00.000)
+  if ( $n =~ /-(\d{4})-(\d{2})-(\d{2})::(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?/ ) {
+    my ( $Y, $Mo, $D, $h, $mi, $sec ) = ( $1, $2, $3, $4, $5, $6 );
+    eval {
+      require Time::Local;
+      my $epoch = Time::Local::timelocal( $sec, $mi, $h, $D, $Mo - 1, $Y - 1900 );
+      return $epoch if defined $epoch && $epoch >= NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH;
+    };
+  }
   return undef;
 }
 
@@ -1035,6 +1044,32 @@ sub nimble_snapshot_display_epoch {
   return nimble_epoch_from_snapshot_name( $s->{ name } );
 }
 
+# Extract one snapshot object from GET snapshots/:id or snapshots?id= (data may be object or single-element array).
+sub nimble_snapshot_detail_data_row {
+  my ($r) = @_;
+  return undef unless $r && ref($r) eq 'HASH';
+  my $d = $r->{ data };
+  return $d if ref($d) eq 'HASH' && ( defined $d->{ id } || defined $d->{ name } );
+  if ( ref($d) eq 'ARRAY' && @$d && ref( $d->[0] ) eq 'HASH' ) {
+    my $z = $d->[0];
+    return $z if defined $z->{ id } || defined $z->{ name };
+  }
+  return undef;
+}
+
+# Merge API fields without clobbering with JSON null (undef): plain %a = (%a,%b) would wipe creation_time from a follow-up response that omits it.
+sub nimble_merge_snapshot_hash_skip_undef {
+  my ( $s, $h ) = @_;
+  return 0 unless $s && ref($s) eq 'HASH' && $h && ref($h) eq 'HASH';
+  for my $k ( keys %$h ) {
+    my $v = $h->{ $k };
+    next unless defined $v;
+    next if $v eq '' && $k eq 'snap_collection_id';
+    $s->{ $k } = $v;
+  }
+  return nimble_snapshot_display_epoch($s) ? 1 : 0;
+}
+
 # List GET snapshots may omit times. HPE documents snapshots as "volumes" — GET volumes/:id often returns creation_time when snapshots/:id does not.
 # Scheduled snaps may carry snap_collection_id; GET snapshot_collections/:id has creation_time for the collection (Python SDK).
 sub nimble_hydrate_snapshot_detail {
@@ -1045,30 +1080,22 @@ sub nimble_hydrate_snapshot_detail {
   return 1 if nimble_snapshot_display_epoch($s);
   $coll_cache = {} if !$coll_cache || ref($coll_cache) ne 'HASH';
 
-  my $merge_row = sub {
-    my ($h) = @_;
-    return 0 unless $h && ref($h) eq 'HASH';
-    %$s = ( %$s, %$h );
-    return nimble_snapshot_display_epoch($s) ? 1 : 0;
+  my $try_merge_response = sub {
+    my ($r) = @_;
+    my $row = nimble_snapshot_detail_data_row($r);
+    return 0 unless $row;
+    return nimble_merge_snapshot_hash_skip_undef( $s, $row );
   };
 
   my $r = eval { nimble_api_call( $scfg, 'GET', "snapshots/$id", undef, $storeid ) };
-  if ( $r && ref( $r->{ data } ) eq 'HASH' ) {
-    return 1 if $merge_row->( $r->{ data } );
-  }
+  return 1 if $r && $try_merge_response->($r);
+
   my $enc = uri_escape($id);
   $r = eval { nimble_api_call( $scfg, 'GET', "snapshots?id=$enc", undef, $storeid ) };
-  if ( $r && ref( $r->{ data } ) eq 'HASH' ) {
-    return 1 if $merge_row->( $r->{ data } );
-  }
-  elsif ( $r && ref( $r->{ data } ) eq 'ARRAY' && @{ $r->{ data } } && ref( $r->{ data }[0] ) eq 'HASH' ) {
-    return 1 if $merge_row->( $r->{ data }[0] );
-  }
+  return 1 if $r && $try_merge_response->($r);
 
   $r = eval { nimble_api_call( $scfg, 'GET', "volumes/$id", undef, $storeid ) };
-  if ( $r && ref( $r->{ data } ) eq 'HASH' ) {
-    return 1 if $merge_row->( $r->{ data } );
-  }
+  return 1 if $r && $try_merge_response->($r);
 
   my $scid = $s->{ snap_collection_id } // '';
   if ( length $scid && !nimble_snapshot_display_epoch($s) ) {
