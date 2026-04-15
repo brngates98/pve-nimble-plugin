@@ -10,8 +10,10 @@
 #   ./scripts/nimble_api_unknowns_probe.sh [output.json]
 #
 # Prompts for API base URL, username, and password (same pattern as nimble_capacity_api_probe.sh).
+# Probe volume id is discovered automatically (no input): first row of GET volumes, else first vol_id
+# from GET access_control_records. Optional NIMBLE_VOL_ID overrides for a specific volume.
 # Environment (optional):
-#   NIMBLE_VOL_ID   Volume UUID for filtered GETs and volume detail (default: first volume from GET volumes)
+#   NIMBLE_VOL_ID   Override discovered volume id (optional)
 #   VERIFY_SSL=1    Enable TLS verification (default: curl -k)
 #
 # Optional mutating probes (off by default):
@@ -132,6 +134,34 @@ if [[ -z "$TOKEN" || "$TOKEN" == "null" ]]; then
   exit 1
 fi
 
+# Pick a volume id for filtered GETs (no user input): volumes list first, else ACR vol_id sample.
+ACR_PREFETCHED=0
+code_acr_all=""
+VOL_ID="${NIMBLE_VOL_ID:-}"
+VOL_ID_SOURCE="none"
+if [[ -n "$VOL_ID" ]]; then
+  VOL_ID_SOURCE="environment"
+fi
+if [[ -z "$VOL_ID" ]]; then
+  code_vols=$(api_get "volumes" "$TMP/vols.json")
+  if [[ "$code_vols" =~ ^2[0-9][0-9]$ ]]; then
+    VOL_ID=$(jq -r "$jq_nimble_list | .[0].id // empty" "$TMP/vols.json")
+    if [[ -n "$VOL_ID" && "$VOL_ID" != "null" ]]; then
+      VOL_ID_SOURCE="volumes_list"
+    fi
+  fi
+fi
+if [[ -z "$VOL_ID" || "$VOL_ID" == "null" ]]; then
+  code_acr_all=$(api_get "access_control_records" "$TMP/acr_all.json")
+  ACR_PREFETCHED=1
+  if [[ "$code_acr_all" =~ ^2[0-9][0-9]$ ]]; then
+    VOL_ID=$(jq -r "$jq_nimble_list | [ .[] | (.vol_id // null | tostring) | select(length > 0) ] | .[0] // empty" "$TMP/acr_all.json")
+    if [[ -n "$VOL_ID" && "$VOL_ID" != "null" ]]; then
+      VOL_ID_SOURCE="access_control_records"
+    fi
+  fi
+fi
+
 # --- 1) Initiator group inline probe ---
 IG_JSON='{}'
 if [[ "${RUN_INLINE_IG_PROBE:-}" == "1" ]]; then
@@ -177,12 +207,6 @@ fi
 code_snap_all=$(api_get "snapshots" "$TMP/snap_all.json")
 count_snap_all=$(jq "$jq_nimble_list | length" "$TMP/snap_all.json")
 
-VOL_ID="${NIMBLE_VOL_ID:-}"
-if [[ -z "$VOL_ID" ]]; then
-  api_get "volumes" "$TMP/vols.json" >/dev/null
-  VOL_ID=$(jq -r "$jq_nimble_list | .[0].id // empty" "$TMP/vols.json")
-fi
-
 SNAP_JSON='{}'
 if [[ -z "$VOL_ID" || "$VOL_ID" == "null" ]]; then
   SNAP_JSON=$(jq -n \
@@ -193,37 +217,69 @@ if [[ -z "$VOL_ID" || "$VOL_ID" == "null" ]]; then
       get_all_http_code: $http,
       snapshot_count_all: $count_all,
       skipped_vol_id_tests: true,
-      reason: "no volume id (set NIMBLE_VOL_ID or add volumes on array)"
+      reason: "no_volume_id_after_GET_volumes_and_GET_access_control_records"
     }')
 else
   code_snap_f=$(curl "${CURL_OPTS[@]}" -w '%{http_code}' -o "$TMP/snap_filt.json" -G "$BASE/v1/snapshots" \
     -H "X-Auth-Token: $TOKEN" \
     --data-urlencode "vol_id=$VOL_ID")
   count_snap_f=$(jq "$jq_nimble_list | length" "$TMP/snap_filt.json")
-  count_snap_manual=$(jq --arg vid "$VOL_ID" "$jq_nimble_list | map(select((.vol_id // \"\") == \$vid)) | length" "$TMP/snap_all.json")
-  filter_matches_client=$(( count_snap_manual == count_snap_f ? 1 : 0 ))
-  SNAP_JSON=$(jq -n \
-    --arg vid "$VOL_ID" \
-    --argjson http_all "$(echo "$code_snap_all" | jq -n --arg c "$code_snap_all" '$c|tonumber')" \
-    --argjson http_filt "$(echo "$code_snap_f" | jq -n --arg c "$code_snap_f" '$c|tonumber')" \
-    --argjson count_all "$count_snap_all" \
-    --argjson count_filtered "$count_snap_f" \
-    --argjson count_client_side "$count_snap_manual" \
-    --argjson filter_matches_client "$filter_matches_client" \
-    '{
+  snap_all_snip="$(head -c 800 "$TMP/snap_all.json" 2>/dev/null || true)"
+  # Compare vol_id as strings (API may return number or string).
+  jq_vol_match='map(select(((.vol_id // null) | tostring) == $vid)) | length'
+  if [[ "$code_snap_all" =~ ^2[0-9][0-9]$ ]]; then
+    count_snap_manual=$(jq --arg vid "$VOL_ID" "$jq_nimble_list | $jq_vol_match" "$TMP/snap_all.json")
+    count_snap_all=$(jq "$jq_nimble_list | length" "$TMP/snap_all.json")
+    filter_matches_client=$(( count_snap_manual == count_snap_f ? 1 : 0 ))
+    SNAP_JSON=$(jq -n \
+      --arg vid "$VOL_ID" \
+      --arg snip "$snap_all_snip" \
+      --argjson http_all "$(jq -n --arg c "$code_snap_all" '$c | tonumber')" \
+      --argjson http_filt "$(jq -n --arg c "$code_snap_f" '$c | tonumber')" \
+      --argjson count_all "$count_snap_all" \
+      --argjson count_filtered "$count_snap_f" \
+      --argjson count_client_side "$count_snap_manual" \
+      --argjson filter_matches_client "$filter_matches_client" \
+      '{
       volume_id: $vid,
       get_all_http_code: $http_all,
       get_filtered_http_code: $http_filt,
+      get_all_ok: true,
+      get_all_error_snippet: null,
       snapshot_count_all: $count_all,
       snapshot_count_server_filtered: $count_filtered,
       snapshot_count_client_filtered_on_full_list: $count_client_side,
       server_filter_matches_client_enumeration: ($filter_matches_client == 1),
       note: (if ($count_all > 0) and ($count_all == $count_filtered) then "equal_counts_may_mean_ignored_filter_or_single_volume_snaps" else null end)
     }')
+  else
+    filter_matches_client=0
+    SNAP_JSON=$(jq -n \
+      --arg vid "$VOL_ID" \
+      --arg snip "$snap_all_snip" \
+      --argjson http_all "$(jq -n --arg c "$code_snap_all" '$c | tonumber')" \
+      --argjson http_filt "$(jq -n --arg c "$code_snap_f" '$c | tonumber')" \
+      --argjson count_filtered "$count_snap_f" \
+      --argjson filter_matches_client "$filter_matches_client" \
+      '{
+      volume_id: $vid,
+      get_all_http_code: $http_all,
+      get_filtered_http_code: $http_filt,
+      get_all_ok: false,
+      get_all_error_snippet: $snip,
+      snapshot_count_all: null,
+      snapshot_count_server_filtered: $count_filtered,
+      snapshot_count_client_filtered_on_full_list: null,
+      server_filter_matches_client_enumeration: null,
+      note: "get_all_snapshots_non_2xx_client_counts_skipped_use_filtered_row_only"
+    }')
+  fi
 fi
 
 # --- ACR ---
-code_acr_all=$(api_get "access_control_records" "$TMP/acr_all.json")
+if [[ "$ACR_PREFETCHED" != "1" ]]; then
+  code_acr_all=$(api_get "access_control_records" "$TMP/acr_all.json")
+fi
 count_acr_all=$(jq "$jq_nimble_list | length" "$TMP/acr_all.json")
 
 ACR_JSON='{}'
@@ -242,7 +298,7 @@ else
     -H "X-Auth-Token: $TOKEN" \
     --data-urlencode "vol_id=$VOL_ID")
   count_acr_f=$(jq "$jq_nimble_list | length" "$TMP/acr_filt.json")
-  count_acr_manual=$(jq --arg vid "$VOL_ID" "$jq_nimble_list | map(select((.vol_id // \"\") == \$vid)) | length" "$TMP/acr_all.json")
+  count_acr_manual=$(jq --arg vid "$VOL_ID" "$jq_nimble_list | map(select(((.vol_id // null) | tostring) == \$vid)) | length" "$TMP/acr_all.json")
   acr_match=$(( count_acr_manual == count_acr_f ? 1 : 0 ))
   ACR_JSON=$(jq -n \
     --arg vid "$VOL_ID" \
@@ -303,7 +359,7 @@ fi
 code_arrays=$(api_get "arrays" "$TMP/arrays.json")
 ARRAY_ROW=$(jq -c "$jq_first_row" "$TMP/arrays.json")
 ARRAYS_JSON=$(jq -n \
-  --argjson http "$(echo "$code_arrays" | jq -n --arg c "$code_arrays" '$c|tonumber')" \
+  --argjson http "$(jq -n --arg c "$code_arrays" '$c | tonumber')" \
   --argjson row "$ARRAY_ROW" \
   '{
     get_http_code: $http,
@@ -313,7 +369,8 @@ ARRAYS_JSON=$(jq -n \
       available_bytes: (if ($row|type)=="object" then $row.available_bytes else null end),
       vol_usage_bytes: (if ($row|type)=="object" then $row.vol_usage_bytes else null end),
       snap_usage_bytes: (if ($row|type)=="object" then $row.snap_usage_bytes else null end)
-    }
+    },
+    note: (if ($row|type)=="object" and (($row|keys|length) <= 2) then "list_row_may_be_summary_try_get_arrays_id_for_capacity_fields" else null end)
   }')
 
 # --- Assemble report ---
@@ -322,7 +379,8 @@ REPORT=$(jq -n \
   --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg script "nimble_api_unknowns_probe.sh" \
   --arg output_file "$OUT" \
-  --arg vol "${VOL_ID:-}" \
+  --arg volume_id_source "$VOL_ID_SOURCE" \
+  --arg volume_id "${VOL_ID:-}" \
   --argjson verify_ssl "$( [[ "${VERIFY_SSL:-}" == "1" ]] && echo true || echo false )" \
   --argjson run_ig "$( [[ "${RUN_INLINE_IG_PROBE:-}" == "1" ]] && echo true || echo false )" \
   --argjson run_mi_put "$( [[ "${RUN_MULTI_INITIATOR_PUT:-}" == "1" ]] && echo true || echo false )" \
@@ -330,7 +388,7 @@ REPORT=$(jq -n \
   --argjson ig "$IG_JSON" \
   --argjson snap "$SNAP_JSON" \
   --argjson acr "$ACR_JSON" \
-  --argjson vol "$VOL_JSON" \
+  --argjson volume_multi_initiator "$VOL_JSON" \
   --argjson arrays "$ARRAYS_JSON" \
   '{
     meta: {
@@ -338,7 +396,8 @@ REPORT=$(jq -n \
       generated_utc: $generated,
       script: $script,
       output_file: $output_file,
-      volume_id_used: (if ($vol|length)>0 then $vol else null end),
+      volume_id_used: (if ($volume_id|length)>0 then $volume_id else null end),
+      volume_id_source: $volume_id_source,
       verify_ssl: $verify_ssl,
       run_inline_ig_probe: $run_ig,
       run_multi_initiator_put: $run_mi_put,
@@ -348,7 +407,7 @@ REPORT=$(jq -n \
     initiator_groups_inline: $ig,
     snapshots_vol_id_filter: $snap,
     access_control_records_vol_id_filter: $acr,
-    volume_multi_initiator: $vol,
+    volume_multi_initiator: $volume_multi_initiator,
     arrays_sample_fields: $arrays,
     forced_offline: {
       automated: false,
