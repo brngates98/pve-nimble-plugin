@@ -1188,6 +1188,39 @@ sub nimble_snapshot_row_volume_id_mismatch {
   return $got ne $expected_vid;
 }
 
+# PVE snaptime stored in qemu conf for array-imported nimble<digits> keys (may differ from suffix when
+# suffix used min effective time but snaptime used min display epoch across disks).
+sub nimble_vm_snaptime_from_qemu_conf {
+  my ( $volname, $snap_key ) = @_;
+  return undef unless defined $volname && $volname =~ /^vm-(\d+)-/;
+  my $vmid = $1;
+  eval { require PVE::QemuConfig; 1 } or return undef;
+  my $conf = eval { PVE::QemuConfig->load_config( $vmid ) };
+  return undef unless $conf && ref( $conf->{ snapshots } ) eq 'HASH';
+  my $e = $conf->{ snapshots }{ $snap_key };
+  return undef unless $e && ref($e) eq 'HASH';
+  my $st = $e->{ snaptime };
+  return undef unless defined $st;
+  my $i = int( 0 + $st );
+  return $i >= NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH ? $i : undef;
+}
+
+# Hydrate list rows then pick best snapshot for rollback/delete matching nimble<target_ts> (same as sync after hydration).
+sub nimble_best_snapshot_row_for_nimble_target_ts {
+  my ( $scfg, $storeid, $vol_id, $target_ts, $list ) = @_;
+  return ( undef, 1e30 ) unless ref($list) eq 'ARRAY';
+  nimble_hydrate_snapshots_missing_display_time( $scfg, $storeid, $list );
+  my ( $best, $best_d ) = ( undef, 1e30 );
+  for my $s ( @$list ) {
+    next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
+    my $d = nimble_snapshot_time_distance_for_nimble_suffix( $s, $target_ts );
+    next unless defined $d && $d < $best_d;
+    $best_d = $d;
+    $best   = $s;
+  }
+  return ( $best, $best_d );
+}
+
 # GET v1/pools list rows may omit capacity (summary-only). GET v1/pools/:id returns full pool (SDK: capacity, usage, free_space in bytes).
 
 # storage.cfg pool_name may match pool name, search_name, or full_name; GET arrays rows often only have pool_id / pool_name.
@@ -2589,13 +2622,12 @@ sub nimble_snapshot_delete {
       $r = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) } unless $r;
       return 1 unless $r;
       my $list = nimble_data_as_list( $r->{ data } );
-      my ( $best, $best_d ) = ( undef, 1e30 );
-      for my $s ( @$list ) {
-        next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
-        my $d = nimble_snapshot_time_distance_for_nimble_suffix( $s, $target_ts );
-        next unless defined $d && $d < $best_d;
-        $best_d = $d;
-        $best   = $s;
+      my ( $best, $best_d ) = nimble_best_snapshot_row_for_nimble_target_ts( $scfg, $storeid, $vol_id, $target_ts, $list );
+      if ( !$best ) {
+        my $alt = nimble_vm_snaptime_from_qemu_conf( $volname, $snap_name );
+        if ( defined $alt && $alt != $target_ts ) {
+          ( $best, $best_d ) = nimble_best_snapshot_row_for_nimble_target_ts( $scfg, $storeid, $vol_id, $alt, $list );
+        }
       }
       $snap_id = $best->{ id } if $best;
     }
@@ -2630,13 +2662,12 @@ sub nimble_volume_restore {
     $r = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) } unless $r;
     die "Error :: Could not query snapshots for volume \"$volname\"\n" unless $r;
     my $list = nimble_data_as_list( $r->{ data } );
-    my ( $best, $best_d ) = ( undef, 1e30 );
-    for my $s ( @$list ) {
-      next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
-      my $d = nimble_snapshot_time_distance_for_nimble_suffix( $s, $target_ts );
-      next unless defined $d && $d < $best_d;
-      $best_d = $d;
-      $best   = $s;
+    my ( $best, $best_d ) = nimble_best_snapshot_row_for_nimble_target_ts( $scfg, $storeid, $vol_id, $target_ts, $list );
+    if ( !$best ) {
+      my $alt = nimble_vm_snaptime_from_qemu_conf( $volname, $snap );
+      if ( defined $alt && $alt != $target_ts ) {
+        ( $best, $best_d ) = nimble_best_snapshot_row_for_nimble_target_ts( $scfg, $storeid, $vol_id, $alt, $list );
+      }
     }
     die "Error :: Nimble snapshot for \"$svolname\" at time $target_ts not found\n" unless $best;
     $snap_id = $best->{ id };
@@ -2948,13 +2979,16 @@ sub nimble_sync_array_snapshots {
       if ($ok) {
         my $snaptime = defined $gui ? $gui
           : ( $min_ts >= NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH ? $min_ts : $snaptime_fallback );
+        # Suffix must match what rollback resolves: snaptime uses min display epoch ($gui) when set, but we
+        # previously used min_ts (min effective), so nimble<min_ts> did not match hydrated API times.
+        my $pve_suffix = ( defined $gui && $gui >= NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH ) ? $gui : $min_ts;
         my $desc = '';
         if (@nimble_snap_names) {
           my %seen_name;
           @nimble_snap_names = grep { !$seen_name{$_}++ } @nimble_snap_names;
           $desc = join( '; ', @nimble_snap_names );
         }
-        push @groups, { pve_name => "nimble${min_ts}", snaptime => $snaptime, description => $desc };
+        push @groups, { pve_name => "nimble${pve_suffix}", snaptime => $snaptime, description => $desc };
       }
     }
 
@@ -3321,13 +3355,12 @@ sub volume_rollback_is_possible {
       $r = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) } unless $r;
       die "Error :: Could not query snapshots for volume \"$volname\"\n" unless $r;
       my $list = nimble_data_as_list( $r->{ data } );
-      my ( $best, $best_d ) = ( undef, 1e30 );
-      for my $s ( @$list ) {
-        next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
-        my $d = nimble_snapshot_time_distance_for_nimble_suffix( $s, $target_ts );
-        next unless defined $d && $d < $best_d;
-        $best_d = $d;
-        $best   = $s;
+      my ( $best, $best_d ) = nimble_best_snapshot_row_for_nimble_target_ts( $scfg, $storeid, $vol_id, $target_ts, $list );
+      if ( !$best ) {
+        my $alt = nimble_vm_snaptime_from_qemu_conf( $volname, $snap );
+        if ( defined $alt && $alt != $target_ts ) {
+          ( $best, $best_d ) = nimble_best_snapshot_row_for_nimble_target_ts( $scfg, $storeid, $vol_id, $alt, $list );
+        }
       }
       die "Error :: Snapshot \"$snap\" not found for volume \"$volname\"\n" unless $best;
     } else {
