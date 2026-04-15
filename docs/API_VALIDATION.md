@@ -175,6 +175,23 @@ Every HTTPS object-set call goes through `nimble_api_call` with `v1/` paths abov
 
 ---
 
+## 5. Explicit unknowns (manual / probe)
+
+These behaviors are **not fully specified** in the in-repo HPE extract or vary by firmware. Validate on your array before relying on them in production.
+
+| Unknown | Recommended test |
+| ------- | ---------------- |
+| Does **POST initiator_groups** with **iscsi_initiators** inline work on firmware 5.x? (HPE doc also documents **POST initiators** separately.) | Test on target array. If rejected, add **POST v1/initiators** `{ initiator_group_id, access_protocol, label, iqn }` after group creation. |
+| Does **GET snapshots?vol_id=** return a filtered list or all snapshots? | GET on array with multiple volumes; compare counts to an unfiltered list and to a client-side filter. |
+| Does **GET access_control_records?vol_id=** work as a filter? | GET filtered vs unfiltered; compare counts. |
+| Does **multi_initiator** appear in **GET v1/volumes/:id** after **PUT**? | GET after PUT; confirm the field is present and true if set. |
+| What fields does **GET v1/arrays** expose? Are **usable_capacity_bytes** / **available_bytes** always present? | GET on target array; inspect keys and types (plugin uses these in **status()** fallback). |
+| Does **force: true** on **PUT volumes/:id** with **online: false** match expectations across 4.x vs 5.x? | Validate on the specific firmware you run (depends on cgroup / initiator sessions). |
+
+**Automated helper (read-only by default):** `./scripts/nimble_api_unknowns_probe.sh` — prompts for API URL, username, and password (same as **`nimble_capacity_api_probe.sh`**), then compares snapshot and ACR counts (filtered vs full list), prints **arrays** / **volumes/:id** field observations. Optional env: **`NIMBLE_VOL_ID`**, **`VERIFY_SSL=1`**, **`RUN_INLINE_IG_PROBE=1`** (throwaway initiator-group create/delete), **`RUN_MULTI_INITIATOR_PUT=1`** (mutating **multi_initiator** PUT). See script header for details.
+
+---
+
 ## References
 
 (Aligned with `docs/NIMBLE_API_REFERENCE.md` — HPE Nimble REST API 5.1.1.0.)
