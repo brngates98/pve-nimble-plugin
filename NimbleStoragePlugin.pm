@@ -2977,6 +2977,16 @@ sub nimble_sync_array_snapshots {
               $psnaps->{ $pve_name }{ snaptime } = $new_st;
               $changed = 1;
             }
+            my $want_desc = $g->{ description } // '';
+            if ( length $want_desc ) {
+              my $cur = $psnaps->{ $pve_name }{ description };
+              $cur = defined $cur ? "$cur" : '';
+              my $legacy_generic = ( $cur =~ /^\s*imported\s+from\s+nimble\s+array\s*$/i );
+              if ( ( $legacy_generic || $cur eq '' ) && $cur ne $want_desc ) {
+                $psnaps->{ $pve_name }{ description } = $want_desc;
+                $changed = 1;
+              }
+            }
             next;
           }
           # Snapshot section mirrors current live config (best available record of state at snap time)
