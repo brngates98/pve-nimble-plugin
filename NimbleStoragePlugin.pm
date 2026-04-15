@@ -22,6 +22,7 @@ use URI::Escape qw( uri_escape );
 use File::Basename qw( basename dirname );
 use Time::HiRes qw( gettimeofday sleep );
 use Cwd qw( abs_path );
+use Scalar::Util qw( looks_like_number );
 
 use base qw(PVE::Storage::Plugin);
 
@@ -43,6 +44,9 @@ use constant {
   TOKEN_STATE_NEEDED => 1,
   TOKEN_STATE_CACHED => 2,
 };
+
+# Min epoch treated as real calendar time for Nimble snapshot fields (not id-hash identity).
+use constant NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH => 946684800;    # 2000-01-01 00:00:00 UTC
 
 my $NIMBLE_API_VERSION = 'v1';
 my $default_port       = 5392;
@@ -979,35 +983,92 @@ sub nimble_snapshot_effective_vol_name {
   return '';
 }
 
-# creation_time may be null on filtered snapshot lists; use last_modified, NSs-* name timestamp, or stable id hash.
-sub nimble_snapshot_effective_creation_time {
-  my ($s) = @_;
-  for my $k (qw( creation_time snapshot_creation_time )) {
-    my $t = $s->{ $k };
-    if ( defined $t && $t =~ /^-?\d+(?:\.\d+)?$/ ) {
-      my $ti = int( 0 + $t );
-      return $ti if $ti > 0;
-    }
+# Parse API scalar to epoch for display/matching; returns undef if not a plausible calendar time.
+sub nimble_parse_scalar_to_epoch {
+  my ($t) = @_;
+  return undef unless defined $t;
+  return undef if ref($t);
+  if ( looks_like_number($t) ) {
+    my $ti = int( 0 + $t );
+    # Milliseconds since epoch (common in JSON)
+    $ti = int( $ti / 1000 ) if $ti > 10_000_000_000;
+    return $ti if $ti >= NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH;
+    return undef;
   }
-  my $lm = $s->{ last_modified };
-  if ( defined $lm && $lm =~ /^-?\d+(?:\.\d+)?$/ ) {
-    my $ti = int( 0 + $lm );
-    return $ti if $ti > 0;
+  # ISO-8601-style (assume UTC for Z or no zone)
+  if ( $t =~ /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z)?$/ ) {
+    my ( $Y, $Mo, $D, $h, $mi, $sec, $z ) = ( $1, $2, $3, $4, $5, $6, $7 );
+    eval {
+      require Time::Local;
+      my $epoch = $z ? Time::Local::timegm( $sec, $mi, $h, $D, $Mo - 1, $Y - 1900 )
+        : Time::Local::timelocal( $sec, $mi, $h, $D, $Mo - 1, $Y - 1900 );
+      return $epoch if defined $epoch && $epoch >= NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH;
+    };
   }
-  my $n = $s->{ name } // '';
+  return undef;
+}
+
+sub nimble_epoch_from_snapshot_name {
+  my ($n) = @_;
+  $n //= '';
   # Nimble GUI style: NSs-<vol>-YYYY-MM-DD::HH:MM:SS.mmm
   if ( $n =~ /^NSs-.+-(\d{4})-(\d{2})-(\d{2})::(\d{2}):(\d{2}):(\d{2})/ ) {
     my ( $Y, $Mo, $D, $h, $mi, $sec ) = ( $1, $2, $3, $4, $5, $6 );
     eval {
       require Time::Local;
       my $epoch = Time::Local::timelocal( $sec, $mi, $h, $D, $Mo - 1, $Y - 1900 );
-      return $epoch if $epoch > 0;
+      return $epoch if defined $epoch && $epoch >= NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH;
     };
   }
+  return undef;
+}
+
+# Real epoch for PVE snaptime / UI when the array omits time fields; undef => unknown (do not use id-hash).
+sub nimble_snapshot_display_epoch {
+  my ($s) = @_;
+  return undef unless $s && ref($s) eq 'HASH';
+  for my $k (qw( creation_time snapshot_creation_time last_modified )) {
+    my $e = nimble_parse_scalar_to_epoch( $s->{ $k } );
+    return $e if defined $e;
+  }
+  return nimble_epoch_from_snapshot_name( $s->{ name } );
+}
+
+# creation_time may be null on filtered snapshot lists; use last_modified, NSs-* name timestamp, or stable id hash.
+sub nimble_snapshot_effective_creation_time {
+  my ($s) = @_;
+  for my $k (qw( creation_time snapshot_creation_time )) {
+    my $e = nimble_parse_scalar_to_epoch( $s->{ $k } );
+    return $e if defined $e;
+  }
+  my $e = nimble_parse_scalar_to_epoch( $s->{ last_modified } );
+  return $e if defined $e;
+  $e = nimble_epoch_from_snapshot_name( $s->{ name } // '' );
+  return $e if defined $e;
   my $id = $s->{ id } // '';
   my $h  = 0;
   $h = ( ( $h << 5 ) - $h + ord($_) ) & 0x7FFFFFFF for split //, $id;
   return $h > 0 ? $h : 1;
+}
+
+# Distance for choosing the best row for PVE name nimble<digits>: ±60s for real epochs, else exact id-hash or raw API int.
+sub nimble_snapshot_time_distance_for_nimble_suffix {
+  my ( $s, $target_ts ) = @_;
+  return undef unless $s && ref( $s ) eq 'HASH';
+  my $eff = nimble_snapshot_effective_creation_time($s);
+  if ( $target_ts >= NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH ) {
+    my $d = abs( $eff - $target_ts );
+    return $d <= 60 ? $d : undef;
+  }
+  return 0 if $eff == $target_ts;
+  for my $k (qw( creation_time snapshot_creation_time last_modified )) {
+    my $t = $s->{ $k };
+    next unless defined $t && !ref($t) && looks_like_number($t);
+    my $ti = int( 0 + $t );
+    $ti = int( $ti / 1000 ) if $ti > 10_000_000_000;
+    return 0 if $ti == $target_ts;
+  }
+  return undef;
 }
 
 # When the list was fetched with ?vol_id=, rows may omit vol_id; do not drop those rows.
@@ -2419,12 +2480,13 @@ sub nimble_snapshot_delete {
       $r = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) } unless $r;
       return 1 unless $r;
       my $list = nimble_data_as_list( $r->{ data } );
-      my $best;
+      my ( $best, $best_d ) = ( undef, 1e30 );
       for my $s ( @$list ) {
         next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
-        my $ts = nimble_snapshot_effective_creation_time($s);
-        my $d  = abs( $ts - $target_ts );
-        $best  = $s if $d <= 60 && ( !$best || $d < abs( nimble_snapshot_effective_creation_time($best) - $target_ts ) );
+        my $d = nimble_snapshot_time_distance_for_nimble_suffix( $s, $target_ts );
+        next unless defined $d && $d < $best_d;
+        $best_d = $d;
+        $best   = $s;
       }
       $snap_id = $best->{ id } if $best;
     }
@@ -2459,12 +2521,13 @@ sub nimble_volume_restore {
     $r = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) } unless $r;
     die "Error :: Could not query snapshots for volume \"$volname\"\n" unless $r;
     my $list = nimble_data_as_list( $r->{ data } );
-    my $best;
+    my ( $best, $best_d ) = ( undef, 1e30 );
     for my $s ( @$list ) {
       next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
-      my $ts = nimble_snapshot_effective_creation_time($s);
-      my $d  = abs( $ts - $target_ts );
-      $best  = $s if $d <= 60 && ( !$best || $d < abs( nimble_snapshot_effective_creation_time($best) - $target_ts ) );
+      my $d = nimble_snapshot_time_distance_for_nimble_suffix( $s, $target_ts );
+      next unless defined $d && $d < $best_d;
+      $best_d = $d;
+      $best   = $s;
     }
     die "Error :: Nimble snapshot for \"$svolname\" at time $target_ts not found\n" unless $best;
     $snap_id = $best->{ id };
@@ -2723,6 +2786,7 @@ sub nimble_sync_array_snapshots {
       id            => $s->{ id },
       name          => $s->{ name },
       creation_time => $ctime,
+      display_epoch => nimble_snapshot_display_epoch($s),
     };
   }
   return unless %by_vmid;
@@ -2737,12 +2801,15 @@ sub nimble_sync_array_snapshots {
     my @groups;
     my ($seed_vol) = grep { exists $by_vmid{$vmid}{$_} } @vm_vols;
     my $seed_snaps = defined($seed_vol) ? ($by_vmid{$vmid}{$seed_vol} // []) : [];
+    # PVE shows snaptime as calendar time; id-hash identity keys (nimble1xxxxx) are not Unix epochs.
+    my $snaptime_fallback = time();
 
     for my $seed ( @$seed_snaps ) {
       my $ts = $seed->{ creation_time };
       next if $seen{ $ts }++;
       my $ok     = 1;
       my $min_ts = $ts;
+      my $gui    = $seed->{ display_epoch };
       for my $vname ( @vm_vols ) {
         next if defined($seed_vol) && $vname eq $seed_vol;
         unless ( exists $by_vmid{$vmid}{$vname} ) { $ok = 0; last; }
@@ -2753,11 +2820,18 @@ sub nimble_sync_array_snapshots {
         }
         if ( $best ) {
           $min_ts = $best->{ creation_time } if $best->{ creation_time } < $min_ts;
+          if ( defined $best->{ display_epoch } ) {
+            $gui = $best->{ display_epoch } if !defined $gui || $best->{ display_epoch } < $gui;
+          }
         } else {
           $ok = 0; last;
         }
       }
-      push @groups, { pve_name => "nimble${min_ts}", snaptime => $min_ts } if $ok;
+      if ($ok) {
+        my $snaptime = defined $gui ? $gui
+          : ( $min_ts >= NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH ? $min_ts : $snaptime_fallback );
+        push @groups, { pve_name => "nimble${min_ts}", snaptime => $snaptime };
+      }
     }
 
     my %nimble_names = map { $_->{ pve_name } => 1 } @groups;
@@ -2768,12 +2842,21 @@ sub nimble_sync_array_snapshots {
         my $psnaps = $conf->{ snapshots } //= {};
         my $changed = 0;
 
-        # Add snapshot entries not yet in PVE
+        # Add snapshot entries not yet in PVE; fix snaptime when older imports used id-hash as Unix time.
         for my $g ( @groups ) {
           my $pve_name = $g->{ pve_name };
-          next if exists $psnaps->{ $pve_name };
+          my $new_st   = $g->{ snaptime };
+          if ( exists $psnaps->{ $pve_name } ) {
+            my $old_st = $psnaps->{ $pve_name }{ snaptime };
+            $old_st = defined $old_st ? int( 0 + $old_st ) : 0;
+            if ( $new_st >= NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH && $old_st < NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH ) {
+              $psnaps->{ $pve_name }{ snaptime } = $new_st;
+              $changed = 1;
+            }
+            next;
+          }
           # Snapshot section mirrors current live config (best available record of state at snap time)
-          my $entry = { snaptime => $g->{ snaptime }, description => 'Imported from Nimble array' };
+          my $entry = { snaptime => $new_st, description => 'Imported from Nimble array' };
           for my $k ( keys %$conf ) {
             next if $k eq 'snapshots' || $k eq 'snapstate' || $k eq 'lock' || $k eq 'pending';
             next if ref( $conf->{ $k } );
@@ -3104,12 +3187,13 @@ sub volume_rollback_is_possible {
       $r = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) } unless $r;
       die "Error :: Could not query snapshots for volume \"$volname\"\n" unless $r;
       my $list = nimble_data_as_list( $r->{ data } );
-      my $best;
+      my ( $best, $best_d ) = ( undef, 1e30 );
       for my $s ( @$list ) {
         next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
-        my $ts = nimble_snapshot_effective_creation_time($s);
-        my $d  = abs( $ts - $target_ts );
-        $best  = $s if $d <= 60 && ( !$best || $d < abs( nimble_snapshot_effective_creation_time($best) - $target_ts ) );
+        my $d = nimble_snapshot_time_distance_for_nimble_suffix( $s, $target_ts );
+        next unless defined $d && $d < $best_d;
+        $best_d = $d;
+        $best   = $s;
       }
       die "Error :: Snapshot \"$snap\" not found for volume \"$volname\"\n" unless $best;
     } else {
@@ -3157,7 +3241,8 @@ sub volume_snapshot_info {
   for my $s ( @$list ) {
     next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
     my $array_name = $s->{ name } // '';
-    my $ts         = nimble_snapshot_effective_creation_time($s);
+    my $ts_id      = nimble_snapshot_effective_creation_time($s);
+    my $ts_gui     = nimble_snapshot_display_epoch($s);
     my $id         = $s->{ id } // '';
     my $pve_name;
     if ( index( $array_name, $sep ) == 0 ) {
@@ -3167,8 +3252,8 @@ sub volume_snapshot_info {
         $pve_name =~ s/^veeam-/veeam_/;  # reverse nimble_volname's veeam_ → veeam- substitution
       }
     }
-    $pve_name //= "nimble${ts}";
-    $info{ $pve_name } = { id => $id, timestamp => $ts };
+    $pve_name //= "nimble${ts_id}";
+    $info{ $pve_name } = { id => $id, timestamp => ( $ts_gui // $ts_id ) };
   }
   return \%info;
 }
