@@ -73,7 +73,7 @@ BULK_COUNT=0
 BULK_SAMPLES='[]'
 if [[ "$BCODE" =~ ^2[0-9][0-9]$ ]]; then
   BULK_COUNT=$(jq "$jq_nimble_list | length" "$TMP/snap_bulk.json")
-  BULK_SAMPLES=$(jq -c "$jq_nimble_list | map({id, name, creation_time, vol_name, vol_id, volume_name}) | .[0:5]" "$TMP/snap_bulk.json")
+  BULK_SAMPLES=$(jq -c "$jq_nimble_list | map({id, name, creation_time, last_modified, vol_name, vol_id, volume_name}) | .[0:5]" "$TMP/snap_bulk.json")
 fi
 REQUIRES_FILTER_JSON=$(echo "$BULK_SNIP" | jq -Rs 'test("SM_missing_arg")')
 
@@ -91,6 +91,7 @@ while IFS= read -r row; do
     id: .id,
     name: .name,
     creation_time: .creation_time,
+    last_modified: .last_modified,
     vol_name: .vol_name,
     vol_id: .vol_id,
     volume_name: .volume_name
@@ -142,7 +143,7 @@ ANALYSIS=$(jq -n \
     snapshot_vol_name_values_distinct: $sn,
     snapshot_vol_names_that_exact_match_a_volume_name: [ $sn[] | select(. as $s | $vn | index($s) != null) ],
     snapshot_vol_names_that_do_not_match_any_volume_name: [ $sn[] | select(. as $s | $vn | index($s) == null) ],
-    note: "Plugin nimble_sync_array_snapshots matches each snapshot row vol_name to volumes[].name (API). Mismatch => snapshot ignored for PVE import."
+    note: "Plugin nimble_sync_array_snapshots matches snapshot rows to volumes[].name (API): uses vol_name/volume_name when present, else the volume from GET snapshots?vol_id= context (or vol_id map on bulk lists). Sparse vol_name => distinct_snapshot_vol_names_for_this_volume may be empty even when sync works."
   }')
 
 REPORT=$(jq -n \

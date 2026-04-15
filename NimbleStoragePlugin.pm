@@ -968,6 +968,56 @@ sub nimble_data_as_list {
   return [];
 }
 
+# Some firmware omits vol_name (and sometimes vol_id) on snapshots returned from GET snapshots?vol_id=…
+sub nimble_snapshot_effective_vol_name {
+  my ( $s, $implicit_full_vol_name ) = @_;
+  for my $k (qw( vol_name volume_name )) {
+    my $v = $s->{ $k };
+    return $v if defined $v && length( $v );
+  }
+  return $implicit_full_vol_name if defined $implicit_full_vol_name && length( $implicit_full_vol_name );
+  return '';
+}
+
+# creation_time may be null on filtered snapshot lists; use last_modified, NSs-* name timestamp, or stable id hash.
+sub nimble_snapshot_effective_creation_time {
+  my ($s) = @_;
+  for my $k (qw( creation_time snapshot_creation_time )) {
+    my $t = $s->{ $k };
+    if ( defined $t && $t =~ /^-?\d+(?:\.\d+)?$/ ) {
+      my $ti = int( 0 + $t );
+      return $ti if $ti > 0;
+    }
+  }
+  my $lm = $s->{ last_modified };
+  if ( defined $lm && $lm =~ /^-?\d+(?:\.\d+)?$/ ) {
+    my $ti = int( 0 + $lm );
+    return $ti if $ti > 0;
+  }
+  my $n = $s->{ name } // '';
+  # Nimble GUI style: NSs-<vol>-YYYY-MM-DD::HH:MM:SS.mmm
+  if ( $n =~ /^NSs-.+-(\d{4})-(\d{2})-(\d{2})::(\d{2}):(\d{2}):(\d{2})/ ) {
+    my ( $Y, $Mo, $D, $h, $mi, $sec ) = ( $1, $2, $3, $4, $5, $6 );
+    eval {
+      require Time::Local;
+      my $epoch = Time::Local::timelocal( $sec, $mi, $h, $D, $Mo - 1, $Y - 1900 );
+      return $epoch if $epoch > 0;
+    };
+  }
+  my $id = $s->{ id } // '';
+  my $h  = 0;
+  $h = ( ( $h << 5 ) - $h + ord($_) ) & 0x7FFFFFFF for split //, $id;
+  return $h > 0 ? $h : 1;
+}
+
+# When the list was fetched with ?vol_id=, rows may omit vol_id; do not drop those rows.
+sub nimble_snapshot_row_volume_id_mismatch {
+  my ( $s, $expected_vid ) = @_;
+  my $got = $s->{ vol_id };
+  return 0 unless defined $got && length( $got );
+  return $got ne $expected_vid;
+}
+
 # GET v1/pools list rows may omit capacity (summary-only). GET v1/pools/:id returns full pool (SDK: capacity, usage, free_space in bytes).
 
 # storage.cfg pool_name may match pool name, search_name, or full_name; GET arrays rows often only have pool_id / pool_name.
@@ -2147,11 +2197,13 @@ sub nimble_delete_snapshots_for_volume_id {
     my @snaps;
     for my $s ( @$list ) {
       next unless ref($s) eq 'HASH' && defined $s->{ id };
-      next unless ( $s->{ vol_id } // '' ) eq $vol_id;
+      next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
       push @snaps, $s;
     }
     last unless @snaps;
-    @snaps = sort { ( $b->{ creation_time } // 0 ) <=> ( $a->{ creation_time } // 0 ) } @snaps;
+    @snaps = sort {
+      nimble_snapshot_effective_creation_time($b) <=> nimble_snapshot_effective_creation_time($a)
+    } @snaps;
     for my $s (@snaps) {
       eval { nimble_api_call( $scfg, 'DELETE', "snapshots/" . $s->{ id }, undef, $storeid ); 1 };
       if ( my $e = $@ ) {
@@ -2369,10 +2421,10 @@ sub nimble_snapshot_delete {
       my $list = nimble_data_as_list( $r->{ data } );
       my $best;
       for my $s ( @$list ) {
-        next unless ( $s->{ vol_id } // '' ) eq $vol_id;
-        my $ts = $s->{ creation_time } // 0;
+        next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
+        my $ts = nimble_snapshot_effective_creation_time($s);
         my $d  = abs( $ts - $target_ts );
-        $best  = $s if $d <= 60 && ( !$best || $d < abs( ( $best->{ creation_time } // 0 ) - $target_ts ) );
+        $best  = $s if $d <= 60 && ( !$best || $d < abs( nimble_snapshot_effective_creation_time($best) - $target_ts ) );
       }
       $snap_id = $best->{ id } if $best;
     }
@@ -2409,10 +2461,10 @@ sub nimble_volume_restore {
     my $list = nimble_data_as_list( $r->{ data } );
     my $best;
     for my $s ( @$list ) {
-      next unless ( $s->{ vol_id } // '' ) eq $vol_id;
-      my $ts = $s->{ creation_time } // 0;
+      next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
+      my $ts = nimble_snapshot_effective_creation_time($s);
       my $d  = abs( $ts - $target_ts );
-      $best  = $s if $d <= 60 && ( !$best || $d < abs( ( $best->{ creation_time } // 0 ) - $target_ts ) );
+      $best  = $s if $d <= 60 && ( !$best || $d < abs( nimble_snapshot_effective_creation_time($best) - $target_ts ) );
     }
     die "Error :: Nimble snapshot for \"$svolname\" at time $target_ts not found\n" unless $best;
     $snap_id = $best->{ id };
@@ -2608,12 +2660,15 @@ sub nimble_sync_array_snapshots {
   my $vols = nimble_data_as_list( $vr->{ data } );
 
   my %vol_map;    # full_nimble_name => { id, volname, vmid }
+  my %vol_id_to_fullname;
   for my $v ( @$vols ) {
     my $name = $v->{ name } // '';
     next if length( $prefix ) && index( $name, $prefix ) != 0;
     my $volname = length( $prefix ) ? substr( $name, length( $prefix ) ) : $name;
     next unless $volname =~ /^vm-(\d+)-(disk-|cloudinit|state-)/;
     $vol_map{ $name } = { id => $v->{ id }, volname => $volname, vmid => $1 };
+    my $vid = $v->{ id };
+    $vol_id_to_fullname{ $vid } = $name if defined $vid && length($vid);
   }
   print "Debug :: nimble_sync [$storeid]: " . scalar( keys %vol_map ) . " PVE volumes found\n" if $debug >= 1;
   return unless %vol_map;
@@ -2623,17 +2678,32 @@ sub nimble_sync_array_snapshots {
   my @snaps;
   my $sr = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) };
   if ( $sr && ref($sr) eq 'HASH' ) {
-    @snaps = @{ nimble_data_as_list( $sr->{ data } ) };
+    for my $s ( @{ nimble_data_as_list( $sr->{ data } ) } ) {
+      next unless ref($s) eq 'HASH';
+      my $copy = { %$s };
+      if ( !length( nimble_snapshot_effective_vol_name( $copy, undef ) ) ) {
+        my $vid = $copy->{ vol_id };
+        if ( defined $vid && length($vid) && $vol_id_to_fullname{ $vid } ) {
+          $copy->{ vol_name } = $vol_id_to_fullname{ $vid };
+        }
+      }
+      push @snaps, $copy;
+    }
   } else {
-    my %vid_done;
-    for my $entry ( values %vol_map ) {
-      my $vid = $entry->{ id };
-      next unless defined $vid && length( $vid );
-      next if $vid_done{ $vid }++;
+    for my $full_name ( keys %vol_map ) {
+      my $vid = $vol_map{ $full_name }{ id };
+      next unless defined $vid && length($vid);
       my $enc = uri_escape($vid);
       my $r   = eval { nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$enc", undef, $storeid ) };
       next unless $r && ref($r) eq 'HASH';
-      push @snaps, @{ nimble_data_as_list( $r->{ data } ) };
+      for my $s ( @{ nimble_data_as_list( $r->{ data } ) } ) {
+        next unless ref($s) eq 'HASH';
+        my $copy = { %$s };
+        if ( !length( nimble_snapshot_effective_vol_name( $copy, undef ) ) ) {
+          $copy->{ vol_name } = $full_name;
+        }
+        push @snaps, $copy;
+      }
     }
     print "Debug :: nimble_sync [$storeid]: bulk GET snapshots unavailable; merged "
       . scalar(@snaps)
@@ -2645,13 +2715,14 @@ sub nimble_sync_array_snapshots {
   # Group: vmid => full_vol_name => [ { id, name, creation_time }, ... ]
   my %by_vmid;
   for my $s ( @$snaps ) {
-    my $vname = $s->{ vol_name } // '';
-    next unless exists $vol_map{ $vname };
+    my $vname = nimble_snapshot_effective_vol_name( $s, undef );
+    next unless length($vname) && exists $vol_map{ $vname };
     my $vmid = $vol_map{ $vname }{ vmid };
+    my $ctime = nimble_snapshot_effective_creation_time($s);
     push @{ $by_vmid{ $vmid }{ $vname } }, {
       id            => $s->{ id },
       name          => $s->{ name },
-      creation_time => $s->{ creation_time } // 0,
+      creation_time => $ctime,
     };
   }
   return unless %by_vmid;
@@ -3035,10 +3106,10 @@ sub volume_rollback_is_possible {
       my $list = nimble_data_as_list( $r->{ data } );
       my $best;
       for my $s ( @$list ) {
-        next unless ( $s->{ vol_id } // '' ) eq $vol_id;
-        my $ts = $s->{ creation_time } // 0;
+        next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
+        my $ts = nimble_snapshot_effective_creation_time($s);
         my $d  = abs( $ts - $target_ts );
-        $best  = $s if $d <= 60 && ( !$best || $d < abs( ( $best->{ creation_time } // 0 ) - $target_ts ) );
+        $best  = $s if $d <= 60 && ( !$best || $d < abs( nimble_snapshot_effective_creation_time($best) - $target_ts ) );
       }
       die "Error :: Snapshot \"$snap\" not found for volume \"$volname\"\n" unless $best;
     } else {
@@ -3084,8 +3155,9 @@ sub volume_snapshot_info {
   my $sep = nimble_volname( $scfg, $volname ) . '.';
   my %info;
   for my $s ( @$list ) {
+    next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
     my $array_name = $s->{ name } // '';
-    my $ts         = $s->{ creation_time } // 0;
+    my $ts         = nimble_snapshot_effective_creation_time($s);
     my $id         = $s->{ id } // '';
     my $pve_name;
     if ( index( $array_name, $sep ) == 0 ) {
