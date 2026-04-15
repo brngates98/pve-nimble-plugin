@@ -995,12 +995,13 @@ sub nimble_parse_scalar_to_epoch {
     return $ti if $ti >= NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH;
     return undef;
   }
-  # ISO-8601-style (assume UTC for Z or no zone)
-  if ( $t =~ /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z)?$/ ) {
-    my ( $Y, $Mo, $D, $h, $mi, $sec, $z ) = ( $1, $2, $3, $4, $5, $6, $7 );
+  # ISO-8601-style: Z = UTC; offset like +00:00 treated as UTC when hour and minute are 0
+  if ( $t =~ /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2}(?::\d{2})?)?$/ ) {
+    my ( $Y, $Mo, $D, $h, $mi, $sec, $zone ) = ( $1, $2, $3, $4, $5, $6, $7 );
     eval {
       require Time::Local;
-      my $epoch = $z ? Time::Local::timegm( $sec, $mi, $h, $D, $Mo - 1, $Y - 1900 )
+      my $utc = ( defined $zone && ( $zone eq 'Z' || $zone =~ /^[+]00:?00/ ) );
+      my $epoch = $utc ? Time::Local::timegm( $sec, $mi, $h, $D, $Mo - 1, $Y - 1900 )
         : Time::Local::timelocal( $sec, $mi, $h, $D, $Mo - 1, $Y - 1900 );
       return $epoch if defined $epoch && $epoch >= NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH;
     };
@@ -1027,11 +1028,52 @@ sub nimble_epoch_from_snapshot_name {
 sub nimble_snapshot_display_epoch {
   my ($s) = @_;
   return undef unless $s && ref($s) eq 'HASH';
-  for my $k (qw( creation_time snapshot_creation_time last_modified )) {
+  for my $k (qw( creation_time snapshot_creation_time last_modified created_at ctime )) {
     my $e = nimble_parse_scalar_to_epoch( $s->{ $k } );
     return $e if defined $e;
   }
   return nimble_epoch_from_snapshot_name( $s->{ name } );
+}
+
+# List GET snapshots / snapshots?vol_id= may omit times; detail read often includes creation_time (same pattern as pools list vs pools/:id).
+sub nimble_hydrate_snapshot_detail {
+  my ( $scfg, $storeid, $s ) = @_;
+  return 0 unless $s && ref($s) eq 'HASH';
+  my $id = $s->{ id };
+  return 0 unless defined $id && length $id;
+  return 1 if nimble_snapshot_display_epoch($s);
+  my $merged;
+  my $r = eval { nimble_api_call( $scfg, 'GET', "snapshots/$id", undef, $storeid ) };
+  if ( $r && ref( $r->{ data } ) eq 'HASH' ) {
+    $merged = $r->{ data };
+  }
+  else {
+    my $enc = uri_escape($id);
+    $r = eval { nimble_api_call( $scfg, 'GET', "snapshots?id=$enc", undef, $storeid ) };
+    if ( $r && ref( $r->{ data } ) eq 'HASH' ) {
+      $merged = $r->{ data };
+    }
+    elsif ( $r && ref( $r->{ data } ) eq 'ARRAY' && @{ $r->{ data } } && ref( $r->{ data }[0] ) eq 'HASH' ) {
+      $merged = $r->{ data }[0];
+    }
+  }
+  if ($merged) {
+    %$s = ( %$s, %$merged );
+    return 1;
+  }
+  return 0;
+}
+
+sub nimble_hydrate_snapshots_missing_display_time {
+  my ( $scfg, $storeid, $snaps ) = @_;
+  return unless ref($snaps) eq 'ARRAY';
+  my %did;
+  for my $s ( @$snaps ) {
+    next unless ref($s) eq 'HASH' && $s->{ id };
+    next if $did{ $s->{ id } }++;
+    next if nimble_snapshot_display_epoch($s);
+    eval { nimble_hydrate_snapshot_detail( $scfg, $storeid, $s ); 1 } or undef;
+  }
 }
 
 # creation_time may be null on filtered snapshot lists; use last_modified, NSs-* name timestamp, or stable id hash.
@@ -2774,6 +2816,8 @@ sub nimble_sync_array_snapshots {
   }
   print "Debug :: nimble_sync [$storeid]: " . scalar(@snaps) . " total array snapshots (after fetch)\n" if $debug >= 1;
   my $snaps = \@snaps;
+  nimble_hydrate_snapshots_missing_display_time( $scfg, $storeid, $snaps );
+  print "Debug :: nimble_sync [$storeid]: hydrated snapshot detail for Nimble creation_time when list rows omitted it\n" if $debug >= 2;
 
   # Group: vmid => full_vol_name => [ { id, name, creation_time }, ... ]
   my %by_vmid;
@@ -3240,6 +3284,7 @@ sub volume_snapshot_info {
   my %info;
   for my $s ( @$list ) {
     next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
+    eval { nimble_hydrate_snapshot_detail( $scfg, $storeid, $s ) } unless nimble_snapshot_display_epoch($s);
     my $array_name = $s->{ name } // '';
     my $ts_id      = nimble_snapshot_effective_creation_time($s);
     my $ts_gui     = nimble_snapshot_display_epoch($s);

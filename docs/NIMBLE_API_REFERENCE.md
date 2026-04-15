@@ -115,7 +115,7 @@ Other sets in full docs: active_directory_memberships, alarms, application_serve
 - **Response (data):** `id`, `name`, `vol_id`, `vol_name`, `size`, `serial_number`, `creation_time`, `last_modified`, etc.
 - **Normal response:** 201, 202.
 
-**Read — GET v1/snapshots**, GET v1/snapshots?name=...  
+**Read — GET v1/snapshots**, GET v1/snapshots?name=..., GET v1/snapshots?vol_id=..., optional **GET v1/snapshots/:id** or **GET v1/snapshots?id=** when list rows omit **`creation_time`** / **`last_modified`** (plugin merges detail into the row for PVE **snaptime**).  
 **Delete — DELETE v1/snapshots/id**
 
 ---
