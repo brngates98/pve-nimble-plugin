@@ -133,7 +133,7 @@ See `.cursor/rules/releases.mdc` for the full release rule.
 ## 7. How to Run Things (for AI or human)
 
 - **Unit tests:** `./tests/run_tests.sh` or `perl -I. tests/unit/<file>.t`. Requires Perl, Test::More, JSON (and JSON::XS for token_cache_test.pl).
-- **Array API unknowns (live):** `./scripts/nimble_api_unknowns_probe.sh` — prompts for URL/username/password (like **`nimble_capacity_api_probe.sh`**), runs **docs/API_VALIDATION.md** §5 checks (curl + jq); optional mutating flags in script header.
+- **Array API unknowns (live):** `./scripts/nimble_api_unknowns_probe.sh` — prompts for URL/username/password (like **`nimble_capacity_api_probe.sh`**), runs **docs/API_VALIDATION.md** §5 checks; **structured JSON** written to a file (default timestamped name; path optional); optional mutating flags in script header.
 - **Lint:** perltidy with `.perltidyrc`; markdownlint with `.markdownlint.json`. Run locally as needed (CI currently runs tests + plugin syntax checks).
 - **Build .deb:** `./scripts/build_deb.sh` (Docker, Debian bookworm) or CI on tag push.
 - **Install (manual):** Copy `NimbleStoragePlugin.pm` to `/usr/share/perl5/PVE/Storage/Custom/` on a PVE node and restart pvedaemon/pveproxy. Or install the built .deb.

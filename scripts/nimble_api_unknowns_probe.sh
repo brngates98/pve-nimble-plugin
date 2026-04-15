@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Probe a live HPE Nimble array for API behaviors documented as "verify on array" in
-# docs/API_VALIDATION.md (explicit unknowns). Read-only by default; optional flags run
-# mutating checks (initiator group create/delete, PUT multi_initiator).
+# docs/API_VALIDATION.md (explicit unknowns). Writes one structured JSON object to a file
+# (default: nimble-unknowns-probe-<UTC-timestamp>.json in cwd); optional argument overrides path.
+# Prints "Wrote <path>" to stderr on success (same pattern as nimble_capacity_api_probe.sh).
 #
 # Requires: curl, jq
 #
 # Usage:
-#   ./scripts/nimble_api_unknowns_probe.sh
+#   ./scripts/nimble_api_unknowns_probe.sh [output.json]
 #
 # Prompts for API base URL, username, and password (same pattern as nimble_capacity_api_probe.sh).
 # Environment (optional):
@@ -15,12 +16,14 @@
 #
 # Optional mutating probes (off by default):
 #   RUN_INLINE_IG_PROBE=1       POST initiator_groups with inline iscsi_initiators, then DELETE group
-#   RUN_MULTI_INITIATOR_PUT=1   PUT volumes/:id { multi_initiator: true } then GET (needs NIMBLE_VOL_ID)
+#   RUN_MULTI_INITIATOR_PUT=1   PUT volumes/:id { multi_initiator: true } then GET (needs a volume)
 #
 # Not automated here (too disruptive / environment-specific):
-#   - PUT volumes/:id online=false vs online=false+force — compare 4.x vs 5.x on your firmware manually.
+#   - PUT volumes/:id online=false vs online:false+force — compare 4.x vs 5.x on your firmware manually.
 #
 set -euo pipefail
+
+OUT="${1:-nimble-unknowns-probe-$(date -u +%Y%m%dT%H%M%SZ).json}"
 
 CURL_OPTS=( -sS )
 if [[ "${VERIFY_SSL:-}" != "1" ]]; then
@@ -37,12 +40,6 @@ need_cmd() {
 need_cmd curl
 need_cmd jq
 
-section() {
-  echo ""
-  echo "===> $*"
-  echo "--------------------------------------------------------------------------------"
-}
-
 # Normalize Nimble list payloads: data array, data.items, data.data, or single object with id.
 jq_nimble_list='.data as $d |
   (if ($d | type) == "array" then $d
@@ -50,6 +47,15 @@ jq_nimble_list='.data as $d |
    elif ($d | type) == "object" and (($d.data // null) | type) == "array" then $d.data
    elif ($d | type) == "object" and (($d.id // "") != "") then [$d]
    else [] end)'
+
+jq_first_row='
+  .data as $d |
+  (if ($d | type) == "array" then ($d[0] // {})
+   elif ($d | type) == "object" and (($d.items // null) | type) == "array" then ($d.items[0] // {})
+   elif ($d | type) == "object" and (($d.data // null) | type) == "array" then ($d.data[0] // {})
+   elif ($d | type) == "object" and (($d.id // "") != "") then $d
+   else {} end)
+'
 
 api_get() {
   local path="$1"
@@ -111,144 +117,244 @@ HTTP_CODE=$(curl "${CURL_OPTS[@]}" -w '%{http_code}' -o "$TMP/login.json" -X POS
   -d "$LOGIN_BODY")
 
 if [[ "$HTTP_CODE" != "201" && "$HTTP_CODE" != "200" ]]; then
-  echo "Login failed (HTTP $HTTP_CODE). Response:" >&2
-  cat "$TMP/login.json" >&2 || true
+  jq -n \
+    --arg base "$BASE" \
+    --argjson http "$(jq -n --arg c "$HTTP_CODE" '$c | tonumber')" \
+    --arg snippet "$(head -c 4000 "$TMP/login.json" 2>/dev/null || true)" \
+    '{error:"login_failed",meta:{nimble_api_base:$base},login:{http_code:$http,ok:false,response_snippet:$snippet}}' >&2
+  echo "Login failed (HTTP $HTTP_CODE)." >&2
   exit 1
 fi
 
 TOKEN=$(jq -r '.data.session_token // .session_token // empty' "$TMP/login.json")
 if [[ -z "$TOKEN" || "$TOKEN" == "null" ]]; then
-  echo "No session_token in login response." >&2
+  echo '{"error":"no_session_token","login":{"ok":false}}' >&2
   exit 1
 fi
 
-section "1) POST initiator_groups with inline iscsi_initiators"
+# --- 1) Initiator group inline probe ---
+IG_JSON='{}'
 if [[ "${RUN_INLINE_IG_PROBE:-}" == "1" ]]; then
   ig_name="pve-api-probe-ig-$(date -u +%Y%m%dT%H%M%SZ)-$$"
   body=$(jq -n \
     --arg n "$ig_name" \
     '{data:{name:$n,access_protocol:"iscsi",iscsi_initiators:[{label:"probe",iqn:"iqn.1996-04.de.proxmox:api-probe"}]}}')
-  code=$(api_post_json "initiator_groups" "$body" "$TMP/ig_post.json")
-  if [[ "$code" == "201" || "$code" == "200" ]]; then
-    ig_id=$(jq -r '.data.id // .id // empty' "$TMP/ig_post.json")
-    echo "OK: POST accepted (HTTP $code). Group id: $ig_id"
-    if [[ -n "$ig_id" && "$ig_id" != "null" ]]; then
-      dcode=$(api_delete "initiator_groups/$ig_id" "$TMP/ig_del.json")
-      echo "DELETE initiator_groups/$ig_id -> HTTP $dcode"
-    fi
-  else
-    echo "POST failed or unexpected HTTP $code (inline iscsi_initiators may be rejected on this firmware)."
-    head -c 2000 "$TMP/ig_post.json" 2>/dev/null || true
-    echo ""
-    echo "If rejected, use POST v1/initiators after creating an empty group (see docs/API_VALIDATION.md)."
+  post_code=$(api_post_json "initiator_groups" "$body" "$TMP/ig_post.json")
+  ig_id=$(jq -r '.data.id // .id // empty' "$TMP/ig_post.json")
+  del_code=""
+  delete_attempted=false
+  if [[ "$post_code" == "201" || "$post_code" == "200" ]] && [[ -n "$ig_id" && "$ig_id" != "null" ]]; then
+    delete_attempted=true
+    del_code=$(api_delete "initiator_groups/$ig_id" "$TMP/ig_del.json")
   fi
+  post_snip="$(head -c 2000 "$TMP/ig_post.json" 2>/dev/null || true)"
+  if [[ -n "$del_code" ]]; then
+    del_http_json=$(jq -n --arg c "$del_code" '$c | tonumber')
+  else
+    del_http_json=null
+  fi
+  IG_JSON=$(jq -n \
+    --arg name "$ig_name" \
+    --argjson post_http "$(jq -n --arg c "$post_code" '$c | tonumber')" \
+    --arg ig_id "${ig_id:-}" \
+    --argjson delete_http "$del_http_json" \
+    --argjson delete_attempted "$( [[ "$delete_attempted" == "true" ]] && echo true || echo false )" \
+    --arg post_snip "$post_snip" \
+    '{
+      skipped: false,
+      initiator_group_name: $name,
+      post_http_code: $post_http,
+      initiator_group_id: (if ($ig_id | length) > 0 then $ig_id else null end),
+      delete_http_code: $delete_http,
+      delete_attempted: $delete_attempted,
+      post_response_snippet: $post_snip
+    }')
 else
-  echo "Skipped (set RUN_INLINE_IG_PROBE=1 to POST a throwaway initiator group and DELETE it)."
+  IG_JSON=$(jq -n '{skipped:true,reason:"set RUN_INLINE_IG_PROBE=1 to POST a throwaway group and DELETE it"}')
 fi
 
-section "2) GET snapshots — filtered vs all"
-code=$(api_get "snapshots" "$TMP/snap_all.json")
-echo "GET snapshots -> HTTP $code"
-snap_all=$(jq "$jq_nimble_list | length" "$TMP/snap_all.json")
+# --- Snapshots ---
+code_snap_all=$(api_get "snapshots" "$TMP/snap_all.json")
+count_snap_all=$(jq "$jq_nimble_list | length" "$TMP/snap_all.json")
 
 VOL_ID="${NIMBLE_VOL_ID:-}"
 if [[ -z "$VOL_ID" ]]; then
   api_get "volumes" "$TMP/vols.json" >/dev/null
   VOL_ID=$(jq -r "$jq_nimble_list | .[0].id // empty" "$TMP/vols.json")
 fi
+
+SNAP_JSON='{}'
 if [[ -z "$VOL_ID" || "$VOL_ID" == "null" ]]; then
-  echo "No volume id (set NIMBLE_VOL_ID or ensure array has volumes). Skipping vol_id comparison."
+  SNAP_JSON=$(jq -n \
+    --argjson http "$(echo "$code_snap_all" | jq -n --arg c "$code_snap_all" '$c|tonumber')" \
+    --argjson count_all "$count_snap_all" \
+    '{
+      volume_id: null,
+      get_all_http_code: $http,
+      snapshot_count_all: $count_all,
+      skipped_vol_id_tests: true,
+      reason: "no volume id (set NIMBLE_VOL_ID or add volumes on array)"
+    }')
 else
-  echo "Using volume id: $VOL_ID"
-  # Match plugin: query param vol_id, URI-encoded
-  code=$(curl "${CURL_OPTS[@]}" -w '%{http_code}' -o "$TMP/snap_filt.json" -G "$BASE/v1/snapshots" \
+  code_snap_f=$(curl "${CURL_OPTS[@]}" -w '%{http_code}' -o "$TMP/snap_filt.json" -G "$BASE/v1/snapshots" \
     -H "X-Auth-Token: $TOKEN" \
     --data-urlencode "vol_id=$VOL_ID")
-  echo "GET snapshots?vol_id=... -> HTTP $code"
-  snap_filt=$(jq "$jq_nimble_list | length" "$TMP/snap_filt.json")
-  echo "Snapshot count (all list):     $snap_all"
-  echo "Snapshot count (vol_id filter): $snap_filt"
-  if [[ "$snap_all" -eq "$snap_filt" ]] && [[ "$snap_all" -gt 0 ]]; then
-    echo "Note: counts match with snapshots present — array may be ignoring vol_id filter, or only one volume has snaps."
-  elif [[ "$snap_filt" -le "$snap_all" ]]; then
-    echo "Filtered count <= full list (consistent with a working filter or subset)."
-  fi
-  # Cross-check: client-side filter on full list for this vol_id
-  snap_manual=$(jq --arg vid "$VOL_ID" "$jq_nimble_list | map(select((.vol_id // \"\") == \$vid)) | length" "$TMP/snap_all.json")
-  echo "Snapshots for this vol_id in unfiltered list (client filter): $snap_manual"
-  if [[ "$snap_manual" != "$snap_filt" ]]; then
-    echo "WARNING: server-filtered count ($snap_filt) != client-filtered count on full list ($snap_manual) — query param may not filter as expected."
-  fi
+  count_snap_f=$(jq "$jq_nimble_list | length" "$TMP/snap_filt.json")
+  count_snap_manual=$(jq --arg vid "$VOL_ID" "$jq_nimble_list | map(select((.vol_id // \"\") == \$vid)) | length" "$TMP/snap_all.json")
+  filter_matches_client=$(( count_snap_manual == count_snap_f ? 1 : 0 ))
+  SNAP_JSON=$(jq -n \
+    --arg vid "$VOL_ID" \
+    --argjson http_all "$(echo "$code_snap_all" | jq -n --arg c "$code_snap_all" '$c|tonumber')" \
+    --argjson http_filt "$(echo "$code_snap_f" | jq -n --arg c "$code_snap_f" '$c|tonumber')" \
+    --argjson count_all "$count_snap_all" \
+    --argjson count_filtered "$count_snap_f" \
+    --argjson count_client_side "$count_snap_manual" \
+    --argjson filter_matches_client "$filter_matches_client" \
+    '{
+      volume_id: $vid,
+      get_all_http_code: $http_all,
+      get_filtered_http_code: $http_filt,
+      snapshot_count_all: $count_all,
+      snapshot_count_server_filtered: $count_filtered,
+      snapshot_count_client_filtered_on_full_list: $count_client_side,
+      server_filter_matches_client_enumeration: ($filter_matches_client == 1),
+      note: (if ($count_all > 0) and ($count_all == $count_filtered) then "equal_counts_may_mean_ignored_filter_or_single_volume_snaps" else null end)
+    }')
 fi
 
-section "3) GET access_control_records — filtered vs all"
-code=$(api_get "access_control_records" "$TMP/acr_all.json")
-echo "GET access_control_records -> HTTP $code"
-acr_all=$(jq "$jq_nimble_list | length" "$TMP/acr_all.json")
-if [[ -n "${VOL_ID:-}" && "$VOL_ID" != "null" ]]; then
-  code=$(curl "${CURL_OPTS[@]}" -w '%{http_code}' -o "$TMP/acr_filt.json" -G "$BASE/v1/access_control_records" \
+# --- ACR ---
+code_acr_all=$(api_get "access_control_records" "$TMP/acr_all.json")
+count_acr_all=$(jq "$jq_nimble_list | length" "$TMP/acr_all.json")
+
+ACR_JSON='{}'
+if [[ -z "$VOL_ID" || "$VOL_ID" == "null" ]]; then
+  ACR_JSON=$(jq -n \
+    --argjson http "$(echo "$code_acr_all" | jq -n --arg c "$code_acr_all" '$c|tonumber')" \
+    --argjson count "$count_acr_all" \
+    '{
+      volume_id: null,
+      get_all_http_code: $http,
+      acr_count_all: $count,
+      skipped_vol_id_tests: true
+    }')
+else
+  code_acr_f=$(curl "${CURL_OPTS[@]}" -w '%{http_code}' -o "$TMP/acr_filt.json" -G "$BASE/v1/access_control_records" \
     -H "X-Auth-Token: $TOKEN" \
     --data-urlencode "vol_id=$VOL_ID")
-  echo "GET access_control_records?vol_id=... -> HTTP $code"
-  acr_filt=$(jq "$jq_nimble_list | length" "$TMP/acr_filt.json")
-  acr_manual=$(jq --arg vid "$VOL_ID" "$jq_nimble_list | map(select((.vol_id // \"\") == \$vid)) | length" "$TMP/acr_all.json")
-  echo "ACR count (all):     $acr_all"
-  echo "ACR count (vol_id):  $acr_filt"
-  echo "ACR for vol (manual): $acr_manual"
-  if [[ "$acr_manual" != "$acr_filt" ]]; then
-    echo "WARNING: server-filtered ACR count != client-filtered — vol_id query may be ignored or wrong shape."
-  fi
-else
-  echo "No VOL_ID; skipped vol_id ACR comparison."
+  count_acr_f=$(jq "$jq_nimble_list | length" "$TMP/acr_filt.json")
+  count_acr_manual=$(jq --arg vid "$VOL_ID" "$jq_nimble_list | map(select((.vol_id // \"\") == \$vid)) | length" "$TMP/acr_all.json")
+  acr_match=$(( count_acr_manual == count_acr_f ? 1 : 0 ))
+  ACR_JSON=$(jq -n \
+    --arg vid "$VOL_ID" \
+    --argjson http_all "$(echo "$code_acr_all" | jq -n --arg c "$code_acr_all" '$c|tonumber')" \
+    --argjson http_filt "$(echo "$code_acr_f" | jq -n --arg c "$code_acr_f" '$c|tonumber')" \
+    --argjson count_all "$count_acr_all" \
+    --argjson count_f "$count_acr_f" \
+    --argjson count_manual "$count_acr_manual" \
+    --argjson match "$acr_match" \
+    '{
+      volume_id: $vid,
+      get_all_http_code: $http_all,
+      get_filtered_http_code: $http_filt,
+      acr_count_all: $count_all,
+      acr_count_server_filtered: $count_f,
+      acr_count_client_filtered_on_full_list: $count_manual,
+      server_filter_matches_client_enumeration: ($match == 1)
+    }')
 fi
 
-section "4) GET volumes/:id — multi_initiator field"
-if [[ -n "${VOL_ID:-}" && "$VOL_ID" != "null" ]]; then
-  code=$(api_get "volumes/$VOL_ID" "$TMP/vol_detail.json")
-  echo "GET volumes/$VOL_ID -> HTTP $code"
-  jq -r '
-    .data as $d |
-    if ($d | type) == "object" then
-      "multi_initiator present: " + (($d | has("multi_initiator")) | tostring) + "\n" +
-      "multi_initiator value:   " + (($d.multi_initiator // "null") | tostring)
-    else
-      "Unexpected data shape"
-    end
-  ' "$TMP/vol_detail.json"
+# --- Volume multi_initiator ---
+VOL_JSON='{}'
+if [[ -n "$VOL_ID" && "$VOL_ID" != "null" ]]; then
+  code_vol=$(api_get "volumes/$VOL_ID" "$TMP/vol_detail.json")
+  mi_present=$(jq -c "$jq_first_row | if type == \"object\" then has(\"multi_initiator\") else false end" "$TMP/vol_detail.json")
+  mi_val=$(jq -c "$jq_first_row | if type == \"object\" then .multi_initiator else null end" "$TMP/vol_detail.json")
+  PUT_JSON='{"skipped":true}'
   if [[ "${RUN_MULTI_INITIATOR_PUT:-}" == "1" ]]; then
     put_body=$(jq -n '{data:{multi_initiator:true}}')
-    code=$(api_put_json "volumes/$VOL_ID" "$put_body" "$TMP/vol_put.json")
-    echo "PUT volumes/$VOL_ID {multi_initiator:true} -> HTTP $code"
+    put_code=$(api_put_json "volumes/$VOL_ID" "$put_body" "$TMP/vol_put.json")
     api_get "volumes/$VOL_ID" "$TMP/vol_after.json" >/dev/null
-    jq -r '.data.multi_initiator // .data // .' "$TMP/vol_after.json" | head -c 500
-    echo ""
-  else
-    echo "Skipped PUT (set RUN_MULTI_INITIATOR_PUT=1 to set multi_initiator true on this volume)."
+    mi_after=$(jq -c "$jq_first_row | if type == \"object\" then .multi_initiator else null end" "$TMP/vol_after.json")
+    put_snip="$(head -c 1500 "$TMP/vol_put.json" 2>/dev/null || true)"
+    PUT_JSON=$(jq -n \
+      --argjson put_http "$(jq -n --arg c "$put_code" '$c | tonumber')" \
+      --argjson mi_after "$mi_after" \
+      --arg put_snip "$put_snip" \
+      '{skipped:false,put_http_code:$put_http,multi_initiator_after_get:$mi_after,put_response_snippet:$put_snip}')
   fi
+  VOL_JSON=$(jq -n \
+    --arg vid "$VOL_ID" \
+    --argjson http "$(jq -n --arg c "$code_vol" '$c | tonumber')" \
+    --argjson mi_present "$mi_present" \
+    --argjson mi_value "$mi_val" \
+    --argjson put_block "$PUT_JSON" \
+    '{
+      volume_id: $vid,
+      get_http_code: $http,
+      multi_initiator_field_present: $mi_present,
+      multi_initiator_value_before_put: $mi_value,
+      multi_initiator_put_probe: $put_block
+    }')
 else
-  echo "No VOL_ID; skipped."
+  VOL_JSON=$(jq -n '{skipped:true,reason:"no volume id"}')
 fi
 
-section "5) GET arrays — top-level keys and first row field names"
-code=$(api_get "arrays" "$TMP/arrays.json")
-echo "GET arrays -> HTTP $code"
-jq -r '
-  .data as $d |
-  (if ($d | type) == "array" then ($d[0] // {})
-   elif ($d | type) == "object" and (($d.items // null) | type) == "array" then ($d.items[0] // {})
-   elif ($d | type) == "object" and (($d.data // null) | type) == "array" then ($d.data[0] // {})
-   elif ($d | type) == "object" and (($d.id // "") != "") then $d
-   else {} end) as $row |
-  "First row keys: " + (($row | keys | sort | join(", ")) // "(none)"),
-  ("usable_capacity_bytes: " + (($row.usable_capacity_bytes // "absent") | tostring)),
-  ("available_bytes:       " + (($row.available_bytes // "absent") | tostring)),
-  ("vol_usage_bytes:       " + (($row.vol_usage_bytes // "absent") | tostring)),
-  ("snap_usage_bytes:      " + (($row.snap_usage_bytes // "absent") | tostring))
-' "$TMP/arrays.json"
+# --- Arrays ---
+code_arrays=$(api_get "arrays" "$TMP/arrays.json")
+ARRAY_ROW=$(jq -c "$jq_first_row" "$TMP/arrays.json")
+ARRAYS_JSON=$(jq -n \
+  --argjson http "$(echo "$code_arrays" | jq -n --arg c "$code_arrays" '$c|tonumber')" \
+  --argjson row "$ARRAY_ROW" \
+  '{
+    get_http_code: $http,
+    first_row_keys: (if ($row|type)=="object" and ($row|keys|length)>0 then ($row|keys|sort) else [] end),
+    fields: {
+      usable_capacity_bytes: (if ($row|type)=="object" then $row.usable_capacity_bytes else null end),
+      available_bytes: (if ($row|type)=="object" then $row.available_bytes else null end),
+      vol_usage_bytes: (if ($row|type)=="object" then $row.vol_usage_bytes else null end),
+      snap_usage_bytes: (if ($row|type)=="object" then $row.snap_usage_bytes else null end)
+    }
+  }')
 
-section "6) Forced offline (manual)"
-echo "Not executed: PUT volumes/:id with online:false vs online:false+force depends on cgroup/sessions and firmware."
-echo "Record array software version from Nimble UI or support logs; compare behavior 4.x vs 5.x on your deployment."
+# --- Assemble report ---
+REPORT=$(jq -n \
+  --arg base "$BASE" \
+  --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg script "nimble_api_unknowns_probe.sh" \
+  --arg output_file "$OUT" \
+  --arg vol "${VOL_ID:-}" \
+  --argjson verify_ssl "$( [[ "${VERIFY_SSL:-}" == "1" ]] && echo true || echo false )" \
+  --argjson run_ig "$( [[ "${RUN_INLINE_IG_PROBE:-}" == "1" ]] && echo true || echo false )" \
+  --argjson run_mi_put "$( [[ "${RUN_MULTI_INITIATOR_PUT:-}" == "1" ]] && echo true || echo false )" \
+  --argjson login_http "$(jq -n --arg c "$HTTP_CODE" '$c | tonumber')" \
+  --argjson ig "$IG_JSON" \
+  --argjson snap "$SNAP_JSON" \
+  --argjson acr "$ACR_JSON" \
+  --argjson vol "$VOL_JSON" \
+  --argjson arrays "$ARRAYS_JSON" \
+  '{
+    meta: {
+      nimble_api_base: $base,
+      generated_utc: $generated,
+      script: $script,
+      output_file: $output_file,
+      volume_id_used: (if ($vol|length)>0 then $vol else null end),
+      verify_ssl: $verify_ssl,
+      run_inline_ig_probe: $run_ig,
+      run_multi_initiator_put: $run_mi_put,
+      note: "Password and session token are never included in this output."
+    },
+    login: { ok: true, http_code: $login_http },
+    initiator_groups_inline: $ig,
+    snapshots_vol_id_filter: $snap,
+    access_control_records_vol_id_filter: $acr,
+    volume_multi_initiator: $vol,
+    arrays_sample_fields: $arrays,
+    forced_offline: {
+      automated: false,
+      note: "PUT volumes/:id online:false vs online:false+force is firmware and session dependent; validate manually on your array version."
+    }
+  }')
 
-section "Done"
-echo "Raw JSON under: $TMP (removed on exit). Re-run with VERIFY_SSL=1 for strict TLS."
+printf '%s\n' "$REPORT" | jq . >"$OUT"
+echo "Wrote $OUT" >&2
