@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Read-only diagnostic for nimble_sync_array_snapshots: volumes vs snapshot vol_name matching,
-# bulk vs per-vol GET snapshots, and sample snapshot rows. Writes one JSON file for sharing.
+# bulk vs per-vol GET snapshots, sample snapshot rows, and (when any snapshot exists) a probe of
+# GET snapshots/:id, snapshots?id=, volumes/:id, snapshot_collections/:id — same order as the plugin
+# uses to fill creation_time / last_modified for PVE snaptime.
 #
 # Requires: curl, jq
 # Usage: ./scripts/nimble_snapshot_sync_diagnostic.sh [output.json]
@@ -73,7 +75,7 @@ BULK_COUNT=0
 BULK_SAMPLES='[]'
 if [[ "$BCODE" =~ ^2[0-9][0-9]$ ]]; then
   BULK_COUNT=$(jq "$jq_nimble_list | length" "$TMP/snap_bulk.json")
-  BULK_SAMPLES=$(jq -c "$jq_nimble_list | map({id, name, creation_time, last_modified, vol_name, vol_id, volume_name}) | .[0:5]" "$TMP/snap_bulk.json")
+  BULK_SAMPLES=$(jq -c "$jq_nimble_list | map({id, name, creation_time, last_modified, snap_collection_id, vol_name, vol_id, volume_name}) | .[0:5]" "$TMP/snap_bulk.json")
 fi
 REQUIRES_FILTER_JSON=$(echo "$BULK_SNIP" | jq -Rs 'test("SM_missing_arg")')
 
@@ -92,6 +94,7 @@ while IFS= read -r row; do
     name: .name,
     creation_time: .creation_time,
     last_modified: .last_modified,
+    snap_collection_id: .snap_collection_id,
     vol_name: .vol_name,
     vol_id: .vol_id,
     volume_name: .volume_name
@@ -119,6 +122,76 @@ if [[ "$idx" -eq 0 ]]; then
   PER_VOL='[]'
 else
   PER_VOL=$(jq -s '.' "$TMP"/pv_*.json)
+fi
+
+# Probe detail endpoints for one snapshot id (verify where creation_time appears — matches plugin hydration order).
+fields_from_nimble_json() {
+  local f="$1"
+  jq -c '
+    if (.data | type) == "object" and (.data.id != null or .data.creation_time != null or .data.name != null) then
+      .data | {creation_time, last_modified, snap_collection_id, name}
+    elif (.data | type) == "array" and (.data | length) > 0 then
+      .data[0] | {creation_time, last_modified, snap_collection_id, name}
+    else
+      {note: "unexpected or error body", raw_type: (.data | type)}
+    end
+  ' "$f" 2>/dev/null || echo '{"note":"jq parse failed"}'
+}
+
+wrap_probe() {
+  local code="$1" file="$2"
+  jq -n --arg c "$code" --argjson inner "$(fields_from_nimble_json "$file")" \
+    '{http: ($c|tonumber)} + $inner'
+}
+
+LIST_ROW_FOR_PROBE=$(echo "$PER_VOL" | jq -c '[.[].snapshot_samples[]?] | map(select(.id != null and (.id|tostring|length) > 0)) | .[0] // null')
+PROBE_ID=$(echo "$LIST_ROW_FOR_PROBE" | jq -r 'if . == null then empty else .id end')
+if [[ -z "$PROBE_ID" ]] && [[ "$BULK_OK_JSON" == "true" ]] && [[ "$BULK_COUNT" -gt 0 ]]; then
+  LIST_ROW_FOR_PROBE=$(jq -c "$jq_nimble_list | map(select(.id != null)) | .[0] // null" "$TMP/snap_bulk.json")
+  PROBE_ID=$(echo "$LIST_ROW_FOR_PROBE" | jq -r 'if . == null then empty else .id end')
+fi
+
+TIME_PROBE_JSON='{"skipped":"no snapshot id available for time probe"}'
+if [[ -n "$PROBE_ID" ]]; then
+  SNAP_P=$(api_get "snapshots/${PROBE_ID}" "$TMP/probe_snap_path.json")
+  SNAP_Q=$(curl "${CURL_OPTS[@]}" -w '%{http_code}' -o "$TMP/probe_snap_q.json" -G "$BASE/v1/snapshots" \
+    -H "X-Auth-Token: $TOKEN" --data-urlencode "id=$PROBE_ID")
+  VOL_P=$(api_get "volumes/${PROBE_ID}" "$TMP/probe_vol.json")
+
+  SCID=$(echo "$LIST_ROW_FOR_PROBE" | jq -r '.snap_collection_id // empty')
+  if [[ -z "$SCID" ]]; then
+    SCID=$(jq -r '
+      if (.data | type) == "object" then .data.snap_collection_id // empty
+      elif (.data | type) == "array" and (.data | length) > 0 then .data[0].snap_collection_id // empty
+      else empty end
+    ' "$TMP/probe_snap_path.json" 2>/dev/null)
+    SCID=${SCID:-}
+  fi
+
+  COLL_JSON='null'
+  if [[ -n "$SCID" ]]; then
+    COLL_C=$(api_get "snapshot_collections/${SCID}" "$TMP/probe_coll.json")
+    COLL_JSON=$(wrap_probe "$COLL_C" "$TMP/probe_coll.json")
+  fi
+
+  TIME_PROBE_JSON=$(jq -n \
+    --arg sid "$PROBE_ID" \
+    --argjson list_row "${LIST_ROW_FOR_PROBE:-null}" \
+    --argjson get_snapshots_path "$(wrap_probe "$SNAP_P" "$TMP/probe_snap_path.json")" \
+    --argjson get_snapshots_query "$(wrap_probe "$SNAP_Q" "$TMP/probe_snap_q.json")" \
+    --argjson get_volumes_path "$(wrap_probe "$VOL_P" "$TMP/probe_vol.json")" \
+    --argjson get_snapshot_collection "$COLL_JSON" \
+    --arg scid "${SCID:-}" \
+    '{
+      chosen_snapshot_id: $sid,
+      list_row_from_vol_filter: $list_row,
+      snap_collection_id_used: (if ($scid|length) > 0 then $scid else null end),
+      GET_snapshots_id_path: $get_snapshots_path,
+      GET_snapshots_id_query: $get_snapshots_query,
+      GET_volumes_id_path: $get_volumes_path,
+      GET_snapshot_collection_id_path: $get_snapshot_collection,
+      note: "If list_row has null creation_time but GET_volumes_id_path or GET_snapshots_id_path shows creation_time, the plugin can display Nimble time in PVE after hydration."
+    }')
 fi
 
 # Analysis: volume name keys vs snapshot vol_name (from per-volume samples + all snaps in those responses)
@@ -163,6 +236,7 @@ REPORT=$(jq -n \
   --arg bulk_snip "$BULK_SNIP" \
   --argjson per_volume "$PER_VOL" \
   --argjson analysis "$ANALYSIS" \
+  --argjson snapshot_time_detail_probe "$TIME_PROBE_JSON" \
   '{
     meta: {
       nimble_api_base: $base,
@@ -186,6 +260,7 @@ REPORT=$(jq -n \
       firmware_expects_query_filter: $requires_filter
     },
     snapshots_per_volume: $per_volume,
+    snapshot_time_detail_probe: $snapshot_time_detail_probe,
     sync_vol_name_analysis: $analysis
   }')
 
