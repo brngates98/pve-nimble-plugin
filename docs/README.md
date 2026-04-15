@@ -10,7 +10,7 @@ Use this page to choose **guides** vs **API / development** material without hun
 
 | Doc | What it is |
 |-----|------------|
-| **[README.md](../README.md)** | Requirements, scripted install, `pvesm` options, multipath, troubleshooting, debug. |
+| **[README.md](../README.md)** | Requirements, scripted install, `pvesm` options, multipath, troubleshooting, debug, informal real-array validation note. |
 | **[00-SETUP-FULLY-PROTECTED-STORAGE.md](00-SETUP-FULLY-PROTECTED-STORAGE.md)** | Long-form walkthrough: from empty cluster to Nimble-backed VMs, array snapshots, optional multipath. (The `00-` prefix only sorts this guide first in directory listings.) |
 | **[STORAGE_FEATURES_COMPARISON.md](STORAGE_FEATURES_COMPARISON.md)** | How this Nimble plugin compares to NFS, LVM, plain iSCSI, Ceph RBD for features and workflows. |
 

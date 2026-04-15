@@ -157,6 +157,10 @@ After editing, run `multipathd reconfigure`.
 
 > **Alias management:** The plugin automatically writes per-volume WWID→alias entries to `/etc/multipath/conf.d/nimble-<storeid>.conf` when volumes are mapped, and restores them on `activate_storage`. You do not need to manage this file manually — but do not hand-edit it, as the plugin owns it.
 
+## Lab validation (informal)
+
+The maintainer has exercised most day-to-day flows on **real Proxmox VE + HPE Nimble** (volumes, PVE and array snapshots, rollback, clone, move disk, capacity/status, multipath, array snapshot import into the VM snapshot list including snap time and descriptions). That is **not** a guarantee for every firmware or cluster layout; treat your own checks as authoritative.
+
 ## Troubleshooting
 
 ### Common errors
@@ -212,7 +216,7 @@ systemctl restart pvedaemon pveproxy pvestatd
 - Initiator group management (auto-create or use existing)
 - Storage-level snapshots: create, delete, rollback
 - Clone from snapshot
-- Array snapshot sync: Nimble array-created snapshots are imported into PVE VM configs automatically (visible in the Proxmox UI snapshot list)
+- Array snapshot sync: Nimble array-created snapshots are imported into PVE VM configs automatically (visible in the Proxmox UI snapshot list). The snapshot **description** lists each LUN as **array volume name**, a colon, and the **Nimble snapshot name**; multiple disks in one PVE snapshot are separated by semicolons.
 - Live migration (shared iSCSI block storage)
 - Optional multipath with automatic alias management (`/etc/multipath/conf.d/nimble-<storeid>.conf`)
 - Veeam Backup & Replication V13+ compatible (`raw+size` import/export)
