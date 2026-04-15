@@ -2921,6 +2921,11 @@ sub nimble_sync_array_snapshots {
       my $ok     = 1;
       my $min_ts = $ts;
       my $gui    = $seed->{ display_epoch };
+      my @nimble_snap_names;
+      if ( defined $seed_vol ) {
+        my $sn = $seed->{ name };
+        push @nimble_snap_names, "$seed_vol: $sn" if defined $sn && length $sn;
+      }
       for my $vname ( @vm_vols ) {
         next if defined($seed_vol) && $vname eq $seed_vol;
         unless ( exists $by_vmid{$vmid}{$vname} ) { $ok = 0; last; }
@@ -2934,6 +2939,8 @@ sub nimble_sync_array_snapshots {
           if ( defined $best->{ display_epoch } ) {
             $gui = $best->{ display_epoch } if !defined $gui || $best->{ display_epoch } < $gui;
           }
+          my $sn = $best->{ name };
+          push @nimble_snap_names, "$vname: $sn" if defined $sn && length $sn;
         } else {
           $ok = 0; last;
         }
@@ -2941,7 +2948,13 @@ sub nimble_sync_array_snapshots {
       if ($ok) {
         my $snaptime = defined $gui ? $gui
           : ( $min_ts >= NIMBLE_SNAPSHOT_PLAUSIBLE_EPOCH ? $min_ts : $snaptime_fallback );
-        push @groups, { pve_name => "nimble${min_ts}", snaptime => $snaptime };
+        my $desc = '';
+        if (@nimble_snap_names) {
+          my %seen_name;
+          @nimble_snap_names = grep { !$seen_name{$_}++ } @nimble_snap_names;
+          $desc = join( '; ', @nimble_snap_names );
+        }
+        push @groups, { pve_name => "nimble${min_ts}", snaptime => $snaptime, description => $desc };
       }
     }
 
@@ -2967,7 +2980,7 @@ sub nimble_sync_array_snapshots {
             next;
           }
           # Snapshot section mirrors current live config (best available record of state at snap time)
-          my $entry = { snaptime => $new_st, description => 'Imported from Nimble array' };
+          my $entry = { snaptime => $new_st, description => ( $g->{ description } // '' ) };
           for my $k ( keys %$conf ) {
             next if $k eq 'snapshots' || $k eq 'snapstate' || $k eq 'lock' || $k eq 'pending';
             next if ref( $conf->{ $k } );
