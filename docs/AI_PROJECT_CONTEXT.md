@@ -134,6 +134,7 @@ See `.cursor/rules/releases.mdc` for the full release rule.
 
 - **Unit tests:** `./tests/run_tests.sh` or `perl -I. tests/unit/<file>.t`. Requires Perl, Test::More, JSON (and JSON::XS for token_cache_test.pl).
 - **Array API unknowns (live):** `./scripts/nimble_api_unknowns_probe.sh` — prompts for URL/username/password (like **`nimble_capacity_api_probe.sh`**), auto-picks a probe volume id (volumes list or ACR **`vol_id`**), runs **docs/API_VALIDATION.md** section 5 checks; **structured JSON** to a file (default timestamped name; path optional); optional mutating flags in script header.
+- **Snapshot sync debug (live):** `./scripts/nimble_snapshot_sync_diagnostic.sh` — read-only JSON dump: **`volumes`**, bulk vs per-**`vol_id`** **`GET snapshots`**, per-volume snapshot samples, and **`sync_vol_name_analysis`** (whether **`snapshot.vol_name`** strings match **`volumes[].name`**). Use when array-created snapshots do not appear in Proxmox.
 - **Lint:** perltidy with `.perltidyrc`; markdownlint with `.markdownlint.json`. Run locally as needed (CI currently runs tests + plugin syntax checks).
 - **Build .deb:** `./scripts/build_deb.sh` (Docker, Debian bookworm) or CI on tag push.
 - **Install (manual):** Copy `NimbleStoragePlugin.pm` to `/usr/share/perl5/PVE/Storage/Custom/` on a PVE node and restart pvedaemon/pveproxy. Or install the built .deb.
