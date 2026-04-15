@@ -1035,44 +1035,84 @@ sub nimble_snapshot_display_epoch {
   return nimble_epoch_from_snapshot_name( $s->{ name } );
 }
 
-# List GET snapshots / snapshots?vol_id= may omit times; detail read often includes creation_time (same pattern as pools list vs pools/:id).
+# List GET snapshots may omit times. HPE documents snapshots as "volumes" — GET volumes/:id often returns creation_time when snapshots/:id does not.
+# Scheduled snaps may carry snap_collection_id; GET snapshot_collections/:id has creation_time for the collection (Python SDK).
 sub nimble_hydrate_snapshot_detail {
-  my ( $scfg, $storeid, $s ) = @_;
+  my ( $scfg, $storeid, $s, $coll_cache ) = @_;
   return 0 unless $s && ref($s) eq 'HASH';
   my $id = $s->{ id };
   return 0 unless defined $id && length $id;
   return 1 if nimble_snapshot_display_epoch($s);
-  my $merged;
+  $coll_cache = {} if !$coll_cache || ref($coll_cache) ne 'HASH';
+
+  my $merge_row = sub {
+    my ($h) = @_;
+    return 0 unless $h && ref($h) eq 'HASH';
+    %$s = ( %$s, %$h );
+    return nimble_snapshot_display_epoch($s) ? 1 : 0;
+  };
+
   my $r = eval { nimble_api_call( $scfg, 'GET', "snapshots/$id", undef, $storeid ) };
   if ( $r && ref( $r->{ data } ) eq 'HASH' ) {
-    $merged = $r->{ data };
+    return 1 if $merge_row->( $r->{ data } );
   }
-  else {
-    my $enc = uri_escape($id);
-    $r = eval { nimble_api_call( $scfg, 'GET', "snapshots?id=$enc", undef, $storeid ) };
-    if ( $r && ref( $r->{ data } ) eq 'HASH' ) {
-      $merged = $r->{ data };
+  my $enc = uri_escape($id);
+  $r = eval { nimble_api_call( $scfg, 'GET', "snapshots?id=$enc", undef, $storeid ) };
+  if ( $r && ref( $r->{ data } ) eq 'HASH' ) {
+    return 1 if $merge_row->( $r->{ data } );
+  }
+  elsif ( $r && ref( $r->{ data } ) eq 'ARRAY' && @{ $r->{ data } } && ref( $r->{ data }[0] ) eq 'HASH' ) {
+    return 1 if $merge_row->( $r->{ data }[0] );
+  }
+
+  $r = eval { nimble_api_call( $scfg, 'GET', "volumes/$id", undef, $storeid ) };
+  if ( $r && ref( $r->{ data } ) eq 'HASH' ) {
+    return 1 if $merge_row->( $r->{ data } );
+  }
+
+  my $scid = $s->{ snap_collection_id } // '';
+  if ( length $scid && !nimble_snapshot_display_epoch($s) ) {
+    if ( !exists $coll_cache->{ $scid } ) {
+      my $cr = eval { nimble_api_call( $scfg, 'GET', "snapshot_collections/$scid", undef, $storeid ) };
+      if ( $cr && ref( $cr->{ data } ) eq 'HASH' ) {
+        $coll_cache->{ $scid } = $cr->{ data };
+      }
+      else {
+        my $sce = uri_escape($scid);
+        $cr = eval { nimble_api_call( $scfg, 'GET', "snapshot_collections?id=$sce", undef, $storeid ) };
+        if ( $cr && ref( $cr->{ data } ) eq 'HASH' ) {
+          $coll_cache->{ $scid } = $cr->{ data };
+        }
+        elsif ( $cr && ref( $cr->{ data } ) eq 'ARRAY' && @{ $cr->{ data } } && ref( $cr->{ data }[0] ) eq 'HASH' ) {
+          $coll_cache->{ $scid } = $cr->{ data }[0];
+        }
+        else {
+          $coll_cache->{ $scid } = {};
+        }
+      }
     }
-    elsif ( $r && ref( $r->{ data } ) eq 'ARRAY' && @{ $r->{ data } } && ref( $r->{ data }[0] ) eq 'HASH' ) {
-      $merged = $r->{ data }[0];
+    my $c = $coll_cache->{ $scid };
+    if ( ref($c) eq 'HASH' && keys %$c ) {
+      for my $k (qw( creation_time last_modified )) {
+        $s->{ $k } //= $c->{ $k } if defined $c->{ $k };
+      }
+      return 1 if nimble_snapshot_display_epoch($s);
     }
   }
-  if ($merged) {
-    %$s = ( %$s, %$merged );
-    return 1;
-  }
-  return 0;
+
+  return nimble_snapshot_display_epoch($s) ? 1 : 0;
 }
 
 sub nimble_hydrate_snapshots_missing_display_time {
   my ( $scfg, $storeid, $snaps ) = @_;
   return unless ref($snaps) eq 'ARRAY';
   my %did;
+  my %coll_cache;
   for my $s ( @$snaps ) {
     next unless ref($s) eq 'HASH' && $s->{ id };
     next if $did{ $s->{ id } }++;
     next if nimble_snapshot_display_epoch($s);
-    eval { nimble_hydrate_snapshot_detail( $scfg, $storeid, $s ); 1 } or undef;
+    eval { nimble_hydrate_snapshot_detail( $scfg, $storeid, $s, \%coll_cache ); 1 } or undef;
   }
 }
 
@@ -3282,9 +3322,10 @@ sub volume_snapshot_info {
   # Compute the array-side base name (prefix + volname, no snap suffix) once.
   my $sep = nimble_volname( $scfg, $volname ) . '.';
   my %info;
+  my %snap_coll_cache;
   for my $s ( @$list ) {
     next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
-    eval { nimble_hydrate_snapshot_detail( $scfg, $storeid, $s ) } unless nimble_snapshot_display_epoch($s);
+    eval { nimble_hydrate_snapshot_detail( $scfg, $storeid, $s, \%snap_coll_cache ) } unless nimble_snapshot_display_epoch($s);
     my $array_name = $s->{ name } // '';
     my $ts_id      = nimble_snapshot_effective_creation_time($s);
     my $ts_gui     = nimble_snapshot_display_epoch($s);

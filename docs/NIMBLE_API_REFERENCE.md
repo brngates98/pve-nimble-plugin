@@ -115,7 +115,7 @@ Other sets in full docs: active_directory_memberships, alarms, application_serve
 - **Response (data):** `id`, `name`, `vol_id`, `vol_name`, `size`, `serial_number`, `creation_time`, `last_modified`, etc.
 - **Normal response:** 201, 202.
 
-**Read — GET v1/snapshots**, GET v1/snapshots?name=..., GET v1/snapshots?vol_id=..., optional **GET v1/snapshots/:id** or **GET v1/snapshots?id=** when list rows omit **`creation_time`** / **`last_modified`** (plugin merges detail into the row for PVE **snaptime**).  
+**Read — GET v1/snapshots**, GET v1/snapshots?name=..., GET v1/snapshots?vol_id=..., optional detail when list rows omit times (plugin **`nimble_hydrate_snapshot_detail`** merges in order): **GET v1/snapshots/:id**, **GET v1/snapshots?id=**, then **GET v1/volumes/:id** (HPE: snapshots are volumes; volume read often carries **`creation_time`**), then **GET v1/snapshot_collections/:id** (or **`snapshot_collections?id=`**) using the snapshot’s **`snap_collection_id`** for scheduled collection **`creation_time`**.  
 **Delete — DELETE v1/snapshots/id**
 
 ---
