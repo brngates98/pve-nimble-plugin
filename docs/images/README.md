@@ -1,6 +1,6 @@
 # Screenshots (Proxmox + Nimble UI)
 
-These images document **lab workflows** for the Nimble storage plugin: storage visibility in PVE, **VM disks** (and **CT Volumes** / `rootdir` when enabled — not all screens are shown here), snapshots, optional live migration, and the Nimble array UI. They are referenced from **[docs/00-SETUP-FULLY-PROTECTED-STORAGE.md](../00-SETUP-FULLY-PROTECTED-STORAGE.md)** and indexed in **[docs/README.md](../README.md)**.
+These images document **lab workflows** for the Nimble storage plugin: storage visibility in PVE, **VM disks** (and **CT Volumes** / `rootdir` when enabled — not all screens are shown here), snapshots, optional live migration, and the Nimble array UI. The **storage Summary** screenshot is also on the repository **[README.md](../README.md)** (Overview). They are referenced from **[docs/00-SETUP-FULLY-PROTECTED-STORAGE.md](../00-SETUP-FULLY-PROTECTED-STORAGE.md)** and indexed in **[docs/README.md](../README.md)**.
 
 | File | Topic |
 |------|--------|

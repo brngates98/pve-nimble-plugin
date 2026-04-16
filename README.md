@@ -2,6 +2,14 @@
 
 Integrates HPE Nimble Storage with Proxmox VE over iSCSI. Manages volumes via the Nimble REST API and presents them as **QEMU VM disks** and **LXC container root** volumes (`rootdir`, raw block) with optional multipath.
 
+## Overview
+
+Once Nimble storage is added, it shows up under **Datacenter → Storage** like any other datastore: **type `nimble`**, content types you configured, usage from the array pool, and a **Summary** view with capacity over time.
+
+![Proxmox Datacenter → Storage → Summary for a Nimble-backed store](docs/images/pve-storage-summary-nimble.png)
+
+**Screenshots:** The image above is the high-level storage view; more UI examples (VM Disks, snapshots, live migration, HPE Nimble volume list) are in **[docs/images/](docs/images/)** — see the index **[docs/images/README.md](docs/images/README.md)**. The same figures are embedded in the **[step-by-step setup guide](docs/00-SETUP-FULLY-PROTECTED-STORAGE.md)**.
+
 ## Requirements
 
 - Proxmox VE 8.2+
@@ -161,7 +169,7 @@ After editing, run `multipathd reconfigure`.
 
 The maintainer has exercised most day-to-day flows on **real Proxmox VE + HPE Nimble** (volumes, QEMU VM and LXC root disks where applicable, PVE and array snapshots, rollback, clone, move disk, capacity/status, multipath, array snapshot import into the VM snapshot list including snap time and descriptions). That is **not** a guarantee for every firmware or cluster layout; treat your own checks as authoritative.
 
-**Screenshots:** UI examples (storage summary, VM disks, snapshots, migration, Nimble volume list) live under **[docs/images/](docs/images/)** with an index in **[docs/images/README.md](docs/images/README.md)**.
+**Screenshots:** See **[Overview](#overview)** and **[docs/images/README.md](docs/images/README.md)**.
 
 ## Troubleshooting
 
@@ -231,7 +239,7 @@ systemctl restart pvedaemon pveproxy pvestatd
 
 | Audience | Start here |
 |----------|------------|
-| **Operators** | This README (install, config, feature comparison tables, troubleshooting). [Full setup walkthrough](docs/00-SETUP-FULLY-PROTECTED-STORAGE.md). [Extended feature comparison + storage-type guide](docs/STORAGE_FEATURES_COMPARISON.md). |
+| **Operators** | This README (install, config, [Overview](#overview) screenshots, feature comparison tables, troubleshooting). [Full setup walkthrough](docs/00-SETUP-FULLY-PROTECTED-STORAGE.md). [Extended feature comparison + storage-type guide](docs/STORAGE_FEATURES_COMPARISON.md). [All screenshots](docs/images/README.md). |
 | **API / integration** | [Nimble REST reference (in-repo)](docs/NIMBLE_API_REFERENCE.md), [plugin ↔ API validation](docs/API_VALIDATION.md). |
 | **Contributors / tooling** | [CONTRIBUTING.md](CONTRIBUTING.md), [AI / project context](docs/AI_PROJECT_CONTEXT.md), [tests](tests/README.md). |
 
