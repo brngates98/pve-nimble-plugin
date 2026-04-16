@@ -62,10 +62,12 @@ Environment:
   SSH_CONNECT_TIMEOUT     Seconds (default: 15); SSH to peers will not hang forever
   CURL_CONNECT_TIMEOUT    Seconds (default: 20)
   CURL_MAX_TIME           Max seconds per download (default: 120)
+  DEPLOY_SSH_USE_IP       Set to 1 to SSH to root@<corosync IP> instead of root@<nodename>
+                          (default: use PVE nodenames like pve001 — must resolve, e.g. /etc/hosts)
 
-  --all-nodes needs passwordless SSH: root@<each cluster IP> from this host (ssh-copy-id).
-  Local node is detected by matching this host name to the nodename in /etc/pve/.members
-  (hostname -s), then by cluster IP on an interface — corosync-only IPs need SSH on that net.
+  --all-nodes: SSH is root@<nodename> (pve001, pve002, …) from /etc/pve/.members — same names as
+  Datacenter → Cluster. Passwordless root keys required (ssh-copy-id root@pve002, etc.).
+  Local node: nodename matches /etc/hostname or hostname -s / short FQDN, else cluster IP on an iface.
 
 Examples:
   curl -fsSL .../deploy-nimble-plugin-pm.sh | sudo bash
@@ -168,12 +170,14 @@ deploy_local() {
     install_plugin_file "$PLUGIN_URL"
 }
 
-# Run single-node deploy on a peer via SSH (script fetched from DEPLOY_SCRIPT_URL)
+# Run single-node deploy on a peer via SSH (script fetched from DEPLOY_SCRIPT_URL).
+# Default target is root@<nodename> (pve001, …) so it matches /etc/hosts and typical PVE SSH habits.
 remote_deploy_via_curl() {
     ensure_env
-    local ip="${1:-}"
-    local url="${2:-}"
-    [[ -n "$ip" ]] || fail "remote_deploy_via_curl: missing node IP"
+    local nodename="${1:-}"
+    local ip="${2:-}"
+    local url="${3:-}"
+    [[ -n "$nodename" ]] || fail "remote_deploy_via_curl: missing nodename"
     url="${url:-$PLUGIN_URL}"
     [[ -n "$url" ]] || fail "remote_deploy_via_curl: missing plugin URL"
     local ct="${CURL_CONNECT_TIMEOUT:-20}"
@@ -181,13 +185,20 @@ remote_deploy_via_curl() {
     local rcmd
     rcmd=$(printf 'command -v curl >/dev/null || { echo "remote: need curl" >&2; exit 1; }; curl -fsSL --connect-timeout %q --max-time %q %q | bash -s -- -u %q' \
         "$ct" "$mt" "$DEPLOY_SCRIPT_URL" "$url")
-    local ssh_to="${SSH_USER:-root}@${ip}"
-    log "SSH $ssh_to (timeout ${SSH_CONNECT_TIMEOUT:-15}s) — if this hangs, fix root SSH keys / use the corosync IP your nodes listen on."
+    local ssh_target
+    if [[ "${DEPLOY_SSH_USE_IP:-0}" == "1" ]]; then
+        [[ -n "$ip" ]] || fail "remote_deploy_via_curl: DEPLOY_SSH_USE_IP=1 but missing IP for $nodename"
+        ssh_target="${SSH_USER:-root}@${ip}"
+        log "SSH $ssh_target (IP mode; member $nodename) timeout ${SSH_CONNECT_TIMEOUT:-15}s"
+    else
+        ssh_target="${SSH_USER:-root}@${nodename}"
+        log "SSH $ssh_target (timeout ${SSH_CONNECT_TIMEOUT:-15}s) — cluster IP in .members: ${ip:-?}"
+    fi
     ssh -o BatchMode=yes \
         -o StrictHostKeyChecking=accept-new \
         -o ConnectTimeout="${SSH_CONNECT_TIMEOUT:-15}" \
         -o ConnectionAttempts=1 \
-        "$ssh_to" "$rcmd"
+        "$ssh_target" "$rcmd"
 }
 
 main() {
@@ -235,9 +246,15 @@ main() {
     is_cluster_quorate || fail "Cluster is not quorate — refusing."
 
     mapfile -t local_ips < <(local_ipv4_list)
-    local hn_short hn_long
+    local hn_short hn_long hn_file hn_first
     hn_short="$(hostname -s 2>/dev/null || hostname)"
     hn_long="$(hostname -f 2>/dev/null || hostname)"
+    hn_first="${hn_long%%.*}"
+    hn_file=""
+    if [[ -r /etc/hostname ]]; then
+        IFS= read -r hn_file _ < /etc/hostname || true
+        hn_file="${hn_file//$'\r'/}"
+    fi
 
     local node_count=0
     while IFS=$'\t' read -r nodename ip; do
@@ -246,14 +263,16 @@ main() {
     done < <(enumerate_cluster_nodes)
     [[ "$node_count" -gt 0 ]] || fail "No nodes in $PVE_MEMBERS_FILE"
 
-    log "Cluster: $node_count node(s). This host: nodename ~ '$hn_short' / '$hn_long'."
+    log "Cluster: $node_count node(s). This host: /etc/hostname='${hn_file:-?}', short='$hn_short', fqdn='$hn_long'."
 
     local is_local lip
     while IFS=$'\t' read -r nodename ip; do
         [[ -n "${ip:-}" ]] || continue
 
         is_local=0
-        if [[ "$nodename" == "$hn_short" || "$nodename" == "$hn_long" || "$nodename" == "$(hostname)" ]]; then
+        if [[ -n "$hn_file" && "$nodename" == "$hn_file" ]]; then
+            is_local=1
+        elif [[ "$nodename" == "$hn_short" || "$nodename" == "$hn_first" || "$nodename" == "$hn_long" || "$nodename" == "$(hostname)" ]]; then
             is_local=1
         else
             for lip in "${local_ips[@]}"; do
@@ -267,10 +286,10 @@ main() {
         else
             log "=== Remote node $nodename ($ip) ==="
             if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
-                log "DRY-RUN: would ssh root@$ip: curl $DEPLOY_SCRIPT_URL | bash -s -- -u <PLUGIN_URL>"
+                log "DRY-RUN: would ssh root@${nodename}: curl ... | bash -s -- -u <PLUGIN_URL>  (set DEPLOY_SSH_USE_IP=1 to use $ip)"
                 continue
             fi
-            remote_deploy_via_curl "$ip" "$PLUGIN_URL"
+            remote_deploy_via_curl "$nodename" "$ip" "$PLUGIN_URL"
         fi
     done < <(enumerate_cluster_nodes)
 
