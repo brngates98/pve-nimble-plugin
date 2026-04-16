@@ -19,7 +19,7 @@
 |------|--------|--------|
 | **Core plugin** | Implemented | Create/delete/resize/rename volumes, list, status, activate/deactivate, map/unmap |
 | **LXC (`rootdir`)** | Implemented | Added as **`rootdir`** in **`plugindata` → `content`** alongside **`images`** and **`none`**; raw block only (no `subvol` format). Same code paths as VM disks; real-array CT smoke test recommended. |
-| **list_images / detach** | Implemented | Honors PVE’s `vollist` and `vmid` like RBD: explicit volids (e.g. `unusedN:` in qemu config) are listed for reattach; without `vollist`, results filter by `vmid`. |
+| **list_images / detach** | Implemented | Honors PVE’s `vollist` and `vmid` like RBD: explicit volids (e.g. `unusedN:` in qemu config) are listed for reattach; without `vollist`, results filter by `vmid`. **VM Disks Date:** **`ctime`** from **`nimble_volume_row_ctime_epoch`** (`creation_time`, else `last_modified` via **`nimble_parse_scalar_to_epoch`**); **`GET volumes/:id`** when list rows omit or return non-parseable times. |
 | **list_images caching** | Implemented | Volume list cached in `$cache->{nimble}{$storeid}` during a single PVE operation to avoid redundant REST calls. Returns a shallow copy to prevent cache mutation. |
 | **ACL on activate (initiator_group set)** | Fixed | `nimble_ensure_volume_acl_for_current_node` used to return immediately when `initiator_group` was set, so **no** access_control_record was created; LUN never presented → timeout waiting for disk. Now ACL is ensured for the configured group as well as for auto `pve-<nodename>`. |
 | **Auth** | Implemented | Username/password → POST /v1/tokens → session token; cached under `/etc/pve/priv/nimble/<storeid>.json` |

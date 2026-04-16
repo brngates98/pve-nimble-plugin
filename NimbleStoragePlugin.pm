@@ -1042,6 +1042,18 @@ sub nimble_parse_scalar_to_epoch {
   return undef;
 }
 
+# Unix epoch for PVE storage **ctime** (VM Disks Date column): prefers creation_time, else last_modified.
+sub nimble_volume_row_ctime_epoch {
+  my ($v) = @_;
+  return 0 unless ref($v) eq 'HASH';
+  for my $k (qw( creation_time last_modified )) {
+    next unless defined $v->{ $k };
+    my $e = nimble_parse_scalar_to_epoch( $v->{ $k } );
+    return $e if defined $e;
+  }
+  return 0;
+}
+
 sub nimble_epoch_from_snapshot_name {
   my ($n) = @_;
   $n //= '';
@@ -2296,19 +2308,25 @@ sub nimble_get_volume_id {
   }
   return ( undef, undef ) unless $vol;
 
-  # List/search often omit serial_number, target_name (per-volume iSCSI IQN), and sometimes size.
+  # List/search often omit serial_number, target_name (per-volume iSCSI IQN), size, and
+  # creation_time / last_modified (PVE VM Disks Date column uses ctime).
   # Fetch the full detail record when any of these are absent so callers always get correct values.
   if ( defined $vol->{ id } ) {
     my $need_serial = !length( $vol->{ serial_number } // '' );
     my $need_target = !length( $vol->{ target_name } // '' );
     my $need_size   = !( $vol->{ size } // 0 );
-    if ( $need_serial || $need_target || $need_size ) {
+    my $need_ctime  = !nimble_volume_row_ctime_epoch($vol);
+    if ( $need_serial || $need_target || $need_size || $need_ctime ) {
       $r = nimble_api_call( $scfg, 'GET', "volumes/$vol->{ id }", undef, $storeid );
       my $full = $r->{ data } || $r;
       if ( ref($full) eq 'HASH' ) {
         $vol->{ serial_number } = $full->{ serial_number } if length( $full->{ serial_number } // '' );
         $vol->{ target_name }    = $full->{ target_name } if length( $full->{ target_name } // '' );
         $vol->{ size }           = $full->{ size } if ( $full->{ size } // 0 ) > 0;
+        if ($need_ctime) {
+          $vol->{ creation_time } = $full->{ creation_time } if defined $full->{ creation_time };
+          $vol->{ last_modified }  = $full->{ last_modified }  if defined $full->{ last_modified };
+        }
       }
     }
   }
@@ -2327,12 +2345,21 @@ sub nimble_list_volumes {
     my $volname = length( $prefix ) ? substr( $name, length( $prefix ) ) : $name;
     next unless $volname =~ m/^vm-\d+-(disk-|cloudinit|state-)/;
     my ( undef, undef, $volvm ) = $class->parse_volname( $volname );
-    # List endpoint sometimes omits size (returns 0) for freshly-created volumes.
-    # Fetch the full record so the GUI and move_disk get the real provisioned size.
-    if ( !( $v->{ size } // 0 ) && defined $v->{ id } ) {
+    # List endpoint sometimes omits size (returns 0) and/or times used for the GUI Date column.
+    # Fetch the full record so move_disk and **ctime** match GET volumes/:id.
+    my $need_size  = !( $v->{ size } // 0 );
+    my $need_ctime = !nimble_volume_row_ctime_epoch($v);
+    if ( ( $need_size || $need_ctime ) && defined $v->{ id } ) {
       my $detail = eval { nimble_api_call( $scfg, 'GET', "volumes/$v->{ id }", undef, $storeid ) };
-      if ( $detail && ref( $detail->{ data } ) eq 'HASH' && ( $detail->{ data }{ size } // 0 ) > 0 ) {
-        $v->{ size } = $detail->{ data }{ size };
+      if ( $detail && ref( $detail->{ data } ) eq 'HASH' ) {
+        my $d = $detail->{ data };
+        if ( $need_size && ( $d->{ size } // 0 ) > 0 ) {
+          $v->{ size } = $d->{ size };
+        }
+        if ($need_ctime) {
+          $v->{ creation_time } = $d->{ creation_time } if defined $d->{ creation_time };
+          $v->{ last_modified }  = $d->{ last_modified }  if defined $d->{ last_modified };
+        }
       }
     }
     push @volumes,
@@ -2342,7 +2369,7 @@ sub nimble_list_volumes {
         serial => $v->{ serial_number },
         size   => ( $v->{ size } || 0 ) * 1024 * 1024,
         used   => ( $v->{ vol_usage_compressed_bytes } || $v->{ size } || 0 ) * 1024 * 1024,
-        ctime  => $v->{ creation_time } || 0,
+        ctime  => nimble_volume_row_ctime_epoch($v) || 0,
         volid  => $storeid ? "$storeid:$volname" : $volname,
         format => 'raw'
       };
@@ -2372,7 +2399,7 @@ sub nimble_get_volume_info {
     target_name  => $vol->{ target_name } // '',
     size         => ( $vol->{ size } || 0 ) * 1024 * 1024,
     used         => ( $vol->{ vol_usage_compressed_bytes } || $vol->{ size } || 0 ) * 1024 * 1024,
-    ctime        => $vol->{ creation_time } || 0,
+    ctime        => nimble_volume_row_ctime_epoch($vol) || 0,
     volid        => $storeid ? "$storeid:$array_name" : $array_name,
     format       => 'raw'
   };
