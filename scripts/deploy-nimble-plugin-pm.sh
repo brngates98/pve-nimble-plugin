@@ -56,12 +56,12 @@ Environment:
   SSH_CONNECT_TIMEOUT     Seconds (default: 15); SSH to peers will not hang forever
   CURL_CONNECT_TIMEOUT    Seconds (default: 20)
   CURL_MAX_TIME           Max seconds per download (default: 120)
-  DEPLOY_SSH_USE_IP       Set to 1 to SSH to root@<corosync IP> instead of root@<nodename>
-                          (default: use PVE nodenames like pve001 — must resolve, e.g. /etc/hosts)
+  DEPLOY_SSH_USE_IP       Set to 1 to SSH to root@<IP> instead of root@<nodename>
+                          (IP is whatever /etc/pve/.members lists for that node; default is SSH by name)
 
   --all-nodes: SSH is root@<nodename> (pve001, pve002, …) from /etc/pve/.members — same names as
   Datacenter → Cluster. Passwordless root keys required (ssh-copy-id root@pve002, etc.).
-  Local node: nodename matches /etc/hostname or hostname -s / short FQDN, else cluster IP on an iface.
+  Local node: nodename matches /etc/hostname or hostname -s / short FQDN, else IP from .members on an iface.
 
 Examples:
   curl -fsSL .../deploy-nimble-plugin-pm.sh | sudo bash    # get this helper once; it only pulls NimbleStoragePlugin.pm
@@ -212,7 +212,7 @@ remote_deploy_via_ssh() {
         log "SSH $ssh_target (IP mode; member $nodename) timeout ${SSH_CONNECT_TIMEOUT:-15}s"
     else
         ssh_target="${SSH_USER:-root}@${nodename}"
-        log "SSH $ssh_target (timeout ${SSH_CONNECT_TIMEOUT:-15}s) — .members IP: ${ip:-?}"
+        log "SSH $ssh_target (timeout ${SSH_CONNECT_TIMEOUT:-15}s) — member IP in .members: ${ip:-?}"
     fi
     ssh -o BatchMode=yes \
         -o StrictHostKeyChecking=accept-new \
