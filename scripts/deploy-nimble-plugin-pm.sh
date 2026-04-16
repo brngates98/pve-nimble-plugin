@@ -157,9 +157,36 @@ local_ipv4_list() {
     ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true
 }
 
+# This host's cluster nodename from "pvecm status" (line with "(local)"). Most reliable for -a ordering.
+pve_local_nodename() {
+    command -v pvecm >/dev/null 2>&1 || return 0
+    local out
+    if command -v timeout >/dev/null 2>&1; then
+        out=$(timeout 12 pvecm status 2>/dev/null) || out=""
+    else
+        out=$(pvecm status 2>/dev/null) || out=""
+    fi
+    echo "$out" | perl -lne 'print $1 if /\b(\S+)\s*\(local\)/' | head -1
+}
+
 preflight() {
     [[ $EUID -eq 0 ]] || fail "Run as root (sudo)."
     command -v pveversion >/dev/null || fail "Not a Proxmox VE host (pveversion missing)."
+}
+
+# Set DEPLOY_* vars in main before calling (all-nodes path).
+node_row_is_local() {
+    local nodename="$1"
+    local ip="$2"
+    [[ -n "${DEPLOY_PVE_LOCAL:-}" && "$nodename" == "${DEPLOY_PVE_LOCAL}" ]] && return 0
+    [[ -n "${DEPLOY_HN_FILE:-}" && "$nodename" == "${DEPLOY_HN_FILE}" ]] && return 0
+    [[ "$nodename" == "${DEPLOY_HN_SHORT:-}" || "$nodename" == "${DEPLOY_HN_FIRST:-}" \
+        || "$nodename" == "${DEPLOY_HN_LONG:-}" || "$nodename" == "${DEPLOY_HOST_NOW:-}" ]] && return 0
+    local lip
+    for lip in "${DEPLOY_LOCAL_IPS[@]}"; do
+        [[ "$ip" == "$lip" ]] && return 0
+    done
+    return 1
 }
 
 deploy_local() {
@@ -256,57 +283,73 @@ main() {
         exit 0
     fi
 
+    log "[all-nodes] preflight OK — entering cluster steps (if this hangs, check: pvecm status, ssh root@peers)."
     [[ -r "$PVE_MEMBERS_FILE" ]] || fail "Cannot read $PVE_MEMBERS_FILE"
     is_cluster || fail "Not in a cluster — run without --all-nodes"
     is_cluster_quorate || fail "Cluster is not quorate — refusing."
 
+    log "[all-nodes] Reading nodelist from $PVE_MEMBERS_FILE ..."
+    mapfile -t cluster_lines < <(enumerate_cluster_nodes)
+    [[ ${#cluster_lines[@]} -gt 0 ]] || fail "No nodes in $PVE_MEMBERS_FILE"
+    log "[all-nodes] Found ${#cluster_lines[@]} cluster member(s)."
+
     mapfile -t local_ips < <(local_ipv4_list)
-    local hn_short hn_long hn_file hn_first
+    local hn_short hn_long hn_file hn_first host_now pve_local
     hn_short="$(hostname -s 2>/dev/null || hostname)"
     hn_long="$(hostname -f 2>/dev/null || hostname)"
     hn_first="${hn_long%%.*}"
+    host_now="$(hostname 2>/dev/null || true)"
     hn_file=""
     if [[ -r /etc/hostname ]]; then
         IFS= read -r hn_file _ < /etc/hostname || true
         hn_file="${hn_file//$'\r'/}"
     fi
+    log "[all-nodes] Resolving local nodename (pvecm) ..."
+    pve_local="$(pve_local_nodename)"
+    pve_local="${pve_local//$'\r'/}"
+    log "[all-nodes] pvecm (local)='$pve_local'  hostname -s='$hn_short'  /etc/hostname='${hn_file:-}'"
 
-    local node_count=0
-    while IFS=$'\t' read -r nodename ip; do
+    DEPLOY_PVE_LOCAL="$pve_local"
+    DEPLOY_HN_FILE="$hn_file"
+    DEPLOY_HN_SHORT="$hn_short"
+    DEPLOY_HN_FIRST="$hn_first"
+    DEPLOY_HN_LONG="$hn_long"
+    DEPLOY_HOST_NOW="$host_now"
+    DEPLOY_LOCAL_IPS=("${local_ips[@]}")
+
+    local nodename ip did_local=0
+    # 1) This host first (avoids alphabetical SSH to remotes while local still outdated / keys weird).
+    log "[all-nodes] Step 1/2: this node (curl + install + restart) ..."
+    for line in "${cluster_lines[@]}"; do
+        IFS=$'\t' read -r nodename ip <<<"$line"
         [[ -n "${ip:-}" ]] || continue
-        node_count=$((node_count + 1))
-    done < <(enumerate_cluster_nodes)
-    [[ "$node_count" -gt 0 ]] || fail "No nodes in $PVE_MEMBERS_FILE"
-
-    log "Cluster: $node_count node(s). This host: /etc/hostname='${hn_file:-?}', short='$hn_short', fqdn='$hn_long'."
-
-    local is_local lip
-    while IFS=$'\t' read -r nodename ip; do
-        [[ -n "${ip:-}" ]] || continue
-
-        is_local=0
-        if [[ -n "$hn_file" && "$nodename" == "$hn_file" ]]; then
-            is_local=1
-        elif [[ "$nodename" == "$hn_short" || "$nodename" == "$hn_first" || "$nodename" == "$hn_long" || "$nodename" == "$(hostname)" ]]; then
-            is_local=1
-        else
-            for lip in "${local_ips[@]}"; do
-                [[ "$ip" == "$lip" ]] && { is_local=1; break; }
-            done
-        fi
-
-        if [[ "$is_local" -eq 1 ]]; then
-            log "=== Local node $nodename ($ip) ==="
+        if node_row_is_local "$nodename" "$ip"; then
+            log "=== LOCAL $nodename ($ip) ==="
             deploy_local
-        else
-            log "=== Remote node $nodename ($ip) ==="
-            if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
-                log "DRY-RUN: would ssh root@${nodename} and curl-install $PLUGIN_URL (DEPLOY_SSH_USE_IP=1 → use IP $ip)"
-                continue
-            fi
-            remote_deploy_via_ssh "$nodename" "$ip" "$PLUGIN_URL"
+            did_local=1
+            break
         fi
-    done < <(enumerate_cluster_nodes)
+    done
+    if [[ "$did_local" -eq 0 ]]; then
+        log "WARNING: [all-nodes] could not match this host to a nodelist row (see pvecm/hostname above). Running install here anyway."
+        deploy_local
+    fi
+
+    # 2) Peers via SSH
+    log "[all-nodes] Step 2/2: remote nodes (SSH + curl .pm only) ..."
+    for line in "${cluster_lines[@]}"; do
+        IFS=$'\t' read -r nodename ip <<<"$line"
+        [[ -n "${ip:-}" ]] || continue
+        if node_row_is_local "$nodename" "$ip"; then
+            continue
+        fi
+        log "=== REMOTE $nodename ($ip) ==="
+        if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+            log "DRY-RUN: would ssh root@${nodename} (DEPLOY_SSH_USE_IP=1 → $ip)"
+            continue
+        fi
+        remote_deploy_via_ssh "$nodename" "$ip" "$PLUGIN_URL"
+    done
 
     log "Done (all nodes)."
 }
