@@ -6,7 +6,7 @@ Integrates HPE Nimble Storage with Proxmox VE over iSCSI. Manages volumes via th
 
 Once Nimble storage is added, it shows up under **Datacenter → Storage** like any other datastore: **type `nimble`**, content types you configured, usage from the array pool, and a **Summary** view with capacity over time.
 
-![Proxmox Datacenter → Storage → Summary for a Nimble-backed store](docs/images/pve-storage-summary-nimble.png)
+![Proxmox Datacenter → Storage → Summary for a Nimble-backed store](https://raw.githubusercontent.com/brngates98/pve-nimble-plugin/main/docs/images/pve-storage-summary-nimble.png)
 
 **Screenshots:** The image above is the high-level storage view; more UI examples (VM Disks, snapshots, live migration, HPE Nimble volume list) are in **[docs/images/](docs/images/)** — see the index **[docs/images/README.md](docs/images/README.md)**. The same figures are embedded in the **[step-by-step setup guide](docs/00-SETUP-FULLY-PROTECTED-STORAGE.md)**.
 
