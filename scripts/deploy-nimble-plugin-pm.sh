@@ -10,7 +10,7 @@
 #   sudo bash scripts/deploy-nimble-plugin-pm.sh
 #   sudo PLUGIN_URL=https://example.com/NimbleStoragePlugin.pm bash ...
 #
-# All cluster nodes (SSH as root to peers; each node pulls the same URL):
+# All cluster nodes (SSH root@pve00N; each peer curls only NimbleStoragePlugin.pm — same URL):
 #   sudo bash scripts/deploy-nimble-plugin-pm.sh --all-nodes
 #
 # Note: If you install libpve-storage-nimble-perl from APT, the next package
@@ -25,11 +25,7 @@ readonly PVE_MEMBERS_FILE='/etc/pve/.members'
 # Same as scripts/install-pve-nimble-plugin.sh / debian/postinst
 readonly RESTART_SERVICES=(pvedaemon pvestatd pveproxy pvescheduler)
 readonly DEFAULT_PLUGIN_URL='https://raw.githubusercontent.com/brngates98/pve-nimble-plugin/main/NimbleStoragePlugin.pm'
-# Used for --all-nodes remotes (each node curls this script, then runs single-node deploy)
-readonly DEFAULT_DEPLOY_SCRIPT_URL='https://raw.githubusercontent.com/brngates98/pve-nimble-plugin/main/scripts/deploy-nimble-plugin-pm.sh'
-
 PLUGIN_URL="${PLUGIN_URL:-$DEFAULT_PLUGIN_URL}"
-DEPLOY_SCRIPT_URL="${DEPLOY_SCRIPT_URL:-$DEFAULT_DEPLOY_SCRIPT_URL}"
 DRY_RUN=0
 ALL_NODES=0
 VERBOSE=0
@@ -37,7 +33,6 @@ VERBOSE=0
 # Idempotent defaults for set -u / partial sourcing (e.g. snippet in a host upgrade script).
 ensure_env() {
     PLUGIN_URL="${PLUGIN_URL:-$DEFAULT_PLUGIN_URL}"
-    DEPLOY_SCRIPT_URL="${DEPLOY_SCRIPT_URL:-$DEFAULT_DEPLOY_SCRIPT_URL}"
     DRY_RUN="${DRY_RUN:-0}"
     ALL_NODES="${ALL_NODES:-0}"
     VERBOSE="${VERBOSE:-0}"
@@ -51,14 +46,13 @@ usage() {
 Usage: ${0##*/} [options]
 
   -u, --url URL     Fetch NimbleStoragePlugin.pm from URL (default: main on GitHub)
-  -a, --all-nodes   Deploy on all nodes in the cluster (SSH root@<node-ip>)
+  -a, --all-nodes   Deploy on all nodes (SSH root@<nodename>, e.g. pve002)
   -n, --dry-run     Print actions only
   -v, --verbose     More output
   -h, --help        This help
 
 Environment:
   PLUGIN_URL              Same as --url
-  DEPLOY_SCRIPT_URL       Used with --all-nodes on SSH peers (default: main script on GitHub)
   SSH_CONNECT_TIMEOUT     Seconds (default: 15); SSH to peers will not hang forever
   CURL_CONNECT_TIMEOUT    Seconds (default: 20)
   CURL_MAX_TIME           Max seconds per download (default: 120)
@@ -134,8 +128,11 @@ install_plugin_file() {
 enumerate_cluster_nodes() {
     perl -MJSON -0777 -e '
         my $j = from_json(<STDIN>);
-        for my $name (sort keys %{$j->{nodelist}}) {
-            my $ip = $j->{nodelist}{$name}{ip} // next;
+        my $nl = $j->{nodelist} // {};
+        for my $name (sort keys %$nl) {
+            my $ent = $nl->{$name};
+            next unless ref($ent) eq "HASH";
+            my $ip = $ent->{ip} // next;
             print "$name\t$ip\n";
         }
     ' "$PVE_MEMBERS_FILE"
@@ -170,35 +167,54 @@ deploy_local() {
     install_plugin_file "$PLUGIN_URL"
 }
 
-# Run single-node deploy on a peer via SSH (script fetched from DEPLOY_SCRIPT_URL).
-# Default target is root@<nodename> (pve001, …) so it matches /etc/hosts and typical PVE SSH habits.
-remote_deploy_via_curl() {
+# Run on a peer over SSH: download only NimbleStoragePlugin.pm (no second curl of this deploy script).
+# URL and timeouts are passed as argv so quoting stays reliable; stdin is a fixed remote script.
+remote_deploy_via_ssh() {
     ensure_env
     local nodename="${1:-}"
     local ip="${2:-}"
     local url="${3:-}"
-    [[ -n "$nodename" ]] || fail "remote_deploy_via_curl: missing nodename"
+    [[ -n "$nodename" ]] || fail "remote_deploy_via_ssh: missing nodename"
     url="${url:-$PLUGIN_URL}"
-    [[ -n "$url" ]] || fail "remote_deploy_via_curl: missing plugin URL"
+    [[ -n "$url" ]] || fail "remote_deploy_via_ssh: missing plugin URL"
     local ct="${CURL_CONNECT_TIMEOUT:-20}"
     local mt="${CURL_MAX_TIME:-120}"
-    local rcmd
-    rcmd=$(printf 'command -v curl >/dev/null || { echo "remote: need curl" >&2; exit 1; }; curl -fsSL --connect-timeout %q --max-time %q %q | bash -s -- -u %q' \
-        "$ct" "$mt" "$DEPLOY_SCRIPT_URL" "$url")
     local ssh_target
     if [[ "${DEPLOY_SSH_USE_IP:-0}" == "1" ]]; then
-        [[ -n "$ip" ]] || fail "remote_deploy_via_curl: DEPLOY_SSH_USE_IP=1 but missing IP for $nodename"
+        [[ -n "$ip" ]] || fail "remote_deploy_via_ssh: DEPLOY_SSH_USE_IP=1 but missing IP for $nodename"
         ssh_target="${SSH_USER:-root}@${ip}"
         log "SSH $ssh_target (IP mode; member $nodename) timeout ${SSH_CONNECT_TIMEOUT:-15}s"
     else
         ssh_target="${SSH_USER:-root}@${nodename}"
-        log "SSH $ssh_target (timeout ${SSH_CONNECT_TIMEOUT:-15}s) — cluster IP in .members: ${ip:-?}"
+        log "SSH $ssh_target (timeout ${SSH_CONNECT_TIMEOUT:-15}s) — .members IP: ${ip:-?}"
     fi
     ssh -o BatchMode=yes \
         -o StrictHostKeyChecking=accept-new \
         -o ConnectTimeout="${SSH_CONNECT_TIMEOUT:-15}" \
         -o ConnectionAttempts=1 \
-        "$ssh_target" "$rcmd"
+        "$ssh_target" \
+        bash -s -- "$url" "$ct" "$mt" <<'REMOTE_SCRIPT'
+set -euo pipefail
+TARGET='/usr/share/perl5/PVE/Storage/Custom/NimbleStoragePlugin.pm'
+SERVICES=(pvedaemon pvestatd pveproxy pvescheduler)
+PLUGIN_URL_REMOTE=$1
+CT=$2
+MT=$3
+command -v curl >/dev/null 2>&1 || { echo 'remote: install curl' >&2; exit 1; }
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+curl -fsSL --connect-timeout "$CT" --max-time "$MT" -o "$tmp" -- "$PLUGIN_URL_REMOTE"
+head -n 1 "$tmp" | grep -q '^package PVE::Storage::Custom::NimbleStoragePlugin' \
+  || { echo 'remote: file is not NimbleStoragePlugin.pm' >&2; exit 1; }
+install -d -m 755 "$(dirname "$TARGET")"
+install -m 644 "$tmp" "$TARGET"
+if command -v deb-systemd-invoke >/dev/null 2>&1; then
+  for s in "${SERVICES[@]}"; do deb-systemd-invoke try-restart "${s}.service" 2>/dev/null || true; done
+else
+  for s in "${SERVICES[@]}"; do systemctl try-restart "${s}.service" 2>/dev/null || true; done
+fi
+echo "remote: OK $TARGET"
+REMOTE_SCRIPT
 }
 
 main() {
@@ -286,10 +302,10 @@ main() {
         else
             log "=== Remote node $nodename ($ip) ==="
             if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
-                log "DRY-RUN: would ssh root@${nodename}: curl ... | bash -s -- -u <PLUGIN_URL>  (set DEPLOY_SSH_USE_IP=1 to use $ip)"
+                log "DRY-RUN: would ssh root@${nodename} and curl-install $PLUGIN_URL (DEPLOY_SSH_USE_IP=1 → use IP $ip)"
                 continue
             fi
-            remote_deploy_via_curl "$nodename" "$ip" "$PLUGIN_URL"
+            remote_deploy_via_ssh "$nodename" "$ip" "$PLUGIN_URL"
         fi
     done < <(enumerate_cluster_nodes)
 
