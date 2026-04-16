@@ -1,6 +1,6 @@
 # Proxmox VE Plugin for HPE Nimble Storage (iSCSI)
 
-Integrates HPE Nimble Storage with Proxmox VE over iSCSI. Manages volumes via the Nimble REST API and presents them as VM disks with optional multipath.
+Integrates HPE Nimble Storage with Proxmox VE over iSCSI. Manages volumes via the Nimble REST API and presents them as **QEMU VM disks** and **LXC container root** volumes (`rootdir`, raw block) with optional multipath.
 
 ## Requirements
 
@@ -159,7 +159,7 @@ After editing, run `multipathd reconfigure`.
 
 ## Lab validation (informal)
 
-The maintainer has exercised most day-to-day flows on **real Proxmox VE + HPE Nimble** (volumes, PVE and array snapshots, rollback, clone, move disk, capacity/status, multipath, array snapshot import into the VM snapshot list including snap time and descriptions). That is **not** a guarantee for every firmware or cluster layout; treat your own checks as authoritative.
+The maintainer has exercised most day-to-day flows on **real Proxmox VE + HPE Nimble** (volumes, QEMU VM and LXC root disks where applicable, PVE and array snapshots, rollback, clone, move disk, capacity/status, multipath, array snapshot import into the VM snapshot list including snap time and descriptions). That is **not** a guarantee for every firmware or cluster layout; treat your own checks as authoritative.
 
 **Screenshots:** UI examples (storage summary, VM disks, snapshots, migration, Nimble volume list) live under **[docs/images/](docs/images/)** with an index in **[docs/images/README.md](docs/images/README.md)**.
 
@@ -215,10 +215,11 @@ systemctl restart pvedaemon pveproxy pvestatd
 ## Features
 
 - Create, delete, resize, rename volumes via Nimble REST API
+- **VM disks** (`images`) and **LXC CT roots** (`rootdir`) on raw Nimble volumes — set `content` as in **Add Storage** (typically `images,rootdir`)
 - Initiator group management (auto-create or use existing)
 - Storage-level snapshots: create, delete, rollback
 - Clone from snapshot
-- Array snapshot sync: Nimble array-created snapshots are imported into PVE VM configs automatically (visible in the Proxmox UI snapshot list). The snapshot **description** lists each LUN as **array volume name**, a colon, and the **Nimble snapshot name**; multiple disks in one PVE snapshot are separated by semicolons.
+- Array snapshot sync: Nimble array-created snapshots are imported into **QEMU** VM configs automatically (visible in the Proxmox UI snapshot list; LXC/`rootdir` is not part of this sync path — see [AI project context](docs/AI_PROJECT_CONTEXT.md)). The snapshot **description** lists each LUN as **array volume name**, a colon, and the **Nimble snapshot name**; multiple disks in one PVE snapshot are separated by semicolons.
 - Live migration (shared iSCSI block storage)
 - Optional multipath with automatic alias management (`/etc/multipath/conf.d/nimble-<storeid>.conf`)
 - Veeam Backup & Replication V13+ compatible (`raw+size` import/export)

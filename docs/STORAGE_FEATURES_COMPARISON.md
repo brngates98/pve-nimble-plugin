@@ -1,6 +1,6 @@
 # Storage Features Comparison
 
-This document compares the **HPE Nimble Storage plugin** (`nimble`) for Proxmox VE with other common storage types: NFS, LVM/LVM-thin, standard iSCSI, and Ceph RBD.
+This document compares the **HPE Nimble Storage plugin** (`nimble`) for Proxmox VE with other common storage types: NFS, LVM/LVM-thin, standard iSCSI, and Ceph RBD. The Nimble plugin supports **VM disks** and **LXC container storage** (`rootdir`) on raw volumes when `content` includes `rootdir`.
 
 The **feature** and **content type** tables below are also copied in the root **[README.md](../README.md)** for visibility. Update **both** places when you change those tables (see [CONTRIBUTING.md](../CONTRIBUTING.md#documentation)).
 
@@ -60,7 +60,7 @@ The **feature** and **content type** tables below are also copied in the root **
 - **Snapshots:** Yes; storage-level snapshots via Nimble API (create, delete, rollback).
 - **Clone:** Clone from snapshot (new volume from snapshot); no linked-clone base image.
 - **Shared:** Yes; all nodes with the plugin and iSCSI access see the same volumes.
-- **Live migration:** Yes; VM disks on shared block storage can be live-migrated.
+- **Live migration:** Yes; **QEMU** VM disks on shared block storage can be live-migrated. (LXC/CT migration follows normal PVE rules for `rootdir` on shared storage.)
 - **Multipath:** Supported; plugin integrates with multipathd (device by SCSI serial).
 - **Backup target:** No; vzdump expects file/directory storage. Use NFS, PBS, or directory storage for backups.
 

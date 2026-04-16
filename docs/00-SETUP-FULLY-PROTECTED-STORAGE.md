@@ -1,6 +1,6 @@
 # 0 – Setting up fully protected storage in a Proxmox cluster
 
-This guide walks you from **zero** to **fully protected** HPE Nimble storage in a Proxmox VE cluster: one LUN per VM disk, array snapshots, optional multipath, and optional auto iSCSI discovery.
+This guide walks you from **zero** to **fully protected** HPE Nimble storage in a Proxmox VE cluster: one LUN per **VM disk or LXC root** (`rootdir`), array snapshots (walkthrough uses **QEMU** VMs), optional multipath, and optional auto iSCSI discovery.
 
 ---
 
@@ -16,7 +16,7 @@ This guide walks you from **zero** to **fully protected** HPE Nimble storage in 
 - [5. Configure multipath (optional but recommended)](#5-configure-multipath-optional-but-recommended)
 - [6. Add Nimble storage to Proxmox](#6-add-nimble-storage-to-proxmox)
 - [7. Verify storage](#7-verify-storage)
-- [8. Create a VM disk and test](#8-create-a-vm-disk-and-test)
+- [8. Create a VM or LXC disk and test](#8-create-a-vm-or-lxc-disk-and-test)
 - [8.1 Live migration (optional)](#81-live-migration-optional)
 - [9. Test snapshots and rollback](#9-test-snapshots-and-rollback)
 - [10. Restore a disk from the array (workflow)](#10-restore-a-disk-from-the-array-workflow)
@@ -36,16 +36,16 @@ This guide walks you from **zero** to **fully protected** HPE Nimble storage in 
 | 5 | Configure multipath (optional) | 5 min |
 | 6 | Add Nimble storage (auto iSCSI discovery on by default) | 2 min |
 | 7 | Verify storage in Proxmox UI | 2 min |
-| 8 | Create a VM disk and test | 5 min |
-| 9 | Test snapshots and rollback | 5 min |
+| 8 | Create a VM disk (and optionally an LXC on `rootdir`) and test | 5 min |
+| 9 | Test snapshots and rollback (QEMU VM) | 5 min |
 | 10 | Restore a disk from array snapshot (reference) | – |
 
 ---
 
 ## What you get when you're done
 
-- **One LUN per VM disk** – No giant LUN + LVM; each disk is a Nimble volume.
-- **Array snapshots** – Create, delete, and rollback from the Proxmox UI.
+- **One LUN per VM disk or LXC root** – No giant LUN + LVM; each QEMU disk or **container root** (`rootdir`) is a Nimble volume (raw block).
+- **Array snapshots** – Create, delete, and rollback from the Proxmox UI (this guide’s snapshot steps focus on **QEMU**; LXC uses normal CT snapshot/backup workflows on the same storage).
 - **Resize** – Grow disks from the UI; array and guest resize.
 - **Multipath (optional)** – Redundant paths to the array.
 - **Cluster-ready** – Same storage on all nodes; plugin runs on each node when needed.
@@ -244,10 +244,12 @@ pvesm add nimble <storage_id> \
   --address https://<NIMBLE_MGMT_IP_OR_FQDN> \
   --username <API_USER> \
   --password '<API_PASSWORD>' \
-  --content images
+  --content images,rootdir
 ```
 
 Replace `<storage_id>` with a name (e.g. `nimble-prod`). The storage will appear in **Datacenter → Storage**.
+
+Use **`images` only** (omit `rootdir`) if you do not want **LXC container roots** on this store.
 
 > **Tip:** Add `--initiator_group <name>` to use an existing Nimble initiator group instead of auto-creating one.
 
@@ -263,7 +265,7 @@ sudo iscsiadm -m node --login
 
 ## 7. Verify storage
 
-1. In the Proxmox UI: **Datacenter → Storage** – your Nimble storage should be listed and **Content** should include **Disk image**.
+1. In the Proxmox UI: **Datacenter → Storage** – your Nimble storage should be listed and **Content** should include **Disk image**. If you added **`rootdir`**, **Container** should appear as well (LXC roots on this pool).
 2. Click the storage and check **Summary** – you should see **Usage** and **Free** (from the Nimble pool). The **Type** column shows **`nimble`** for this plugin.
 
 ![Proxmox: Nimble storage Summary (usage)](images/pve-storage-summary-nimble.png)
@@ -272,12 +274,14 @@ sudo iscsiadm -m node --login
 
 ---
 
-## 8. Create a VM disk and test
+## 8. Create a VM or LXC disk and test
 
 1. Create a VM or use an existing one.
 2. **Hardware → Add → Hard disk** – choose your Nimble storage, pick size, and add.
 3. Start the VM and confirm the disk is visible inside the guest.
 4. Optionally **resize** the disk from the Proxmox UI and extend the partition/filesystem inside the guest.
+
+**LXC containers:** If **`rootdir`** is in **Content**, create a container and select this Nimble storage for the **Root disk** (raw). The array still uses one volume per CT root; the **CT Volumes** tab on the storage object lists container volumes alongside **VM Disks**.
 
 On the storage object, **VM Disks** lists images the store knows about (names follow `vm-<vmid>-disk-<n>`; **Format** reflects how the disk was provisioned, e.g. **raw** or **qcow2**):
 
@@ -296,6 +300,8 @@ If the cluster has multiple nodes and shared Nimble storage, you can **migrate**
 ---
 
 ## 9. Test snapshots and rollback
+
+This section uses a **QEMU VM** with a disk on Nimble (LXC snapshots use the normal container UI; **array snapshot import** into the tree as **`nimble*`** entries applies to **QEMU** configs — see [AI project context](AI_PROJECT_CONTEXT.md)).
 
 1. With a VM that has a disk on Nimble storage, take a **snapshot** (VM → **Snapshots** → **Take snapshot**). Enter a name and whether to include RAM; confirm in the task log.
 
@@ -390,7 +396,7 @@ Replace `<nimble>`, `<user>`, `<pass>`, `<volname>` (e.g. `vm-100-disk-0` or `my
 
 | Task | Command or location |
 |------|---------------------|
-| Add storage | `pvesm add nimble <id> --address https://... --username ... --password '...' --content images` (activate-time iSCSI discovery **on** by default; add `--auto_iscsi_discovery 0` to disable) |
+| Add storage | `pvesm add nimble <id> --address https://... --username ... --password '...' --content images,rootdir` (use `images` only to omit LXC roots; activate-time iSCSI discovery **on** by default; add `--auto_iscsi_discovery 0` to disable) |
 | Edit storage | **`pvesm set`**, **`nano /etc/pve/storage.cfg`**, or cluster storage API. Custom types like `nimble` are not fully editable from the Datacenter Storage GUI in stock PVE. |
 | Check plugin version | `dpkg -l libpve-storage-nimble-perl` |
 | Debug plugin | Run commands with `NIMBLE_DEBUG=2` (see [README](../README.md#debug-logging)) |
