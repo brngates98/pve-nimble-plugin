@@ -17,6 +17,7 @@ This guide walks you from **zero** to **fully protected** HPE Nimble storage in 
 - [6. Add Nimble storage to Proxmox](#6-add-nimble-storage-to-proxmox)
 - [7. Verify storage](#7-verify-storage)
 - [8. Create a VM disk and test](#8-create-a-vm-disk-and-test)
+- [8.1 Live migration (optional)](#81-live-migration-optional)
 - [9. Test snapshots and rollback](#9-test-snapshots-and-rollback)
 - [10. Restore a disk from the array (workflow)](#10-restore-a-disk-from-the-array-workflow)
 - [Quick reference](#quick-reference)
@@ -86,6 +87,14 @@ You need:
 - **REST API:** In the Nimble UI, ensure the management interface is reachable and the REST API is enabled (default port 5392).
 - **iSCSI subnets:** Create or confirm at least one iSCSI-enabled subnet (type **data** or **mgmt,data**) with a **discovery IP**. The plugin uses this for **activate-time** iSCSI discovery by default (`auto_iscsi_discovery` defaults to **on**; set **`no`**/**`0`** to disable).
 - **User:** Ensure your API user can create volumes, initiator groups, and access control records.
+
+After volumes exist, the **Nimble UI** lists them by name (often `vm-<vmid>-disk-*` when created from Proxmox) with usage and performance:
+
+![Nimble UI: volumes list](images/nimble-ui-volumes-list.png)
+
+You can also take **array-side** snapshots from the volume’s Data Protection tab (separate from Proxmox VM snapshots; useful for schedules and recovery workflows):
+
+![Nimble UI: take snapshot dialog](images/nimble-ui-take-snapshot-modal.png)
 
 <details>
 <summary>Verify API from a Proxmox node</summary>
@@ -255,7 +264,10 @@ sudo iscsiadm -m node --login
 ## 7. Verify storage
 
 1. In the Proxmox UI: **Datacenter → Storage** – your Nimble storage should be listed and **Content** should include **Disk image**.
-2. Click the storage and check **Summary** – you should see **Usage** and **Free** (from the Nimble pool).
+2. Click the storage and check **Summary** – you should see **Usage** and **Free** (from the Nimble pool). The **Type** column shows **`nimble`** for this plugin.
+
+![Proxmox: Nimble storage Summary (usage)](images/pve-storage-summary-nimble.png)
+
 3. If you used auto discovery, activate the storage on another node (e.g. view it from that node or create a VM there); the plugin will run discovery on that node.
 
 ---
@@ -267,14 +279,37 @@ sudo iscsiadm -m node --login
 3. Start the VM and confirm the disk is visible inside the guest.
 4. Optionally **resize** the disk from the Proxmox UI and extend the partition/filesystem inside the guest.
 
+On the storage object, **VM Disks** lists images the store knows about (names follow `vm-<vmid>-disk-<n>`; **Format** reflects how the disk was provisioned, e.g. **raw** or **qcow2**):
+
+![Proxmox: VM Disks on Nimble storage (raw examples)](images/pve-storage-vm-disks-raw.png)
+
+![Proxmox: VM Disks on Nimble storage (qcow2 examples)](images/pve-storage-vm-disks-qcow2.png)
+
+### 8.1 Live migration (optional)
+
+If the cluster has multiple nodes and shared Nimble storage, you can **migrate** a VM to another node while it is running (online migration). Use **VM → Migrate**, pick the target node and mode, then watch the task log for completion.
+
+![Proxmox: Migrate VM dialog](images/pve-migrate-vm-dialog.png)
+
+![Proxmox: migration task log (success)](images/pve-migration-task-viewer.png)
+
 ---
 
 ## 9. Test snapshots and rollback
 
-1. With a VM that has a disk on Nimble storage, take a **snapshot** (VM → Snapshot → Take snapshot).
-2. Make a change inside the guest (e.g. create a file).
-3. **Rollback** to the snapshot – the guest state should match the snapshot.
-4. Optionally use **Clone** from a snapshot to create a new VM from that point.
+1. With a VM that has a disk on Nimble storage, take a **snapshot** (VM → **Snapshots** → **Take snapshot**). Enter a name and whether to include RAM; confirm in the task log.
+
+![Proxmox: Take snapshot dialog](images/pve-vm-snapshot-create-dialog.png)
+
+![Proxmox: snapshot task completed](images/pve-snapshot-task-viewer-success.png)
+
+2. After the plugin’s array snapshot sync, related Nimble snapshots may appear in the snapshot tree as **`nimble*`** entries (with descriptions such as `volume: snapshot name`).
+
+![Proxmox: VM snapshots including nimble* entries](images/pve-vm-snapshots-nimble-tree.png)
+
+3. Make a change inside the guest (e.g. create a file).
+4. **Rollback** to the snapshot – the guest state should match the snapshot.
+5. Optionally use **Clone** from a snapshot to create a new VM from that point.
 
 You now have **fully protected** storage: one LUN per disk, array snapshots, and optional multipath.
 

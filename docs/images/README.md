@@ -1,0 +1,18 @@
+# Screenshots (Proxmox + Nimble UI)
+
+These images document **lab workflows** for the Nimble storage plugin: storage visibility in PVE, VM disks, snapshots, optional live migration, and the Nimble array UI. They are referenced from **[docs/00-SETUP-FULLY-PROTECTED-STORAGE.md](../00-SETUP-FULLY-PROTECTED-STORAGE.md)** and indexed in **[docs/README.md](../README.md)**.
+
+| File | Topic |
+|------|--------|
+| [pve-storage-summary-nimble.png](pve-storage-summary-nimble.png) | **Datacenter → Storage → Summary** — Nimble-backed store: type `nimble`, usage bar, history graph. |
+| [pve-storage-vm-disks-raw.png](pve-storage-vm-disks-raw.png) | **Storage → VM Disks** — `vm-<vmid>-disk-*` volumes (example: **raw**). |
+| [pve-storage-vm-disks-qcow2.png](pve-storage-vm-disks-qcow2.png) | **Storage → VM Disks** — same view with **qcow2** images (format depends on how disks were created). |
+| [pve-vm-snapshot-create-dialog.png](pve-vm-snapshot-create-dialog.png) | **VM → Snapshots → Take snapshot** — create dialog (name, optional RAM). |
+| [pve-snapshot-task-viewer-success.png](pve-snapshot-task-viewer-success.png) | Task log: snapshot task completed (`TASK OK`), volume name on Nimble store. |
+| [pve-vm-snapshots-nimble-tree.png](pve-vm-snapshots-nimble-tree.png) | Snapshot tree with **`nimble*`** entries and descriptions (`volume: snapshot name`) after array sync. |
+| [pve-migrate-vm-dialog.png](pve-migrate-vm-dialog.png) | **Migrate** dialog — target node, online mode. |
+| [pve-migration-task-viewer.png](pve-migration-task-viewer.png) | Task log: live migration completed successfully. |
+| [nimble-ui-volumes-list.png](nimble-ui-volumes-list.png) | **Nimble UI — Volumes** list (per-volume usage, performance). |
+| [nimble-ui-take-snapshot-modal.png](nimble-ui-take-snapshot-modal.png) | **Nimble UI** — manual **Take snapshot** on a volume (array-side; distinct from PVE VM snapshots). |
+
+**Source files** (when copying from a Cursor assets folder) were: `Screenshot_2026-04-15_at_8.50.20_PM-b5c7a978-4d4d-430a-9e6b-59ab344c7120.png`, `image-ab802813-…`, `image-f88b086a-…`, `image-0b8a25c9-…`, `image-24a5e776-…`, `image-32d4daf2-…`, `image-39a089bf-…`, `image-8aa716e7-…`, `image-6355f8cc-…`, `image-eb36dd38-…`. If a caption does not match the PNG, swap filenames locally and update references.

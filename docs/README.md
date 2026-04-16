@@ -13,6 +13,7 @@ Use this page to choose **guides** vs **API / development** material without hun
 | **[README.md](../README.md)** | Requirements, scripted install, `pvesm` options, multipath, troubleshooting, debug, informal real-array validation note. |
 | **[00-SETUP-FULLY-PROTECTED-STORAGE.md](00-SETUP-FULLY-PROTECTED-STORAGE.md)** | Long-form walkthrough: from empty cluster to Nimble-backed VMs, array snapshots, optional multipath. (The `00-` prefix only sorts this guide first in directory listings.) |
 | **[STORAGE_FEATURES_COMPARISON.md](STORAGE_FEATURES_COMPARISON.md)** | How this Nimble plugin compares to NFS, LVM, plain iSCSI, Ceph RBD for features and workflows. |
+| **[images/README.md](images/README.md)** | Screenshot index (PVE storage, VM disks, snapshots, migration, Nimble UI) — figures used in the setup guide. |
 
 ---
 
@@ -41,6 +42,7 @@ Official HPE docs are linked from those files when you need the full reference.
 
 - **Install the plugin today** → [README.md](../README.md)
 - **Step-by-step protected storage tutorial** → [00-SETUP-FULLY-PROTECTED-STORAGE.md](00-SETUP-FULLY-PROTECTED-STORAGE.md)
+- **Screenshots (UI walkthrough)** → [images/README.md](images/README.md)
 - **Why restore needs array offline / how delete uses `online`** → [API_VALIDATION.md](API_VALIDATION.md) (snapshot rollback section)
 - **Raw API tables** → [NIMBLE_API_REFERENCE.md](NIMBLE_API_REFERENCE.md)
 - **Change the plugin / run tests** → [AI_PROJECT_CONTEXT.md](AI_PROJECT_CONTEXT.md)

@@ -161,6 +161,8 @@ After editing, run `multipathd reconfigure`.
 
 The maintainer has exercised most day-to-day flows on **real Proxmox VE + HPE Nimble** (volumes, PVE and array snapshots, rollback, clone, move disk, capacity/status, multipath, array snapshot import into the VM snapshot list including snap time and descriptions). That is **not** a guarantee for every firmware or cluster layout; treat your own checks as authoritative.
 
+**Screenshots:** UI examples (storage summary, VM disks, snapshots, migration, Nimble volume list) live under **[docs/images/](docs/images/)** with an index in **[docs/images/README.md](docs/images/README.md)**.
+
 ## Troubleshooting
 
 ### Common errors

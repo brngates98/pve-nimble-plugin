@@ -51,6 +51,7 @@ pve-nimble-plugin/
 ├── LICENSE
 ├── docs/
 │   ├── README.md              # Documentation index (guides, API, dev docs)
+│   ├── images/                # Screenshots (PVE + Nimble UI); see images/README.md
 │   ├── 00-SETUP-FULLY-PROTECTED-STORAGE.md  # Step-by-step setup guide (zero to protected storage)
 │   ├── AI_PROJECT_CONTEXT.md  # This file (AI/context)
 │   ├── API_VALIDATION.md      # Nimble REST API call validation vs HPE docs
