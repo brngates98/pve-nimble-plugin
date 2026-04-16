@@ -630,9 +630,8 @@ sub nimble_multipath_active_wwid {
   return '';
 }
 
-# Tear down multipath for unmap/migration. multipathd remove map frequently returns non-zero (busy,
-# already removed, race). Failing deactivate breaks migration — use exec_command(..., 0) and try
-# multipath -f per nimble_multipath_wwid_try_list variant.
+# Tear down multipath for unmap/migration. multipathd remove map / multipath -f often return non-zero
+# (busy, already removed, race). Use exec_command(..., -1): non-fatal and no Warning spam in task logs.
 sub nimble_multipath_teardown_for_unmap {
   my ($wwid) = @_;
   return unless length($wwid);
@@ -641,12 +640,12 @@ sub nimble_multipath_teardown_for_unmap {
     next unless length($w);
     my $t = nimble_untaint_multipath_wwid($w);
     next unless length($t);
-    exec_command( [ 'multipathd', 'remove', 'map', $t ], 0 );
+    exec_command( [ 'multipathd', 'remove', 'map', $t ], -1 );
   }
   for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
     my $t = nimble_untaint_multipath_wwid($w);
     next unless length($t);
-    exec_command( [ $mp, '-f', $t ], 0 );
+    exec_command( [ $mp, '-f', $t ], -1 );
   }
 }
 
