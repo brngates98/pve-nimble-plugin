@@ -218,6 +218,8 @@ devices {
         path_checker         tur
         no_path_retry        30
         failback             immediate
+        fast_io_fail_tmo     5
+        dev_loss_tmo         infinity
     }
 }
 ```

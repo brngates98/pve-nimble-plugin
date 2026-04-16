@@ -14,5 +14,3 @@ These images document **lab workflows** for the Nimble storage plugin: storage v
 | [pve-migration-task-viewer.png](pve-migration-task-viewer.png) | Task log: live migration completed successfully. |
 | [nimble-ui-volumes-list.png](nimble-ui-volumes-list.png) | **Nimble UI — Volumes** list (per-volume usage, performance). |
 | [nimble-ui-take-snapshot-modal.png](nimble-ui-take-snapshot-modal.png) | **Nimble UI** — manual **Take snapshot** on a volume (array-side; distinct from PVE VM snapshots). |
-
-**Source files** (when copying from a Cursor assets folder) were: `Screenshot_2026-04-15_at_8.50.20_PM-b5c7a978-4d4d-430a-9e6b-59ab344c7120.png`, `image-ab802813-…`, `image-f88b086a-…`, `image-0b8a25c9-…`, `image-24a5e776-…`, `image-32d4daf2-…`, `image-39a089bf-…`, `image-8aa716e7-…`, `image-6355f8cc-…`, `image-eb36dd38-…`. If a caption does not match the PNG, swap filenames locally and update references.

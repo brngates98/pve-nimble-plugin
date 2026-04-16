@@ -8,7 +8,11 @@ Once Nimble storage is added, it shows up under **Datacenter → Storage** like 
 
 ![Proxmox Datacenter → Storage → Summary for a Nimble-backed store](https://raw.githubusercontent.com/brngates98/pve-nimble-plugin/main/docs/images/pve-storage-summary-nimble.png)
 
-**Screenshots:** The image above is the high-level storage view; more UI examples (VM Disks, snapshots, live migration, HPE Nimble volume list) are in **[docs/images/](docs/images/)** — see the index **[docs/images/README.md](docs/images/README.md)**. The same figures are embedded in the **[step-by-step setup guide](docs/00-SETUP-FULLY-PROTECTED-STORAGE.md)**.
+Array-created snapshots sync into the Proxmox VM snapshot tree as **`nimble*`** entries — visible alongside PVE snapshots with per-disk descriptions (`volume: snapshot name`):
+
+![Proxmox VM snapshot tree with nimble* array-synced entries](https://raw.githubusercontent.com/brngates98/pve-nimble-plugin/main/docs/images/pve-vm-snapshots-nimble-tree.png)
+
+**Screenshots:** More UI examples (VM Disks, snapshot dialogs, live migration, HPE Nimble volume list) are in **[docs/images/](docs/images/)** — see the index **[docs/images/README.md](docs/images/README.md)**. All figures are embedded in the **[step-by-step setup guide](docs/00-SETUP-FULLY-PROTECTED-STORAGE.md)**.
 
 ## Requirements
 
