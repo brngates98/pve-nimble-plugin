@@ -285,11 +285,9 @@ sudo iscsiadm -m node --login
 
 **LXC containers:** If **`rootdir`** is in **Content**, create a container and select this Nimble storage for the **Root disk** (raw). The array still uses one volume per CT root; the **CT Volumes** tab on the storage object lists container volumes alongside **VM Disks**.
 
-On the storage object, **VM Disks** lists images the store knows about (names follow `vm-<vmid>-disk-<n>`; **Format** reflects how the disk was provisioned, e.g. **raw** or **qcow2**):
+On the storage object, **VM Disks** lists images the store knows about (names follow `vm-<vmid>-disk-<n>`):
 
-![Proxmox: VM Disks on Nimble storage (raw examples)](images/pve-storage-vm-disks-raw.png)
-
-![Proxmox: VM Disks on Nimble storage (qcow2 examples)](images/pve-storage-vm-disks-qcow2.png)
+![Proxmox: VM Disks on Nimble storage](images/pve-storage-vm-disks-raw.png)
 
 ### 8.1 Live migration (optional)
 
