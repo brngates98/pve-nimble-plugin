@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
 ##############################################################################
-# Deploy NimbleStoragePlugin.pm on Proxmox VE (single node or whole cluster).
+# Install NimbleStoragePlugin.pm on Proxmox VE (one host, or whole cluster).
 #
-# Downloads the plugin from a URL (default: main branch on GitHub), installs
-# to /usr/share/perl5/PVE/Storage/Custom/, and restarts PVE services so Perl
-# reloads the module — same units as debian/postinst (no pve-cluster).
+# ONLY EVER DOWNLOADS: NimbleStoragePlugin.pm (one Perl file). Nothing else.
+# This .sh file is NOT copied and NOT curled to other nodes — keep it on one
+# box if you like, or curl it once from GitHub; peers are reached via SSH and
+# run a few lines that curl the same .pm URL, install it, restart services.
 #
-# Usage (single node):
+# Single host:
 #   sudo bash scripts/deploy-nimble-plugin-pm.sh
-#   sudo PLUGIN_URL=https://example.com/NimbleStoragePlugin.pm bash ...
 #
-# All cluster nodes (SSH root@pve00N; each peer curls only NimbleStoragePlugin.pm — same URL):
+# Every cluster node (you run this once on any node; others via SSH):
 #   sudo bash scripts/deploy-nimble-plugin-pm.sh --all-nodes
 #
-# Note: If you install libpve-storage-nimble-perl from APT, the next package
-# upgrade may replace this file. Prefer APT upgrades when possible; use this
-# for hot-fixes or testing a specific revision from git.
+# APT note: libpve-storage-nimble-perl upgrades can overwrite the .pm; prefer
+# packages for production, use this for quick tests / hotfixes from git.
 ##############################################################################
 
 set -euo pipefail
@@ -45,8 +44,9 @@ usage() {
     cat <<EOF
 Usage: ${0##*/} [options]
 
-  -u, --url URL     Fetch NimbleStoragePlugin.pm from URL (default: main on GitHub)
-  -a, --all-nodes   Deploy on all nodes (SSH root@<nodename>, e.g. pve002)
+  -u, --url URL     NimbleStoragePlugin.pm URL only (default: main on GitHub)
+  -a, --all-nodes   Same .pm install on every node: local curl; remotes = SSH
+                    then curl that .pm only (this script is never sent to peers)
   -n, --dry-run     Print actions only
   -v, --verbose     More output
   -h, --help        This help
@@ -64,8 +64,8 @@ Environment:
   Local node: nodename matches /etc/hostname or hostname -s / short FQDN, else cluster IP on an iface.
 
 Examples:
-  curl -fsSL .../deploy-nimble-plugin-pm.sh | sudo bash
-  sudo PLUGIN_URL=https://raw.githubusercontent.com/USER/REPO/REF/NimbleStoragePlugin.pm bash deploy-nimble-plugin-pm.sh
+  curl -fsSL .../deploy-nimble-plugin-pm.sh | sudo bash    # get this helper once; it only pulls NimbleStoragePlugin.pm
+  sudo PLUGIN_URL=https://.../NimbleStoragePlugin.pm bash deploy-nimble-plugin-pm.sh
 EOF
 }
 
@@ -167,8 +167,7 @@ deploy_local() {
     install_plugin_file "$PLUGIN_URL"
 }
 
-# Run on a peer over SSH: download only NimbleStoragePlugin.pm (no second curl of this deploy script).
-# URL and timeouts are passed as argv so quoting stays reliable; stdin is a fixed remote script.
+# Peer: SSH runs inline bash — curl NimbleStoragePlugin.pm, install, restart. No .sh file involved.
 remote_deploy_via_ssh() {
     ensure_env
     local nodename="${1:-}"
