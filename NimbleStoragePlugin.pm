@@ -630,6 +630,26 @@ sub nimble_multipath_active_wwid {
   return '';
 }
 
+# Tear down multipath for unmap/migration. multipathd remove map frequently returns non-zero (busy,
+# already removed, race). Failing deactivate breaks migration — use exec_command(..., 0) and try
+# multipath -f per nimble_multipath_wwid_try_list variant.
+sub nimble_multipath_teardown_for_unmap {
+  my ($wwid) = @_;
+  return unless length($wwid);
+  my $mp = get_command_path('multipath');
+  for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
+    next unless length($w);
+    my $t = nimble_untaint_multipath_wwid($w);
+    next unless length($t);
+    exec_command( [ 'multipathd', 'remove', 'map', $t ], 0 );
+  }
+  for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
+    my $t = nimble_untaint_multipath_wwid($w);
+    next unless length($t);
+    exec_command( [ $mp, '-f', $t ], 0 );
+  }
+}
+
 # --- Multipath alias management ---
 # Aliases are written to /etc/multipath/conf.d/nimble-<storeid>.conf (never /etc/multipath.conf).
 # Alias lifetime follows volume lifetime: added on first map_volume, removed on free_image.
@@ -3302,9 +3322,7 @@ sub unmap_volume {
   exec_command( ['sync'] );
 
   if ( length( $wwid ) ) {
-    my $active = nimble_multipath_active_wwid($wwid);
-    $active = nimble_untaint_multipath_wwid($active) if length($active);
-    exec_command( [ 'multipathd', 'remove', 'map', $active ] ) if length($active);
+    nimble_multipath_teardown_for_unmap($wwid);
   }
   block_device_action( 'remove', @slaves );
   return 1;
