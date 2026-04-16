@@ -313,6 +313,8 @@ This section uses a **QEMU VM** with a disk on Nimble (LXC snapshots use the nor
 
 ![Proxmox: VM snapshots including nimble* entries](images/pve-vm-snapshots-nimble-tree.png)
 
+> **Note:** In the screenshot above, the highlighted row (`nimble1776300737`) is an array-synced snapshot that was accidentally selected. The PVE snapshot created in step 1 (`SnapshotInAScreenShot`) is the entry directly above it.
+
 3. Make a change inside the guest (e.g. create a file).
 4. **Rollback** to the snapshot – the guest state should match the snapshot.
 5. Optionally use **Clone** from a snapshot to create a new VM from that point.
