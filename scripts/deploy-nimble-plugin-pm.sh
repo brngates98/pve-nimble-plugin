@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# NimbleStoragePlugin.pm: curl/wget -> install -> restart on this node;
-# then scp that file to each host in REMOTES and install + restart there.
+# NimbleStoragePlugin.pm: curl/wget -> install + restart here, then scp to pve001 and pve003 and same there.
+# Intended: run on pve002 with passwordless root SSH to pve001 / pve003.
 #
 #   sudo ./deploy-nimble-plugin-pm.sh
-#   sudo REMOTES="pve001 pve003" ./deploy-nimble-plugin-pm.sh
 #
 set -euo pipefail
 
 readonly TARGET='/usr/share/perl5/PVE/Storage/Custom/NimbleStoragePlugin.pm'
 readonly DEFAULT_URL='https://raw.githubusercontent.com/brngates98/pve-nimble-plugin/main/NimbleStoragePlugin.pm'
 PLUGIN_URL="${PLUGIN_URL:-$DEFAULT_URL}"
-REMOTES="${REMOTES:-}"
+REMOTES="${REMOTES:-pve001 pve003}"
+THIS="$(hostname -s 2>/dev/null || hostname)"
 
 SERVICES=(pvedaemon pvestatd pveproxy pvescheduler)
 
@@ -57,12 +57,14 @@ install_from_tmp "$tmp"
 restart_stack
 echo "Local: done."
 
-if [[ -n "${REMOTES// }" ]]; then
-  echo "Remotes: $REMOTES"
-fi
+echo "Also pushing to: $REMOTES"
 
 for h in $REMOTES; do
   [[ -n "$h" ]] || continue
+  if [[ "$h" == "$THIS" ]]; then
+    echo "Skip $h (same as this host)"
+    continue
+  fi
   echo "Remote $h: scp then install + restart"
   scp "${SSH_OPTS[@]}" "$TARGET" "root@${h}:/tmp/NimbleStoragePlugin.new" || {
     echo "ERROR: scp to root@${h} failed (keys? DNS? firewall?)" >&2

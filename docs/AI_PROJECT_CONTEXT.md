@@ -61,7 +61,7 @@ pve-nimble-plugin/
 ├── scripts/
 │   ├── build_deb.sh            # Local Docker build
 │   ├── install-pve-nimble-plugin.sh  # Scripted install (single/cluster, APT or .deb)
-│   └── deploy-nimble-plugin-pm.sh   # Optional hot-fix: curl/wget NimbleStoragePlugin.pm → install path → restart pvedaemon/pvestatd/pveproxy/pvescheduler; optional `REMOTES="host …"` for scp+ssh to other nodes (no cluster membership logic)
+│   └── deploy-nimble-plugin-pm.sh   # Hot-fix: curl/wget .pm → install → restart; default `REMOTES` pve001+pve003 (override with env); scp+ssh to each (skip if hostname matches)
 └── tests/
     ├── run_tests.sh
     ├── unit/*.t               # Perl unit tests
