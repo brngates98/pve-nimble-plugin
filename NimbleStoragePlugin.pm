@@ -631,21 +631,22 @@ sub nimble_multipath_active_wwid {
 }
 
 # Tear down multipath for unmap/migration. multipathd remove map / multipath -f often return non-zero
-# (busy, already removed, race). Use exec_command(..., -1): non-fatal and no Warning spam in task logs.
+# (busy, already removed, race). exec_command(..., -1, quiet, errfunc): non-fatal, no Perl/task noise.
 sub nimble_multipath_teardown_for_unmap {
   my ($wwid) = @_;
   return unless length($wwid);
   my $mp = get_command_path('multipath');
+  my %silent = ( quiet => 1, errfunc => sub { } );
   for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
     next unless length($w);
     my $t = nimble_untaint_multipath_wwid($w);
     next unless length($t);
-    exec_command( [ 'multipathd', 'remove', 'map', $t ], -1 );
+    exec_command( [ 'multipathd', 'remove', 'map', $t ], -1, %silent );
   }
   for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
     my $t = nimble_untaint_multipath_wwid($w);
     next unless length($t);
-    exec_command( [ $mp, '-f', $t ], -1 );
+    exec_command( [ $mp, '-f', $t ], -1, %silent );
   }
 }
 
