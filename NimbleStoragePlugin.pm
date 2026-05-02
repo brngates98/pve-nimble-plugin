@@ -435,6 +435,14 @@ sub nimble_untaint_multipath_wwid {
   return '';
 }
 
+# multipathd map argument (friendly alias or hex WWID) for perl -T.
+sub nimble_untaint_multipath_map_token {
+  my ($s) = @_;
+  return '' unless defined $s && length $s;
+  return $1 if $s =~ /^([a-zA-Z0-9_.:@+=-]{1,256})$/;
+  return '';
+}
+
 # API / storage.cfg / iscsiadm output for -T / -p must be laundered for perl -T or run_command dies
 # ("Insecure dependency in exec") — eval in callers used to hide that and left sessions never established.
 sub nimble_untaint_iscsiadm_scalar {
@@ -2645,6 +2653,11 @@ sub nimble_resize_volume {
   die "Error :: Volume \"$volname\" not found\n" unless $vol_id;
   my $size_mb = size_bytes_to_mb( $size_bytes );
   nimble_api_call( $scfg, 'PUT', "volumes/$vol_id", { size => $size_mb }, $storeid );
+  eval { nimble_host_refresh_volume_size_after_array_resize( $class, $scfg, $storeid, $volname, $size_bytes ); };
+  if ($@) {
+    warn "Warning :: Resized \"$volname\" on Nimble but host block layer did not confirm new size: $@\n";
+    die $@;
+  }
   return $size_bytes;
 }
 
@@ -2838,6 +2851,93 @@ sub block_device_action {
       device_op( $device_path, 'rescan', '1' );
     }
   }
+}
+
+sub nimble_blockdev_getsize64 {
+  my ($path) = @_;
+  $path = nimble_untaint_dev_path($path) || return undef;
+  return undef unless -b $path;
+  my $out = '';
+  eval {
+    run_command(
+      [ get_command_path('blockdev'), '--getsize64', $path ],
+      outfunc => sub { $out .= shift; },
+      quiet    => 1,
+    );
+  };
+  return undef if $@;
+  chomp $out;
+  return ( $out =~ /^(\d+)$/ ) ? int($1) : undef;
+}
+
+# Tell multipathd to re-read capacity after the array grew the LUN (best-effort per name variant).
+sub nimble_multipathd_resize_maps_for_volume {
+  my ( $storeid, $volname, $wwid ) = @_;
+  return unless length($wwid);
+  my %seen;
+  for my $candidate ( nimble_multipath_alias_name( $storeid, $volname ), nimble_multipath_wwid_try_list($wwid) ) {
+    my $t = nimble_untaint_multipath_map_token($candidate);
+    next unless length $t;
+    next if $seen{$t}++;
+    eval { exec_command( [ 'multipathd', 'resize', 'map', $t ], -1, timeout => 60 ); };
+  }
+}
+
+# After PUT volumes/:id size, the array is larger immediately but Linux often keeps the old path size
+# until iSCSI/SCSI rescan and multipathd resize — without this, PVE fails the task and skips VM config
+# update while Nimble already shows the new size.
+sub nimble_host_refresh_volume_size_after_array_resize {
+  my ( $class, $scfg, $storeid, $volname, $expected_bytes ) = @_;
+  my $volume = $class->nimble_get_volume_info( $scfg, $volname, $storeid );
+  return unless $volume && length( $volume->{ serial } // '' );
+  my $serial = $volume->{ serial };
+
+  eval {
+    my $adm = nimble_iscsiadm_path();
+    run_command( [ $adm, '-m', 'session', '--rescan' ], timeout => 120, quiet => 1 ) if -x $adm;
+  };
+  eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
+  eval { scsi_scan_new('iscsi'); };
+
+  my ( $path, $wwid ) = get_device_path_by_serial($serial);
+  $path = nimble_untaint_dev_path($path) || '' if length $path;
+  if ( length($path) && -b $path ) {
+    my ( undef, @slaves ) = eval { block_device_slaves($path) };
+    my $slaves_err = $@;
+    eval { block_device_action( 'rescan', @slaves ) } unless $slaves_err;
+  }
+
+  nimble_multipathd_resize_maps_for_volume( $storeid, $volname, $wwid ) if length($wwid);
+
+  eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
+  eval { exec_command( [ 'udevadm', 'settle', '--timeout=30' ] ); };
+
+  return if !$expected_bytes || $expected_bytes <= 0;
+
+  ( $path, $wwid ) = get_device_path_by_serial($serial);
+  $path = nimble_untaint_dev_path($path) || '' if length $path;
+  return unless length($path) && -b $path;
+
+  # Mirror map_volume: periodic multipath resize while polling — slow HBAs may need a second resize map.
+  my $resize_poll_ticks = 0;
+  wait_for(
+    sub {
+      ++$resize_poll_ticks;
+      if ( $resize_poll_ticks % 20 == 0 ) {
+        my ( undef, $w_poll ) = get_device_path_by_serial($serial);
+        eval { nimble_multipathd_resize_maps_for_volume( $storeid, $volname, $w_poll ) if length($w_poll); };
+      }
+      my ($p) = ( get_device_path_by_serial($serial) )[0];
+      $p = nimble_untaint_dev_path($p) || '';
+      return 0 unless length($p) && -b $p;
+      my $sz = nimble_blockdev_getsize64($p);
+      return 0 unless defined $sz && $sz >= $expected_bytes;
+      return 1;
+    },
+    "block device for \"$volname\" to reflect new size ($expected_bytes bytes)",
+    90,
+    0.5
+  );
 }
 
 ### Storage interface

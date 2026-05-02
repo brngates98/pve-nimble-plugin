@@ -226,7 +226,7 @@ systemctl restart pvedaemon pveproxy pvestatd
 
 ## Features
 
-- Create, delete, resize, rename volumes via Nimble REST API
+- Create, delete, resize, rename volumes via Nimble REST API (grow triggers host iSCSI/multipath rescan so Proxmox sees the new LUN size immediately)
 - **VM disks** (`images`) and **LXC CT roots** (`rootdir`) on raw Nimble volumes — set `content` as in **Add Storage** (typically `images,rootdir`)
 - Initiator group management (auto-create or use existing)
 - Storage-level snapshots: create, delete, rollback

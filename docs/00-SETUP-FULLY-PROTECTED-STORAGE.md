@@ -46,7 +46,7 @@ This guide walks you from **zero** to **fully protected** HPE Nimble storage in 
 
 - **One LUN per VM disk or LXC root** – No giant LUN + LVM; each QEMU disk or **container root** (`rootdir`) is a Nimble volume (raw block).
 - **Array snapshots** – Create, delete, and rollback from the Proxmox UI (this guide’s snapshot steps focus on **QEMU**; LXC uses normal CT snapshot/backup workflows on the same storage).
-- **Resize** – Grow disks from the UI; array and guest resize.
+- **Resize** – Grow disks from the Proxmox UI; the plugin grows the volume on Nimble then rescans iSCSI/multipath on the node so Hardware shows the new size without requiring a stop/detach cycle. Extend the partition/filesystem inside the guest as usual.
 - **Multipath (optional)** – Redundant paths to the array.
 - **Cluster-ready** – Same storage on all nodes; plugin runs on each node when needed.
 
@@ -281,7 +281,7 @@ sudo iscsiadm -m node --login
 1. Create a VM or use an existing one.
 2. **Hardware → Add → Hard disk** – choose your Nimble storage, pick size, and add.
 3. Start the VM and confirm the disk is visible inside the guest.
-4. Optionally **resize** the disk from the Proxmox UI and extend the partition/filesystem inside the guest.
+4. Optionally **resize** the disk from the Proxmox UI (**Hardware** → disk → **Resize**). The plugin updates the Nimble volume and refreshes paths on that node so the task should complete with the correct size in **Hardware**; then extend the partition/filesystem inside the guest.
 
 **LXC containers:** If **`rootdir`** is in **Content**, create a container and select this Nimble storage for the **Root disk** (raw). The array still uses one volume per CT root; the **CT Volumes** tab on the storage object lists container volumes alongside **VM Disks**.
 

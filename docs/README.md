@@ -22,7 +22,7 @@ Use this page to choose **guides** vs **API / development** material without hun
 | Doc | What it is |
 |-----|------------|
 | **[NIMBLE_API_REFERENCE.md](NIMBLE_API_REFERENCE.md)** | In-repo extract of the HPE Nimble REST API (paths, `data` envelope, volumes/snapshots/restore/delete, iSCSI-related notes). |
-| **[API_VALIDATION.md](API_VALIDATION.md)** | How `NimbleStoragePlugin.pm` maps to that API: endpoints used, restore vs clone, snapshot rollback (offline/online on the array), delete paths, token retry. |
+| **[API_VALIDATION.md](API_VALIDATION.md)** | How `NimbleStoragePlugin.pm` maps to that API: endpoints used, restore vs clone, snapshot rollback (offline/online on the array), delete paths, token retry, **volume grow** + host-side iSCSI/multipath refresh after **`PUT volumes/:id`** **`size`**. |
 
 Official HPE docs are linked from those files when you need the full reference.
 
@@ -44,6 +44,7 @@ Official HPE docs are linked from those files when you need the full reference.
 - **Step-by-step protected storage tutorial** → [00-SETUP-FULLY-PROTECTED-STORAGE.md](00-SETUP-FULLY-PROTECTED-STORAGE.md)
 - **Screenshots (UI walkthrough)** → [images/README.md](images/README.md)
 - **Why restore needs array offline / how delete uses `online`** → [API_VALIDATION.md](API_VALIDATION.md) (snapshot rollback section)
+- **Disk grow: API vs Linux block size** → [API_VALIDATION.md](API_VALIDATION.md) (Host-side commands / Volume grow); [AI_PROJECT_CONTEXT.md](AI_PROJECT_CONTEXT.md) (**Disk grow** row)
 - **Raw API tables** → [NIMBLE_API_REFERENCE.md](NIMBLE_API_REFERENCE.md)
 - **Change the plugin / run tests** → [AI_PROJECT_CONTEXT.md](AI_PROJECT_CONTEXT.md)
 
