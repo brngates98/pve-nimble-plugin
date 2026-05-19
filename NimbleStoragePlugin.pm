@@ -69,7 +69,7 @@ sub set_debug_from_config {
 sub api {
   # PVE::Storage::APIVER / APIAGE are `use constant` (subs), not package scalars — do not use $PVE::Storage::APIVER.
   # Call with (); bareword form trips strict subs under perl 5.36+ (e.g. CI Docker bookworm).
-  my $tested_apiver = 13;
+  my $tested_apiver = 14;
   my $apiver        = eval { PVE::Storage::APIVER() };
   my $apiage        = eval { PVE::Storage::APIAGE() };
   $apiver = $tested_apiver if !defined($apiver) || $apiver !~ /^\d+$/;
@@ -1130,7 +1130,8 @@ sub nimble_hydrate_snapshot_detail {
   return 0 unless $s && ref($s) eq 'HASH';
   my $id = $s->{ id };
   return 0 unless defined $id && length $id;
-  return 1 if nimble_snapshot_display_epoch($s);
+  return 1
+    if nimble_snapshot_display_epoch($s) && defined nimble_snapshot_virtual_size_bytes($s);
   $coll_cache = {} if !$coll_cache || ref($coll_cache) ne 'HASH';
 
   my $try_merge_response = sub {
@@ -1338,6 +1339,17 @@ sub nimble_pool_capacity_bytes {
   # Known limitation: if API omits capacity and only uncompressed_usage is present, free_space (physical) + uncompressed (logical) can overstate physical total vs compression.
   return $sum if $sum > 0;
   return 0;
+}
+
+# Identity string for one GET arrays row (API id preferred, else array name / serial).
+sub nimble_array_identity_from_row {
+  my ($a) = @_;
+  return undef unless ref($a) eq 'HASH';
+  my $id = $a->{ id } // '';
+  return "nimble:$id" if length($id);
+  my $serial = $a->{ array_name } // $a->{ name } // $a->{ serial_number } // '';
+  return "nimble:$serial" if length($serial);
+  return undef;
 }
 
 sub nimble_pool_used_bytes {
@@ -3471,7 +3483,10 @@ sub deactivate_volume {
 }
 
 sub volume_resize {
-  my ( $class, $scfg, $storeid, $volname, $size, $running ) = @_;
+  my ( $class, $scfg, $storeid, $volname, $size, $running, $snapname ) = @_;
+  if ( defined($snapname) && length($snapname) ) {
+    die "Error :: Resizing a snapshot is not supported on Nimble storage (no snapshot-as-volume-chain).\n";
+  }
   return $class->nimble_resize_volume( $scfg, $volname, $size, $storeid );
 }
 
@@ -3550,10 +3565,20 @@ sub volume_snapshot_delete {
   return 1;
 }
 
-# Returns { $pve_snapname => { id => $nimble_uuid, timestamp => $epoch }, ... } for all snapshots
-# on this volume. PVE-created snaps are reverse-mapped from the array name (prefix+volname+.snap-name);
-# array-created snaps (no .snap- suffix match) fall back to the nimble<epoch> naming convention
-# used by nimble_sync_array_snapshots so the keys are consistent with what PVE already has in VM configs.
+# Nimble snapshot size is in MB; PVE virtual-size is bytes (volume size at snap time).
+sub nimble_snapshot_virtual_size_bytes {
+  my ( $snap ) = @_;
+  return undef unless ref($snap) eq 'HASH';
+  my $size_mb = $snap->{ size };
+  return undef if !defined($size_mb) || $size_mb eq '';
+  $size_mb = 0 + $size_mb;
+  return undef if $size_mb <= 0;
+  return int( $size_mb ) * 1024 * 1024;
+}
+
+# Returns { $pve_snapname => { id => $nimble_uuid, timestamp => $epoch, virtual-size => $bytes }, ... }
+# for all snapshots on this volume. PVE-created snaps are reverse-mapped from the array name
+# (prefix+volname+.snap-name); array-created snaps fall back to nimble<epoch> (nimble_sync_array_snapshots).
 sub volume_snapshot_info {
   my ( $class, $scfg, $storeid, $volname ) = @_;
   my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
@@ -3568,7 +3593,9 @@ sub volume_snapshot_info {
   my %snap_coll_cache;
   for my $s ( @$list ) {
     next if nimble_snapshot_row_volume_id_mismatch( $s, $vol_id );
-    eval { nimble_hydrate_snapshot_detail( $scfg, $storeid, $s, \%snap_coll_cache ) } unless nimble_snapshot_display_epoch($s);
+    if ( !nimble_snapshot_display_epoch($s) || !defined nimble_snapshot_virtual_size_bytes($s) ) {
+      eval { nimble_hydrate_snapshot_detail( $scfg, $storeid, $s, \%snap_coll_cache ) };
+    }
     my $array_name = $s->{ name } // '';
     my $ts_id      = nimble_snapshot_effective_creation_time($s);
     my $ts_gui     = nimble_snapshot_display_epoch($s);
@@ -3582,9 +3609,46 @@ sub volume_snapshot_info {
       }
     }
     $pve_name //= "nimble${ts_id}";
-    $info{ $pve_name } = { id => $id, timestamp => ( $ts_gui // $ts_id ) };
+    my $entry = { id => $id, timestamp => ( $ts_gui // $ts_id ) };
+    my $virtual_size = nimble_snapshot_virtual_size_bytes($s);
+    $entry->{'virtual-size'} = $virtual_size if defined $virtual_size;
+    $info{ $pve_name } = $entry;
   }
   return \%info;
+}
+
+# Stable backend identity for this storage definition (PVE storage API 14).
+# Prefer GET arrays id (scoped by pool_name like status()); fallback to address when arrays API fails.
+# Two storage.cfg entries for the same array with different DNS names may get different address fallbacks.
+sub get_identity {
+  my ( $class, $scfg, $storeid ) = @_;
+  my @use_pools;
+  my $want = $scfg->{ pool_name };
+  my $pr   = eval { nimble_api_call( $scfg, 'GET', 'pools', undef, $storeid ) };
+  if ($pr) {
+    my @pools = grep { ref($_) eq 'HASH' } @{ nimble_data_as_list( $pr->{ data } ) };
+    @use_pools = @pools;
+    if ( defined $want && $want ne '' ) {
+      my @m = grep { nimble_pool_identifier_matches_want( $_, $want ) } @pools;
+      @use_pools = @m if @m;
+    }
+  }
+  my $r = eval { nimble_api_call( $scfg, 'GET', 'arrays', undef, $storeid ) };
+  if ($r) {
+    my $list = nimble_data_as_list( $r->{ data } );
+    my @rows = grep { ref($_) eq 'HASH' } @$list;
+    if ( defined $want && $want ne '' ) {
+      @rows = grep { nimble_array_matches_status_pools( $_, $want, \@use_pools ) } @rows;
+    }
+    @rows = sort { ( $a->{ id } // '' ) cmp ( $b->{ id } // '' ) } @rows;
+    for my $a (@rows) {
+      my $ident = nimble_array_identity_from_row($a);
+      return $ident if defined $ident;
+    }
+  }
+  my $addr = $scfg->{ address } // '';
+  return "nimble:$addr" if length($addr);
+  die "Error :: Could not determine Nimble array identity (arrays API unavailable and no address in storage config).\n";
 }
 
 sub rename_snapshot {
