@@ -13,7 +13,7 @@
 
 ---
 
-## 2. Current Status (as of v0.0.21)
+## 2. Current Status (as of v0.0.22)
 
 | Area | Status | Notes |
 |------|--------|--------|
