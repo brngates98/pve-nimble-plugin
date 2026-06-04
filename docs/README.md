@@ -11,7 +11,7 @@ Use this page to choose **guides** vs **API / development** material without hun
 | Doc | What it is |
 |-----|------------|
 | **[README.md](../README.md)** | Requirements, scripted install, `pvesm` options, multipath, troubleshooting, debug, informal real-array validation note. |
-| **[00-SETUP-FULLY-PROTECTED-STORAGE.md](00-SETUP-FULLY-PROTECTED-STORAGE.md)** | Long-form walkthrough: from empty cluster to Nimble-backed **VMs and LXC** (`rootdir`), array snapshots, optional multipath. (The `00-` prefix only sorts this guide first in directory listings.) |
+| **[00-SETUP-FULLY-PROTECTED-STORAGE.md](00-SETUP-FULLY-PROTECTED-STORAGE.md)** | Step-by-step setup: install, storage, multipath, disks, snapshots, migration. (The `00-` prefix sorts this guide first in listings.) |
 | **[STORAGE_FEATURES_COMPARISON.md](STORAGE_FEATURES_COMPARISON.md)** | How this Nimble plugin compares to NFS, LVM, plain iSCSI, Ceph RBD for features and workflows. |
 | **[images/README.md](images/README.md)** | Screenshot index (PVE storage, VM disks, snapshots, migration, Nimble UI) — figures used in the setup guide. |
 
@@ -33,7 +33,7 @@ Official HPE docs are linked from those files when you need the full reference.
 | Doc | What it is |
 |-----|------------|
 | **[CONTRIBUTING.md](../CONTRIBUTING.md)** | How to contribute, tests, packaging. |
-| **[AI_PROJECT_CONTEXT.md](AI_PROJECT_CONTEXT.md)** | Maintainer/AI-oriented: repo layout, what is implemented, gaps, how to run tests and build the `.deb`. Read this when continuing plugin work in a new session. |
+| **[AI_PROJECT_CONTEXT.md](AI_PROJECT_CONTEXT.md)** | Maintainer/AI context: status, architecture, key subs, gaps, build/test commands. Read when continuing plugin work. |
 | **[tests/README.md](../tests/README.md)** | Unit test layout and how to run them. |
 
 ---
@@ -44,7 +44,7 @@ Official HPE docs are linked from those files when you need the full reference.
 - **Step-by-step protected storage tutorial** → [00-SETUP-FULLY-PROTECTED-STORAGE.md](00-SETUP-FULLY-PROTECTED-STORAGE.md)
 - **Screenshots (UI walkthrough)** → [images/README.md](images/README.md)
 - **Why restore needs array offline / how delete uses `online`** → [API_VALIDATION.md](API_VALIDATION.md) (snapshot rollback section)
-- **Disk grow: API vs Linux block size** → [API_VALIDATION.md](API_VALIDATION.md) (Host-side commands / Volume grow); [AI_PROJECT_CONTEXT.md](AI_PROJECT_CONTEXT.md) (**Disk grow** row)
+- **Disk grow / host rescan after resize** → [API_VALIDATION.md](API_VALIDATION.md)
 - **Raw API tables** → [NIMBLE_API_REFERENCE.md](NIMBLE_API_REFERENCE.md)
 - **Change the plugin / run tests** → [AI_PROJECT_CONTEXT.md](AI_PROJECT_CONTEXT.md)
 

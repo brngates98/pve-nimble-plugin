@@ -185,6 +185,9 @@ The maintainer has exercised most day-to-day flows on **real Proxmox VE + HPE Ni
 | `Initiator group X not found` | Group set in config doesn't exist on the array. Create it in the Nimble UI or remove `initiator_group` from config to auto-create |
 | API timeout / TLS error | Check `address`, firewall (port 5392), and set `check_ssl no` if using self-signed certs |
 | No iSCSI session / map timeout | Run `iscsiadm -m session` on the affected node. Check L3 connectivity to Nimble data IPs. Use `iscsi_discovery_ips` if the subnets API doesn't return the right portals |
+| `iscsiadm … login` exit code 15 in debug log | Usually means the target was **already logged in** (common with multipath or LVM on the same array). Safe to ignore if disks map and snapshots work |
+| Snapshot **with RAM** fails (`failed to open ''` or `snapshot already started`) | Use snapshots **without RAM**, or **restart the VM** after a failed attempt. Plugin maps the temporary state volume when Proxmox asks for its path; report persistent failures on GitHub |
+| Volume collection + **sync replication** | Not lab-tested with a replication partner. Adding PVE-managed disks to a sync-rep collection can cause timeouts or extra volumes — use async protection or a separate collection for DR; see setup guide |
 | Multipath not used | Confirm `multipathd` is running and Nimble is in `blacklist_exceptions` in `/etc/multipath.conf` |
 
 ### Debug logging
