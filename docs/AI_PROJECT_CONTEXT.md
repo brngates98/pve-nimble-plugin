@@ -20,7 +20,7 @@ Read this first when resuming work. **Operators:** use [README.md](../README.md)
 - Initiator groups + ACLs; optional `initiator_group` or auto `pve-<nodename>`.
 - PVE snapshots: create, delete, rollback (array restore); clone from snapshot.
 - Multipath (serial discovery, alias files under `conf.d/nimble-<storeid>.conf`).
-- Auto iSCSI discovery (default on): subnets API → sendtargets → **login only if IQN not in session** (no global `node --login`).
+- Auto iSCSI discovery (default on): subnets API → sendtargets → login each **portal** not already in session (Pure-style baseline on activate + ~60s from status); per-volume IQN login on map when ACL adds a new target.
 - `raw+size` import/export (e.g. Veeam V13+).
 - Array snapshot **import** into QEMU VM configs (`nimble*` keys, throttled from `status()`).
 - APIVER 12–14 (`storage` QEMU snapshots, `qemu_blockdev_options`, `get_identity`, etc.).

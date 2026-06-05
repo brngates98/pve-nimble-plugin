@@ -1689,13 +1689,70 @@ sub nimble_iscsi_login_err_is_benign {
   return 0;
 }
 
-# Login one node DB record; no-op when a session for this IQN already exists.
+# Raw stdout from `iscsiadm -m session` (one string; lines have no trailing newlines from run_command).
+sub nimble_iscsi_session_output {
+  my $iscsiadm = nimble_iscsiadm_path();
+  return '' unless -x $iscsiadm;
+  my $out = '';
+  eval {
+    run_command(
+      [ $iscsiadm, '-m', 'session' ],
+      outfunc => sub { $out .= shift . "\n" },
+      errfunc => sub { },
+      timeout => 15,
+      quiet   => 1
+    );
+  };
+  return $out;
+}
+
+# True when an active session exists for this IQN on this specific portal (multipath: each path separately).
+sub nimble_iscsi_portal_in_sessions {
+  my ( $target_iqn, $portal, $extra_tries, $session_out ) = @_;
+  return 0 if !length($target_iqn) || !length($portal);
+  $extra_tries //= 0;
+  $extra_tries = 0 if $extra_tries < 0;
+  my $iqn_safe = nimble_untaint_iscsiadm_scalar($target_iqn);
+  my $portal_safe = nimble_untaint_iscsiadm_scalar($portal);
+  return 0 unless length($iqn_safe) && length($portal_safe);
+  my $iqn_needle  = nimble_iscsi_compact_lc($iqn_safe);
+  my $portal_base = nimble_iscsi_portal_strip_tpgt($portal_safe);
+  my $portal_needle = nimble_iscsi_compact_lc($portal_base);
+  return 0 unless length($portal_needle);
+  my $attempts = 1 + $extra_tries;
+  for my $i ( 1 .. $attempts ) {
+    my $out = defined($session_out) ? $session_out : nimble_iscsi_session_output();
+    if ( length $out ) {
+      for my $line ( split /\n/, $out ) {
+        my $lc = nimble_iscsi_compact_lc($line);
+        next unless index( $lc, $iqn_needle ) >= 0;
+        return 1 if index( $lc, $portal_needle ) >= 0;
+      }
+    }
+    select( undef, undef, undef, 0.5 ) if $i < $attempts;
+    $session_out = undef;
+  }
+  return 0;
+}
+
+# True when every listed portal has an active session for this IQN (multipath-ready).
+sub nimble_iscsi_all_portals_in_sessions {
+  my ( $target_iqn, $portals_ref, $extra_tries ) = @_;
+  return 0 unless ref($portals_ref) eq 'ARRAY' && @$portals_ref;
+  my $session_out = nimble_iscsi_session_output();
+  for my $portal (@$portals_ref) {
+    return 0 unless nimble_iscsi_portal_in_sessions( $target_iqn, $portal, $extra_tries, $session_out );
+  }
+  return 1;
+}
+
+# Login one node DB record; skip only when this IQN is already logged in on this portal (Pure-style per-path).
 sub nimble_iscsi_node_login_if_needed {
   my ( $iqn, $portal ) = @_;
   $iqn    = nimble_untaint_iscsiadm_scalar($iqn);
   $portal = nimble_untaint_iscsiadm_scalar($portal);
   return 1 unless length($iqn) && $iqn =~ m/^iqn\./i && length($portal);
-  return 1 if nimble_iscsi_target_in_sessions( $iqn, 0 );
+  return 1 if nimble_iscsi_portal_in_sessions( $iqn, $portal, 0 );
   my $iscsiadm = nimble_iscsiadm_path();
   return 0 unless -x $iscsiadm;
   nimble_iscsi_node_set_startup_automatic( $iqn, $portal );
@@ -1710,7 +1767,7 @@ sub nimble_iscsi_node_login_if_needed {
     chomp( my $e = $@ );
     print "Debug :: iscsi login $iqn @ $portal: $e\n" if $DEBUG >= 1;
   }
-  return nimble_iscsi_target_in_sessions( $iqn, 4 );
+  return nimble_iscsi_portal_in_sessions( $iqn, $portal, 4 );
 }
 
 # API/subnet/manual IPs plus any node.portal lines for this IQN (multipath needs every path logged in).
@@ -1735,24 +1792,13 @@ sub nimble_iscsi_target_in_sessions {
   my ( $target_iqn, $extra_tries ) = @_;
   return 0 if !length($target_iqn);
   $extra_tries //= 0;
-  my $iscsiadm = nimble_iscsiadm_path();
-  return 0 unless -x $iscsiadm;
   my $iqn_safe = nimble_untaint_iscsiadm_scalar($target_iqn);
   return 0 unless length $iqn_safe;
   my $needle_compact = nimble_iscsi_compact_lc($iqn_safe);
   $extra_tries = 0 if $extra_tries < 0;
   my $attempts = 1 + $extra_tries;
   for my $i ( 1 .. $attempts ) {
-    my $out = '';
-    eval {
-      run_command(
-        [ $iscsiadm, '-m', 'session' ],
-        outfunc => sub { $out .= shift; },
-        errfunc => sub { },
-        timeout => 15,
-        quiet   => 1
-      );
-    };
+    my $out = nimble_iscsi_session_output();
     if ( length $out ) {
       return 1 if index( nimble_iscsi_compact_lc($out), $needle_compact ) >= 0;
       return 1 if index( lc($out), lc($iqn_safe) ) >= 0;
@@ -1827,21 +1873,17 @@ sub nimble_iscsi_login_target_on_portals {
   my $iqn = nimble_untaint_iscsiadm_scalar($target_iqn);
   return unless length($iqn) && $iqn =~ m/^iqn\./i;
   return unless ref($ips_ref) eq 'ARRAY' && @$ips_ref;
-  return if nimble_iscsi_target_in_sessions( $iqn, 0 );
   my $iscsiadm = nimble_iscsiadm_path();
   return unless -x $iscsiadm;
   my @tried_portals;
   my $last_login_err = '';
   for my $ip ( @$ips_ref ) {
     next unless defined $ip && $ip =~ m/^\S+$/;
-    last if nimble_iscsi_target_in_sessions( $iqn, 0 );
     my $portal = nimble_untaint_iscsiadm_scalar( nimble_iscsi_portal($ip) );
     next unless length $portal;
     push @tried_portals, $portal;
-    nimble_iscsi_node_login_if_needed( $iqn, $portal );
-    if ( !nimble_iscsi_target_in_sessions( $iqn, 0 ) ) {
-      $last_login_err = 'login did not establish session';
-    }
+    next if nimble_iscsi_node_login_if_needed( $iqn, $portal );
+    $last_login_err = 'login did not establish session';
   }
   my $device_already = 0;
   if ( defined $volume_serial_opt && length $volume_serial_opt ) {
@@ -1900,7 +1942,9 @@ sub nimble_volume_prepare_restore_disconnect {
   nimble_delete_access_control_records_for_volume_id( $scfg, $vol_id, $storeid );
 }
 
-### Storage activate only: sendtargets, then per-target login only when not already in session (avoids global node --login exit 15).
+# Pure-style host iSCSI baseline (also on throttled status() refresh): sendtargets on discovery IPs,
+# then login each node-db portal that is not already in session; node.startup=automatic per record.
+# No global `iscsiadm -m node --login` (exit 15 when some paths are already up).
 sub run_iscsi_discovery_and_login {
   my ( $storeid, $scfg, $ips_ref ) = @_;
   return unless ref($ips_ref) eq 'ARRAY' && @$ips_ref;
@@ -1910,9 +1954,27 @@ sub run_iscsi_discovery_and_login {
     return;
   }
   iscsi_sendtargets_on_ips($ips_ref);
-  for my $rec ( nimble_iscsi_list_all_node_records() ) {
-    nimble_iscsi_node_login_if_needed( $rec->{ iqn }, $rec->{ portal } );
+  my @recs = nimble_iscsi_list_all_node_records();
+  if ( !@recs ) {
+    print "Debug :: sendtargets on discovery IP(s) for \"$storeid\" found no node DB records yet.\n"
+      if $DEBUG >= 1;
+    return;
   }
+  my ( $logged, $skipped, $failed ) = ( 0, 0, 0 );
+  for my $rec (@recs) {
+    if ( nimble_iscsi_portal_in_sessions( $rec->{ iqn }, $rec->{ portal }, 0 ) ) {
+      $skipped++;
+      next;
+    }
+    if ( nimble_iscsi_node_login_if_needed( $rec->{ iqn }, $rec->{ portal } ) ) {
+      $logged++;
+    } else {
+      $failed++;
+    }
+  }
+  print "Debug :: iSCSI baseline for \"$storeid\": $skipped portal(s) already logged in, "
+    . "$logged newly logged in, $failed failed.\n"
+    if $DEBUG >= 1 && ( $logged || $failed );
 }
 
 sub nimble_get_local_iscsi_iqn {
@@ -2241,8 +2303,9 @@ sub nimble_iscsi_establish_volume_session {
   my $iscsiadm = nimble_iscsiadm_path();
   return 0 unless -x $iscsiadm;
 
-  # 1. Fast path: session already up.
-  return 1 if nimble_iscsi_target_in_sessions( $iqn, 0 );
+  my @known_portals = nimble_iscsi_node_portals_for_target($iqn);
+  # 1. Fast path: every known portal for this IQN already has a session (multipath-ready).
+  return 1 if @known_portals && nimble_iscsi_all_portals_in_sessions( $iqn, \@known_portals, 0 );
 
   my @dip = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
   if ( !@dip ) {
@@ -2255,7 +2318,10 @@ sub nimble_iscsi_establish_volume_session {
   my $max_rounds  = 12;    # up to 24 s (12 x 2 s)
   my $in_node_db  = 0;
   for my $round ( 1 .. $max_rounds ) {
-    return 1 if nimble_iscsi_target_in_sessions( $iqn, 0 );
+    @known_portals = nimble_iscsi_node_portals_for_target($iqn);
+    if ( @known_portals && nimble_iscsi_all_portals_in_sessions( $iqn, \@known_portals, 0 ) ) {
+      return 1;
+    }
 
     for my $dp ( @dip ) {
       eval {
@@ -2302,15 +2368,20 @@ sub nimble_iscsi_establish_volume_session {
   for my $raw_portal ( @node_portals ) {
     my $portal = nimble_untaint_iscsiadm_scalar($raw_portal);
     next unless length $portal;
-    last if nimble_iscsi_target_in_sessions( $iqn, 0 );
     nimble_iscsi_node_login_if_needed( $iqn, $portal );
   }
 
   # Settle udev so the kernel has processed any new device events.
   eval { exec_command( [ 'udevadm', 'settle', '--timeout=15' ] ); };
 
-  # 4. Verify session appeared.
+  # 4. Verify at least one session; multipath needs every portal (warn if any path is still down).
   my $up = nimble_iscsi_target_in_sessions( $iqn, 20 );    # poll up to 10 s
+  if ( $up && !nimble_iscsi_all_portals_in_sessions( $iqn, \@node_portals, 0 ) ) {
+    my @missing = grep { !nimble_iscsi_portal_in_sessions( $iqn, $_, 0 ) } @node_portals;
+    warn "Warning :: iSCSI session for \"$iqn\" is up but multipath portal(s) missing: "
+      . join( ', ', @missing ) . ". Check data-network paths to all Nimble controllers.\n"
+      if @missing;
+  }
   unless ($up) {
     my $portals_str = join( ', ', @node_portals );
     warn "Warning :: No iSCSI session for \"$iqn\" after login on: $portals_str. "
@@ -2415,7 +2486,7 @@ sub nimble_list_volumes {
         vmid   => $volvm,
         serial => $v->{ serial_number },
         size   => ( $v->{ size } || 0 ) * 1024 * 1024,
-        used   => ( $v->{ vol_usage_compressed_bytes } || $v->{ size } || 0 ) * 1024 * 1024,
+        used   => nimble_volume_used_bytes($v),
         ctime  => nimble_volume_row_ctime_epoch($v) || 0,
         volid  => $storeid ? "$storeid:$volname" : $volname,
         format => 'raw'
@@ -2433,6 +2504,20 @@ sub nimble_list_volumes {
   return \@volumes;
 }
 
+# HPE volume.size is MB; vol_usage_compressed_bytes is already bytes (NsBytes).
+sub nimble_volume_used_bytes {
+  my ($vol) = @_;
+  return 0 unless ref($vol) eq 'HASH';
+  if ( exists $vol->{ vol_usage_compressed_bytes }
+    && defined $vol->{ vol_usage_compressed_bytes }
+    && $vol->{ vol_usage_compressed_bytes } ne ''
+    && looks_like_number( $vol->{ vol_usage_compressed_bytes } ) )
+  {
+    return int( 0 + $vol->{ vol_usage_compressed_bytes } );
+  }
+  return int( ( $vol->{ size } || 0 ) * 1024 * 1024 );
+}
+
 sub nimble_get_volume_info {
   my ( $class, $scfg, $volname, $storeid ) = @_;
   my ( $id, $vol ) = nimble_get_volume_id( $scfg, $volname, $storeid );
@@ -2445,7 +2530,7 @@ sub nimble_get_volume_info {
     serial       => $vol->{ serial_number },
     target_name  => $vol->{ target_name } // '',
     size         => ( $vol->{ size } || 0 ) * 1024 * 1024,
-    used         => ( $vol->{ vol_usage_compressed_bytes } || $vol->{ size } || 0 ) * 1024 * 1024,
+    used         => nimble_volume_used_bytes($vol),
     ctime        => nimble_volume_row_ctime_epoch($vol) || 0,
     volid        => $storeid ? "$storeid:$array_name" : $array_name,
     format       => 'raw'
@@ -3347,6 +3432,8 @@ sub status {
     }
   }
 
+  eval { __PACKAGE__->nimble_iscsi_refresh_baseline_if_due( $storeid, $scfg ); };
+
   return ( $total, $free, $used, 1 );
 }
 
@@ -3361,10 +3448,32 @@ sub nimble_auto_iscsi_discovery_enabled {
   return 1;
 }
 
+# Throttled Pure-style iSCSI baseline refresh (sendtargets + per-portal login if dropped).
+sub nimble_iscsi_refresh_baseline_if_due {
+  my ( $class, $storeid, $scfg ) = @_;
+  return unless nimble_auto_iscsi_discovery_enabled($scfg);
+  my $ts_file = "/var/run/pve-nimble-iscsi-${storeid}.ts";
+  my $last    = 0;
+  if ( open my $fh, '<', $ts_file ) { $last = <$fh> // 0; chomp $last; close $fh; }
+  return if time() - $last < 60;
+  my $ig_ok = eval { nimble_ensure_initiator_group_id( $scfg, $storeid ); 1 };
+  return unless $ig_ok;
+  my @ips = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
+  return unless @ips;
+  eval { run_iscsi_discovery_and_login( $storeid, $scfg, \@ips ); };
+  warn "Warning :: iSCSI baseline refresh for \"$storeid\": $@\n" if $@;
+  my $tmp = "$ts_file.tmp.$$";
+  if ( open my $fh, '>', $tmp ) {
+    print $fh time();
+    close $fh;
+    rename( $tmp, $ts_file );
+  }
+}
+
 sub activate_storage {
   my ( $class, $storeid, $scfg, $cache ) = @_;
   set_debug_from_config( $scfg );
-  # PureStoragePlugin::activate_storage only returns 1; Nimble runs iSCSI discovery on activate unless disabled.
+  # PureStoragePlugin::activate_storage only returns 1; Nimble ensures host iSCSI baseline on activate unless disabled.
   if ( nimble_auto_iscsi_discovery_enabled($scfg) ) {
     my $ig_ok = eval { nimble_ensure_initiator_group_id( $scfg, $storeid ); 1 };
     if ( !$ig_ok ) {
@@ -3409,10 +3518,16 @@ sub map_volume {
     warn "Warning :: Volume \"$volname\" target_name is not usable for iscsiadm (sanitization failed); check Nimble API target_name.\n";
   }
   # Session should already be up from nimble_volume_connection (activate_volume path).
-  # If not (called directly, or session dropped), attempt to establish it now.
-  if ( length($target_iqn) && !nimble_iscsi_target_in_sessions( $target_iqn, 0 ) ) {
-    print "Info :: No active iSCSI session for \"$target_iqn\" at map time; attempting connect.\n";
-    $class->nimble_iscsi_establish_volume_session( $scfg, $volname, $storeid );
+  # If not (called directly, session dropped, or multipath path missing), establish now.
+  if ( length($target_iqn) ) {
+    my @vol_portals = nimble_iscsi_node_portals_for_target($target_iqn);
+    my $need_session = @vol_portals
+      ? !nimble_iscsi_all_portals_in_sessions( $target_iqn, \@vol_portals, 0 )
+      : !nimble_iscsi_target_in_sessions( $target_iqn, 0 );
+    if ($need_session) {
+      print "Info :: iSCSI session incomplete for \"$target_iqn\" at map time; attempting connect.\n";
+      $class->nimble_iscsi_establish_volume_session( $scfg, $volname, $storeid );
+    }
   }
   elsif ( !length($target_iqn) ) {
     warn "Warning :: Volume \"$volname\" has no target_name (iSCSI IQN) from Nimble API.\n";
