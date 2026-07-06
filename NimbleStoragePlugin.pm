@@ -103,6 +103,13 @@ sub properties {
       description => "HPE Nimble array management IP or DNS name.",
       type        => 'string'
     },
+    port => {
+      description => "HPE Nimble array management API port (optional).",
+      type        => 'integer',
+      minimum     => 1,
+      maximum     => 65535,
+      default     => 5392,
+    },
     # Do not redeclare username/password here (RBD/CIFS own those names globally). List them in options().
     # Password is stored in storage.cfg (cluster-replicated), like TrueNAS api_key; priv .pw remains optional legacy + mirror.
     initiator_group => {
@@ -158,6 +165,7 @@ sub properties {
 sub options {
   return {
     address   => { fixed => 1 },
+    port      => { optional => 1 },
     username  => { fixed => 1 },
     password  => { optional => 1 },
     initiator_group => { optional => 1 },
@@ -761,6 +769,27 @@ sub nimble_multipath_reconfigure {
   exec_command( ['multipathd', 'reconfigure'], -1, timeout => 15 );
 }
 
+# The WWID cache lives under /etc/pve/priv (pmxcfs, replicated to every cluster node), and
+# register/deregister do a read-modify-write on it. Two nodes mapping/unmapping different volumes on the
+# same storage at the same time can race on a plain read+write and silently drop each other's entry.
+# cfs_lock_storage uses pmxcfs's own distributed lock (a local flock would not exclude other nodes).
+# PVE::Cluster is soft-required: unit tests and other non-PVE contexts run without it, so degrade to
+# unlocked best-effort there rather than failing the whole map/unmap.
+sub nimble_multipath_with_storage_lock {
+  my ( $storeid, $code ) = @_;
+  return $code->() unless eval { require PVE::Cluster; 1 };
+  my $res = eval { PVE::Cluster::cfs_lock_storage( $storeid, 10, $code ); };
+  if ( my $err = $@ ) {
+    chomp $err;
+    warn "Warning :: [nimble-multipath] Could not lock storage \"$storeid\" for multipath alias update;"
+      . " proceeding unlocked: $err\n";
+    return $code->();
+  }
+  return $res;
+}
+
+# multipathd reconfigure re-reads config and re-checks every multipath map on the host (not just this
+# plugin's), so only do it when the alias set actually changes rather than on every map_volume/free_image.
 sub nimble_multipath_register {
   my ( $storeid, $volname, $wwid ) = @_;
   return unless length($wwid) && length($volname) && length($storeid);
@@ -772,23 +801,29 @@ sub nimble_multipath_register {
       . " /etc/multipath.conf to enable plugin-managed aliases.\n";
     return;
   }
-  my $cache = nimble_multipath_load_wwid_cache($storeid);
-  $cache->{$volname} = $sane_wwid;
-  nimble_multipath_save_wwid_cache( $storeid, $cache );
-  my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
-  nimble_multipath_write_conf( $storeid, \%aliases );
-  nimble_multipath_reconfigure();
+  nimble_multipath_with_storage_lock( $storeid, sub {
+    my $cache = nimble_multipath_load_wwid_cache($storeid);
+    return if ( $cache->{$volname} // '' ) eq $sane_wwid;
+    $cache->{$volname} = $sane_wwid;
+    nimble_multipath_save_wwid_cache( $storeid, $cache );
+    my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
+    nimble_multipath_write_conf( $storeid, \%aliases );
+    nimble_multipath_reconfigure();
+  } );
 }
 
 sub nimble_multipath_deregister {
   my ( $storeid, $volname ) = @_;
   return unless length($volname) && length($storeid);
-  my $cache = nimble_multipath_load_wwid_cache($storeid);
-  delete $cache->{$volname};
-  nimble_multipath_save_wwid_cache( $storeid, $cache );
-  my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
-  nimble_multipath_write_conf( $storeid, \%aliases );
-  nimble_multipath_reconfigure();
+  nimble_multipath_with_storage_lock( $storeid, sub {
+    my $cache = nimble_multipath_load_wwid_cache($storeid);
+    return unless exists $cache->{$volname};
+    delete $cache->{$volname};
+    nimble_multipath_save_wwid_cache( $storeid, $cache );
+    my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
+    nimble_multipath_write_conf( $storeid, \%aliases );
+    nimble_multipath_reconfigure();
+  } );
 }
 
 sub nimble_multipath_restore_aliases {
@@ -1647,37 +1682,6 @@ sub nimble_iscsi_node_portals_for_target {
   return @out;
 }
 
-# All (portal, IQN) pairs from `iscsiadm -m node` (after sendtargets).
-sub nimble_iscsi_list_all_node_records {
-  my $iscsiadm = nimble_iscsiadm_path();
-  return () unless -x $iscsiadm;
-  my @lines;
-  eval {
-    run_command(
-      [ $iscsiadm, '-m', 'node' ],
-      outfunc => sub { push @lines, shift },
-      errfunc => sub { },
-      timeout => 25,
-      quiet   => 1
-    );
-  };
-  my %seen;
-  my @recs;
-  for my $line (@lines) {
-    next unless $line =~ m/^\s*(\S+)\s+(iqn\S+)/i;
-    my $portal = $1;
-    my $iqn    = $2;
-    $portal =~ s/,[0-9]+\z//;
-    $iqn = nimble_untaint_iscsiadm_scalar($iqn);
-    next unless length($iqn) && $iqn =~ m/^iqn\./i;
-    $portal = nimble_untaint_iscsiadm_scalar($portal);
-    next unless length($portal);
-    my $key = "$iqn|$portal";
-    push @recs, { iqn => $iqn, portal => $portal } unless $seen{$key}++;
-  }
-  return @recs;
-}
-
 # Login failures when the target is already up (e.g. open-iscsi exit 15).
 sub nimble_iscsi_login_err_is_benign {
   my ($e) = @_;
@@ -1808,19 +1812,28 @@ sub nimble_iscsi_target_in_sessions {
   return 0;
 }
 
-# One sendtargets pass per host (quiet). Caller then runs targeted --login; do not mix with global `node --login` on map.
+# One sendtargets pass per host (quiet); returns the (portal, iqn) records this array itself just
+# reported on each queried IP. Callers must use these records directly (not a scan of the host's whole
+# iscsiadm node database, which can also hold records for other storage plugins or manually managed
+# targets) so login / node.startup changes only ever touch targets that belong to this array.
+# Caller then runs targeted --login; do not mix with global `node --login` on map.
 sub iscsi_sendtargets_on_ips {
   my ($ips_ref) = @_;
-  return unless ref($ips_ref) eq 'ARRAY' && @$ips_ref;
+  return () unless ref($ips_ref) eq 'ARRAY' && @$ips_ref;
   my $iscsiadm = nimble_iscsiadm_path();
-  return unless -x $iscsiadm;
+  return () unless -x $iscsiadm;
+  my %seen;
+  my @recs;
   for my $ip ( @$ips_ref ) {
     next unless defined $ip && $ip =~ m/^\S+$/ && length($ip) <= 253;
     my $disc_ip = nimble_untaint_iscsiadm_scalar($ip);
     next unless length $disc_ip;
+    my @lines;
     eval {
       run_command(
         [ $iscsiadm, '-m', 'discovery', '-t', 'sendtargets', '-p', $disc_ip ],
+        outfunc => sub { push @lines, shift },
+        errfunc => sub { },
         timeout => 20,
         quiet   => 1
       );
@@ -1828,8 +1841,22 @@ sub iscsi_sendtargets_on_ips {
     if ( $@ ) {
       chomp( my $e = $@ );
       print "Debug :: sendtargets -p $disc_ip: $e\n" if $DEBUG >= 1;
+      next;
+    }
+    for my $line (@lines) {
+      next unless $line =~ m/^\s*(\S+)\s+(iqn\S+)/i;
+      my $portal = $1;
+      my $iqn    = $2;
+      $portal =~ s/,[0-9]+\z//;
+      $iqn = nimble_untaint_iscsiadm_scalar($iqn);
+      next unless length($iqn) && $iqn =~ m/^iqn\./i;
+      $portal = nimble_untaint_iscsiadm_scalar($portal);
+      next unless length($portal);
+      my $key = "$iqn|$portal";
+      push @recs, { iqn => $iqn, portal => $portal } unless $seen{$key}++;
     }
   }
+  return @recs;
 }
 
 # Login to target on all node records (open-iscsi), when portals are unknown but discovery already ran elsewhere.
@@ -1943,8 +1970,10 @@ sub nimble_volume_prepare_restore_disconnect {
 }
 
 # Pure-style host iSCSI baseline (also on throttled status() refresh): sendtargets on discovery IPs,
-# then login each node-db portal that is not already in session; node.startup=automatic per record.
-# No global `iscsiadm -m node --login` (exit 15 when some paths are already up).
+# then login each (portal, iqn) record that sendtargets itself just reported for this array — not a scan
+# of the host's whole iscsiadm node database, which may also hold records for other storage plugins or
+# manually managed targets. node.startup=automatic per record. No global `iscsiadm -m node --login`
+# (exit 15 when some paths are already up, and no way to scope it to just this array's targets).
 sub run_iscsi_discovery_and_login {
   my ( $storeid, $scfg, $ips_ref ) = @_;
   return unless ref($ips_ref) eq 'ARRAY' && @$ips_ref;
@@ -1953,10 +1982,9 @@ sub run_iscsi_discovery_and_login {
     warn "Warning :: iscsiadm not found or not executable; skipping auto iSCSI discovery for storage \"$storeid\".\n";
     return;
   }
-  iscsi_sendtargets_on_ips($ips_ref);
-  my @recs = nimble_iscsi_list_all_node_records();
+  my @recs = iscsi_sendtargets_on_ips($ips_ref);
   if ( !@recs ) {
-    print "Debug :: sendtargets on discovery IP(s) for \"$storeid\" found no node DB records yet.\n"
+    print "Debug :: sendtargets on discovery IP(s) for \"$storeid\" reported no target records.\n"
       if $DEBUG >= 1;
     return;
   }
@@ -3236,7 +3264,8 @@ sub nimble_sync_array_snapshots {
 
   for my $vmid ( sort keys %by_vmid ) {
     # Skips CT IDs: PVE::QemuConfig->load_config dies for LXC containers; snapshot sync is QEMU-only.
-    my @vm_vols = grep { $vol_map{ $_ }{ vmid } eq $vmid } keys %vol_map;
+    # Sorted (not raw hash key order) so the seed volume below is stable across repeated status() calls.
+    my @vm_vols = sort grep { $vol_map{ $_ }{ vmid } eq $vmid } keys %vol_map;
 
     # Find consistent snapshot groups: all volumes for this VM covered within 60s.
     # Seed from first volume's snapshots and verify every other volume has a match.

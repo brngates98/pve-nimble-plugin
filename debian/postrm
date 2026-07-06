@@ -1,9 +1,29 @@
 #!/bin/bash
 set -e
 
-if [ "$1" = "configure" ]; then
-  systemctl try-restart pvedaemon.service || true
-  systemctl try-restart pvestatd.service || true
-  systemctl try-restart pveproxy.service || true
-  systemctl try-restart pvescheduler.service || true
-fi
+# Mirrors postinst's restart logic: after the package is removed, make sure running PVE daemons stop
+# referencing the (now deleted) Perl module. Triggers on "remove"/"purge" — postrm is never invoked
+# with "configure" (that's postinst-only in Debian's maintainer-script protocol; the previous condition
+# here was copied from kolesa-team/pve-purestorage-plugin's postrm, which has the same dead condition).
+# Omits pve-cluster, same reasoning as postinst (it reloads corosync/quorum and can block apt for a long
+# time on cluster nodes).
+restart_pve_stack() {
+  local cmd
+  if command -v deb-systemd-invoke >/dev/null 2>&1; then
+    cmd=(deb-systemd-invoke)
+  else
+    cmd=(systemctl)
+  fi
+  "${cmd[@]}" try-restart pvedaemon.service 2>/dev/null || true
+  "${cmd[@]}" try-restart pvestatd.service 2>/dev/null || true
+  "${cmd[@]}" try-restart pveproxy.service 2>/dev/null || true
+  "${cmd[@]}" try-restart pvescheduler.service 2>/dev/null || true
+}
+
+case "$1" in
+  remove|purge)
+    if [ -d /run/systemd/system ]; then
+      restart_pve_stack
+    fi
+    ;;
+esac

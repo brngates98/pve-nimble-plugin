@@ -20,7 +20,8 @@ Read this first when resuming work. **Operators:** use [README.md](../README.md)
 - Initiator groups + ACLs; optional `initiator_group` or auto `pve-<nodename>`.
 - PVE snapshots: create, delete, rollback (array restore); clone from snapshot.
 - Multipath (serial discovery, alias files under `conf.d/nimble-<storeid>.conf`).
-- Auto iSCSI discovery (default on): subnets API → sendtargets → login each **portal** not already in session (Pure-style baseline on activate + ~60s from status); per-volume IQN login on map when ACL adds a new target.
+- Auto iSCSI discovery (default on): subnets API → sendtargets → login each **portal** not already in session (Pure-style baseline on activate + ~60s from status); per-volume IQN login on map when ACL adds a new target. Login is scoped to exactly the `(portal, iqn)` records each sendtargets call reports — never a scan of the host's whole iscsiadm node database (would touch other storage plugins'/manually-managed targets).
+- Multipath alias register/deregister skip the write + `multipathd reconfigure` when the WWID is already correct/absent (was firing unconditionally on every map/unmap), and the WWID cache (shared cluster-wide via `/etc/pve/priv`) is now guarded by `PVE::Cluster::cfs_lock_storage` to avoid cross-node lost updates.
 - `raw+size` import/export (e.g. Veeam V13+).
 - Array snapshot **import** into QEMU VM configs (`nimble*` keys, throttled from `status()`).
 - APIVER 12–14 (`storage` QEMU snapshots, `qemu_blockdev_options`, `get_identity`, etc.).
@@ -60,7 +61,7 @@ debian/  scripts/  tests/  .github/workflows/
 
 ### Config (`storage.cfg`)
 
-`address`, `username`, `password` (in cfg, cluster-replicated; mirrored to priv `.pw` on add/update), optional `initiator_group`, `vnprefix`, `pool_name`, `volume_collection`, `check_ssl`, `token_ttl`, `debug`, `auto_iscsi_discovery` (default **on**), `iscsi_discovery_ips`, `content` (default `images`, `rootdir`, `none`).
+`address`, `username`, `password` (in cfg, cluster-replicated; mirrored to priv `.pw` on add/update), optional `port` (default 5392), `initiator_group`, `vnprefix`, `pool_name`, `volume_collection`, `check_ssl`, `token_ttl`, `debug`, `auto_iscsi_discovery` (default **on**), `iscsi_discovery_ips`, `content` (default `images`, `rootdir`, `none`).
 
 Do **not** add undeclared keys to `properties()` — PVE SectionConfig will reject them. Do **not** put `username`/`password` in `properties()` (global registry); use `options()` only.
 
