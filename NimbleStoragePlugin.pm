@@ -91,27 +91,32 @@ sub plugindata {
   return {
     content => [ { images => 1, rootdir => 1, none => 1 }, { images => 1, rootdir => 1 } ],
     format  => [ { raw    => 1 },            "raw" ],
-    # Like TrueNAS (api_key) / Pure (token): `password` is a normal option stored in storage.cfg (pmxcfs).
-    # Session tokens still cache under /etc/pve/priv/nimble/. Legacy: priv .pw files and hooks mirror on update.
-    'sensitive-properties' => {},
+    # `password` is sensitive (APIVER 11 mechanism): PVE keeps it out of storage.cfg and passes it
+    # to on_add/on_update hooks separately; our hooks persist it to /etc/pve/priv/storage/<id>.pw.
+    # This also matches PVE's pre-APIVER-11 hard-coded sensitive list (which included `password`),
+    # so behavior is now uniform across PVE 8 and 9 — previously the empty {} declaration opted out
+    # on APIVER 11+ hosts only, leaving the password in cluster-replicated, GUI-visible storage.cfg.
+    # Legacy cfg password lines from older plugin versions still work (see nimble_api_credentials).
+    'sensitive-properties' => { password => 1 },
   };
 }
 
 sub properties {
-  return {
+  # PVE::SectionConfig registers every plugin's properties() into ONE global propertyList and dies
+  # ("duplicate property") on any name that is already there — regardless of whether the schemas are
+  # identical. Already-global names must therefore only be listed in options(), never redeclared here:
+  #   - `port` is declared by the PVE::Storage::Plugin base class itself (defaultData propertyList).
+  #   - `username`/`password` are declared by core plugins (RBD/CIFS/PBS).
+  #   - pve-purestorage-plugin declares address/vnprefix/check_ssl/token_ttl/debug; when both plugins
+  #     are installed, whichever one SectionConfig::init() merges second dies. The filter at the bottom
+  #     drops any name that is already registered by the time our properties() is called, so this
+  #     plugin survives loading after Pure (Pure loading after us still dies on ITS OWN redeclaration —
+  #     that half is only fixable in Pure; see README co-installation note).
+  my $props = {
     address => {
       description => "HPE Nimble array management IP or DNS name.",
       type        => 'string'
     },
-    port => {
-      description => "HPE Nimble array management API port (optional).",
-      type        => 'integer',
-      minimum     => 1,
-      maximum     => 65535,
-      default     => 5392,
-    },
-    # Do not redeclare username/password here (RBD/CIFS own those names globally). List them in options().
-    # Password is stored in storage.cfg (cluster-replicated), like TrueNAS api_key; priv .pw remains optional legacy + mirror.
     initiator_group => {
       description => "Initiator group name (optional). If unset, a group is created automatically using this host's iSCSI IQN.",
       type        => 'string'
@@ -160,6 +165,9 @@ sub properties {
       optional    => 1,
     },
   };
+  my $registered = eval { PVE::Storage::Plugin->private()->{ propertyList } } // {};
+  delete $props->{ $_ } for grep { $registered->{ $_ } } keys %$props;
+  return $props;
 }
 
 sub options {
@@ -291,6 +299,21 @@ sub on_delete_hook {
   if ( my $p = get_token_cache_path($storeid) ) {
     unlink $p if -e $p;
   }
+  # Multipath alias state for this storage: cluster-replicated WWID cache plus this node's conf.d
+  # fragment. Without this, removed storages leave aliases in multipathd forever. iSCSI sessions and
+  # node.startup=automatic records are deliberately NOT torn down here: per-volume target sessions
+  # cannot be attributed to one storeid (another storage definition may address the same array), and
+  # killing sessions under running VMs would be worse than leaving idle logins behind.
+  eval {
+    my $wc = nimble_multipath_wwid_cache_path($storeid);
+    unlink $wc if -e $wc;
+    my $conf = nimble_multipath_conf_path($storeid);
+    if ( -e $conf ) {
+      unlink $conf;
+      nimble_multipath_reconfigure();
+    }
+  };
+  warn "Warning :: [nimble-multipath] cleanup on storage delete for \"$storeid\": $@\n" if $@;
   return;
 }
 
@@ -313,11 +336,14 @@ sub nimble_api_credentials {
   my ( $scfg, $storeid ) = @_;
   my $user = $scfg->{ username } // $scfg->{ nimble_user };
   die "Error :: username not set\n" if !defined($user) || $user eq '';
-  my $pass = $scfg->{ password };
-  if ( !defined($pass) || $pass eq '' ) {
-    my $sid = nimble_effective_storeid( $scfg, $storeid );
-    $pass = nimble_read_password_file($sid) if defined $sid && $sid ne '';
-  }
+  # Priv file first: with `password` declared sensitive, the API updates the priv file via hooks but
+  # never rewrites a legacy plaintext line in storage.cfg — so after a password change the cfg copy
+  # (if one still exists from an older plugin version) is stale while the file is current. The cfg
+  # fallback keeps legacy configs working until their first password update. To change the password,
+  # use `pvesm set <id> --password ...` (manual storage.cfg edits are ignored once a priv file exists).
+  my $sid  = nimble_effective_storeid( $scfg, $storeid );
+  my $pass = ( defined $sid && $sid ne '' ) ? nimble_read_password_file($sid) : undef;
+  $pass = $scfg->{ password } if !defined($pass) || $pass eq '';
   die "Error :: password not set (use pvesm --password or password file)\n" if !defined($pass) || $pass eq '';
   return ( $user, $pass );
 }
@@ -381,7 +407,12 @@ sub nimble_volname {
   if ( length( $snapname ) ) {
     my $snap = $snapname;
     $snap =~ s/^(veeam_)/veeam-/;
-    $snap = 'snap-' . $snap unless $snap =~ /^snap-/;
+    # Always prefix — a conditional prefix made PVE snapshots "x" and "snap-x" map to the SAME
+    # array snapshot name (".snap-x"), so deleting one deleted the other's data. Reverse mapping in
+    # volume_snapshot_info strips exactly one leading "snap-", so ".snap-snap-x" round-trips to
+    # "snap-x" correctly. (Array snapshots created by pre-v0.0.24 plugins for PVE snapshots that
+    # themselves started with "snap-" — a naming collision case — resolve as not-found afterwards.)
+    $snap = 'snap-' . $snap;
     $name .= '.' . $snap;
   }
   return $name;
@@ -826,6 +857,23 @@ sub nimble_multipath_deregister {
   } );
 }
 
+# rename_volume: cache keys (and thus aliases) are volname-based; move the entry or the old alias
+# lingers forever — deregister at free_image only ever sees the new name.
+sub nimble_multipath_rename_cache_entry {
+  my ( $storeid, $old_volname, $new_volname ) = @_;
+  return unless length($storeid) && length($old_volname) && length($new_volname);
+  return if $old_volname eq $new_volname;
+  nimble_multipath_with_storage_lock( $storeid, sub {
+    my $cache = nimble_multipath_load_wwid_cache($storeid);
+    return unless exists $cache->{$old_volname};
+    $cache->{$new_volname} = delete $cache->{$old_volname};
+    nimble_multipath_save_wwid_cache( $storeid, $cache );
+    my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
+    nimble_multipath_write_conf( $storeid, \%aliases );
+    nimble_multipath_reconfigure();
+  } );
+}
+
 sub nimble_multipath_restore_aliases {
   my ($storeid) = @_;
   my $cache = nimble_multipath_load_wwid_cache($storeid);
@@ -960,8 +1008,19 @@ sub nimble_base_url {
   my ( $scfg ) = @_;
   my $addr = $scfg->{ address } or die "Error :: address not set\n";
   $addr =~ s/^https?:\/\///;
-  $addr =~ s/:\d+$//;
+  $addr =~ s/\/.*$//;
   my $port = $scfg->{ port } // $default_port;
+  # Strip an explicit :port only where the colon can't be part of the host itself: bracketed IPv6
+  # ("[fd00::1]:5392") or hostname/IPv4. A bare-colon suffix on an unbracketed IPv6 literal is a
+  # hextet, not a port — "fd00::5392" must not lose its tail.
+  if ( $addr =~ /^\[(.+)\](?::\d+)?$/ ) {
+    return "https://[$1]:${port}";
+  }
+  if ( $addr =~ /:/ && $addr !~ /^[^:]+:\d+$/ ) {
+    # Unbracketed IPv6 literal (multiple colons, or single colon not followed by digits-only)
+    return "https://[${addr}]:${port}";
+  }
+  $addr =~ s/:\d+$//;
   return "https://${addr}:${port}";
 }
 
@@ -1619,12 +1678,17 @@ sub get_nimble_iscsi_discovery_ips {
     next unless defined $p && $p =~ m/^\S+$/ && length($p) <= 253;
     push @merged, $p if !$seen_ord{$p}++;
   }
-  for my $p ( @session_supplement ) {
-    next unless defined $p && $p =~ m/^\S+$/ && length($p) <= 253;
-    push @merged, $p if !$seen_ord{$p}++;
-  }
-  if ( $DEBUG >= 1 && !$from_api_or_manual && @session_supplement ) {
-    print "Debug :: No discovery IPs from subnets/API fallbacks; using active session portal IP(s): @merged\n";
+  # Session-derived IPs are portals of EVERY iSCSI session on this host — including other vendors'
+  # arrays managed by other plugins. Only fall back to them when the Nimble API and manual config
+  # produced nothing; merging them unconditionally would aim sendtargets at foreign arrays.
+  if ( !$from_api_or_manual ) {
+    for my $p ( @session_supplement ) {
+      next unless defined $p && $p =~ m/^\S+$/ && length($p) <= 253;
+      push @merged, $p if !$seen_ord{$p}++;
+    }
+    if ( $DEBUG >= 1 && @session_supplement ) {
+      print "Debug :: No discovery IPs from subnets/API fallbacks; using active session portal IP(s): @merged\n";
+    }
   }
   return @merged;
 }
@@ -1969,11 +2033,24 @@ sub nimble_volume_prepare_restore_disconnect {
   nimble_delete_access_control_records_for_volume_id( $scfg, $vol_id, $storeid );
 }
 
+# Nimble volume targets share the vendor IQN prefix (iqn.2007-11.com.nimblestorage:...). Baseline
+# discovery must never log in to targets that are not Nimble's: a discovery portal can be (or answer
+# for) a foreign array — e.g. a session-derived fallback IP that belongs to a Pure array — and its
+# sendtargets response would list that vendor's targets. Substring match (not anchored prefix) so a
+# firmware/rebrand prefix change (Alletra) that keeps "nimble" in the IQN does not silently break login.
+sub nimble_iscsi_iqn_is_nimble_target {
+  my ($iqn) = @_;
+  return 0 unless defined $iqn && length $iqn;
+  return $iqn =~ /nimble/i ? 1 : 0;
+}
+
 # Pure-style host iSCSI baseline (also on throttled status() refresh): sendtargets on discovery IPs,
 # then login each (portal, iqn) record that sendtargets itself just reported for this array — not a scan
 # of the host's whole iscsiadm node database, which may also hold records for other storage plugins or
-# manually managed targets. node.startup=automatic per record. No global `iscsiadm -m node --login`
-# (exit 15 when some paths are already up, and no way to scope it to just this array's targets).
+# manually managed targets. Records are additionally filtered to Nimble vendor IQNs so a foreign portal
+# in the IP list can never get its targets logged in or set to node.startup=automatic.
+# No global `iscsiadm -m node --login` (exit 15 when some paths are already up, and no way to scope it
+# to just this array's targets).
 sub run_iscsi_discovery_and_login {
   my ( $storeid, $scfg, $ips_ref ) = @_;
   return unless ref($ips_ref) eq 'ARRAY' && @$ips_ref;
@@ -1982,9 +2059,9 @@ sub run_iscsi_discovery_and_login {
     warn "Warning :: iscsiadm not found or not executable; skipping auto iSCSI discovery for storage \"$storeid\".\n";
     return;
   }
-  my @recs = iscsi_sendtargets_on_ips($ips_ref);
+  my @recs = grep { nimble_iscsi_iqn_is_nimble_target( $_->{ iqn } ) } iscsi_sendtargets_on_ips($ips_ref);
   if ( !@recs ) {
-    print "Debug :: sendtargets on discovery IP(s) for \"$storeid\" reported no target records.\n"
+    print "Debug :: sendtargets on discovery IP(s) for \"$storeid\" reported no Nimble target records.\n"
       if $DEBUG >= 1;
     return;
   }
@@ -2275,11 +2352,29 @@ sub nimble_volume_connection {
     $class->nimble_iscsi_establish_volume_session( $scfg, $volname, $storeid );
     return 1;
   }
+  # Disconnect: the ACR is per (volume, initiator group). A configured `initiator_group` (or an
+  # auto-selected group listing several hosts' IQNs) is shared by every cluster node, so there is
+  # exactly ONE record granting access — deleting it here would revoke the volume for all nodes.
+  # During live migration the source node deactivates AFTER the VM is already running on the target;
+  # deleting a shared ACR at that point cuts the running VM off from its disk. Only revoke when the
+  # group is this node's own single-node auto group (pve-<nodename>); shared-group ACLs stay until
+  # nimble_remove_volume / restore-disconnect delete all records for the volume.
+  return 1 if defined $scfg->{ initiator_group } && $scfg->{ initiator_group } ne '';
   my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   return 1 unless $vol_id;
-  my $ig_id = nimble_resolve_initiator_group_id_no_create( $scfg, $storeid );
+  my $node_group = 'pve-' . PVE::INotify::nodename();
+  my $enc_g = uri_escape($node_group);
+  my $gr = eval { nimble_api_call( $scfg, 'GET', "initiator_groups?name=$enc_g", undef, $storeid ) };
+  return 1 unless $gr;
+  my $ig_id;
+  for my $g ( @{ nimble_data_as_list( $gr->{ data } ) } ) {
+    next unless ref($g) eq 'HASH';
+    if ( ( $g->{ name } // '' ) eq $node_group ) { $ig_id = $g->{ id }; last; }
+  }
   return 1 unless defined $ig_id && $ig_id ne '';
-  my $r = eval { nimble_api_call( $scfg, 'GET', 'access_control_records', undef, $storeid ) };
+  my $enc_vid = uri_escape($vol_id);
+  my $r = eval { nimble_api_call( $scfg, 'GET', "access_control_records?vol_id=$enc_vid", undef, $storeid ) };
+  $r = eval { nimble_api_call( $scfg, 'GET', 'access_control_records', undef, $storeid ) } unless $r;
   return 1 unless $r;
   my $list = nimble_data_as_list( $r->{ data } );
   for my $acr ( @$list ) {
@@ -2640,7 +2735,9 @@ sub nimble_delete_snapshots_for_volume_id {
 sub nimble_delete_access_control_records_for_volume_id {
   my ( $scfg, $vol_id, $storeid ) = @_;
   return unless defined $vol_id;
-  my $r    = eval { nimble_api_call( $scfg, 'GET', 'access_control_records', undef, $storeid ) };
+  my $enc_vid = uri_escape($vol_id);
+  my $r = eval { nimble_api_call( $scfg, 'GET', "access_control_records?vol_id=$enc_vid", undef, $storeid ) };
+  $r = eval { nimble_api_call( $scfg, 'GET', 'access_control_records', undef, $storeid ) } unless $r;
   return unless $r;
   my $list = nimble_data_as_list( $r->{ data } );
   for my $acr ( @$list ) {
@@ -3095,9 +3192,11 @@ sub nimble_host_refresh_volume_size_after_array_resize {
 ### Storage interface
 sub parse_volname {
   my ( $class, $volname ) = @_;
-  if ( $volname =~ m/^(vm|base)-(\d+)-(\S+)$/ ) {
-    my $vtype = ( $1 eq "vm" ) ? "images" : "base";
-    return ( $vtype, $3, $2, undef, undef, undef, 'raw' );
+  if ( $volname =~ m/^((vm|base)-(\d+)-\S+)$/ ) {
+    # Core block plugins (RBD/LVM/ZFS) return ('images', <full volname>, vmid, ..., $isBase, fmt).
+    # 'base' is not a valid vtype — base images are vtype 'images' with the isBase flag. base-*
+    # volumes cannot currently be created (create_base dies) but the contract must still hold.
+    return ( 'images', $1, $3, undef, undef, ( $2 eq 'base' ? 1 : 0 ), 'raw' );
   }
   die "Error :: Invalid volume name ($volname).\n";
 }
@@ -3205,7 +3304,11 @@ sub nimble_sync_array_snapshots {
 
   # Prefer one GET snapshots (all rows) when the array allows it. Some firmware returns 400 unless
   # vol_id / vol_name / serial_number / app_uuid / id / Advanced Criteria is present (SM_missing_arg).
+  # $fetch_incomplete: a per-volume GET failed, so the snapshot view is partial this round. Groups can
+  # still be ADDED from what did arrive, but the stale-entry removal below must be skipped — with a
+  # partial view "no longer on the array" is indistinguishable from "fetch failed".
   my @snaps;
+  my $fetch_incomplete = 0;
   my $sr = eval { nimble_api_call( $scfg, 'GET', 'snapshots', undef, $storeid ) };
   if ( $sr && ref($sr) eq 'HASH' ) {
     for my $s ( @{ nimble_data_as_list( $sr->{ data } ) } ) {
@@ -3225,6 +3328,9 @@ sub nimble_sync_array_snapshots {
       next unless defined $vid && length($vid);
       my $enc = uri_escape($vid);
       my $r   = eval { nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$enc", undef, $storeid ) };
+      if ( !$r || ref($r) ne 'HASH' ) {
+        $fetch_incomplete = 1;
+      }
       next unless $r && ref($r) eq 'HASH';
       for my $s ( @{ nimble_data_as_list( $r->{ data } ) } ) {
         next unless ref($s) eq 'HASH';
@@ -3364,12 +3470,28 @@ sub nimble_sync_array_snapshots {
           $changed = 1;
         }
 
-        # Remove stale imported entries whose Nimble snapshot no longer exists
-        for my $sname ( keys %$psnaps ) {
-          next unless $sname =~ /^nimble\d+$/;
-          next if $nimble_names{ $sname };
-          delete $psnaps->{ $sname };
-          $changed = 1;
+        # Remove stale imported entries whose Nimble snapshot no longer exists — but only entries
+        # THIS storage created. A VM can have disks on several Nimble storages (or two storeids on
+        # one array); each storage's sync only sees its own volumes, so an unscoped delete would
+        # remove the other storage's imports every 30s (add/delete flip-flop between the two syncs).
+        # Ownership test: our import descriptions list "<full array volume name>: <snap name>" pairs
+        # for volumes in this storage's %vol_map. Entries without a matching description (including
+        # legacy generic "Imported from Nimble array" ones) are left alone. Skipped entirely when
+        # this round's snapshot fetch was partial ($fetch_incomplete).
+        if ( !$fetch_incomplete ) {
+          for my $sname ( keys %$psnaps ) {
+            next unless $sname =~ /^nimble\d+$/;
+            next if $nimble_names{ $sname };
+            my $desc = $psnaps->{ $sname }{ description };
+            $desc = defined $desc ? "$desc" : '';
+            my $ours = 0;
+            for my $fvn (@vm_vols) {
+              if ( $desc =~ /(?:^|;\s*)\Q$fvn\E:/ ) { $ours = 1; last; }
+            }
+            next unless $ours;
+            delete $psnaps->{ $sname };
+            $changed = 1;
+          }
         }
 
         if ( $changed ) {
@@ -3447,11 +3569,14 @@ sub status {
   # Periodic import of array-created snapshots into PVE VM configs (throttled to 30s per storage).
   # Timestamp is always updated after each attempt (success or failure) to prevent hammering
   # the Nimble API and pvestatd when the array is unreachable or a VM config is locked.
+  # status() runs inside pvestatd's sequential loop for ALL storages on the node — the sync makes
+  # many API calls (each with a 30s LWP timeout), so it gets a hard wall-clock budget. On timeout
+  # this round's partial work is discarded and retried at the next throttle window.
   my $ts_file = "/var/run/pve-nimble-sync-${storeid}.ts";
   my $last    = 0;
   if ( open my $fh, '<', $ts_file ) { $last = <$fh> // 0; chomp $last; close $fh; }
   if ( time() - $last >= 30 ) {
-    eval { nimble_sync_array_snapshots( $scfg, $storeid ) };
+    eval { PVE::Tools::run_with_timeout( 25, sub { nimble_sync_array_snapshots( $scfg, $storeid ) } ) };
     warn "Warning :: Nimble snapshot sync: $@" if $@;
     my $tmp = "$ts_file.tmp.$$";
     if ( open my $fh, '>', $tmp ) {
@@ -3478,6 +3603,11 @@ sub nimble_auto_iscsi_discovery_enabled {
 }
 
 # Throttled Pure-style iSCSI baseline refresh (sendtargets + per-portal login if dropped).
+# Called from status() (pvestatd) AND activate_storage — one 60s throttle covers both, so repeated
+# VM starts / status cycles don't each pay a discovery round-trip. The ts file is written BEFORE the
+# work: a failing attempt (array unreachable, no portals) is throttled the same as a successful one,
+# instead of retrying on every 10s pvestatd cycle. /var/run is tmpfs, so the first call after boot
+# always runs. Hard wall-clock budget for the same pvestatd-stall reason as the snapshot sync.
 sub nimble_iscsi_refresh_baseline_if_due {
   my ( $class, $storeid, $scfg ) = @_;
   return unless nimble_auto_iscsi_discovery_enabled($scfg);
@@ -3485,38 +3615,40 @@ sub nimble_iscsi_refresh_baseline_if_due {
   my $last    = 0;
   if ( open my $fh, '<', $ts_file ) { $last = <$fh> // 0; chomp $last; close $fh; }
   return if time() - $last < 60;
-  my $ig_ok = eval { nimble_ensure_initiator_group_id( $scfg, $storeid ); 1 };
-  return unless $ig_ok;
-  my @ips = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
-  return unless @ips;
-  eval { run_iscsi_discovery_and_login( $storeid, $scfg, \@ips ); };
-  warn "Warning :: iSCSI baseline refresh for \"$storeid\": $@\n" if $@;
   my $tmp = "$ts_file.tmp.$$";
   if ( open my $fh, '>', $tmp ) {
     print $fh time();
     close $fh;
     rename( $tmp, $ts_file );
   }
+  eval {
+    PVE::Tools::run_with_timeout( 30, sub {
+      my $ig_ok = eval { nimble_ensure_initiator_group_id( $scfg, $storeid ); 1 };
+      if ( !$ig_ok ) {
+        chomp( my $err = $@ );
+        warn "Warning :: Auto iSCSI discovery skipped for storage \"$storeid\": initiator group could not be ensured ($err). Install open-iscsi and set InitiatorName in /etc/iscsi/initiatorname.iscsi, or set initiator_group to an existing group.\n";
+        return;
+      }
+      my @ips = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
+      if ( !@ips ) {
+        warn "Warning :: No iSCSI discovery portals from Nimble API for storage \"$storeid\" (GET v1/subnets plus GET v1/subnets/:id per subnet; prefer subnets whose type includes data and discovery_ip is set). Skipping discovery. Check HTTPS/API access from this host and subnet configuration on the array.\n";
+        return;
+      }
+      run_iscsi_discovery_and_login( $storeid, $scfg, \@ips );
+    } );
+  };
+  warn "Warning :: iSCSI baseline refresh for \"$storeid\": $@\n" if $@;
 }
 
 sub activate_storage {
   my ( $class, $storeid, $scfg, $cache ) = @_;
   set_debug_from_config( $scfg );
-  # PureStoragePlugin::activate_storage only returns 1; Nimble ensures host iSCSI baseline on activate unless disabled.
-  if ( nimble_auto_iscsi_discovery_enabled($scfg) ) {
-    my $ig_ok = eval { nimble_ensure_initiator_group_id( $scfg, $storeid ); 1 };
-    if ( !$ig_ok ) {
-      chomp( my $err = $@ );
-      warn "Warning :: Auto iSCSI discovery skipped for storage \"$storeid\": initiator group could not be ensured ($err). Install open-iscsi and set InitiatorName in /etc/iscsi/initiatorname.iscsi, or set initiator_group to an existing group.\n";
-    } else {
-      my @ips = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
-      if ( !@ips ) {
-        warn "Warning :: No iSCSI discovery portals from Nimble API for storage \"$storeid\" (GET v1/subnets plus GET v1/subnets/:id per subnet; prefer subnets whose type includes data and discovery_ip is set). Skipping discovery. Check HTTPS/API access from this host and subnet configuration on the array.\n";
-      } else {
-        run_iscsi_discovery_and_login( $storeid, $scfg, \@ips );
-      }
-    }
-  }
+  # PureStoragePlugin::activate_storage only returns 1; Nimble ensures host iSCSI baseline on activate
+  # unless disabled. Shares the 60s throttle with status(): activate_storage runs before every volume
+  # operation (each VM start, migration prep, vdisk alloc), and an unthrottled discovery round-trip
+  # added seconds to each. Per-volume session establishment in activate_volume/map_volume covers any
+  # gap within the window; the first call after boot always runs (ts file lives on tmpfs).
+  $class->nimble_iscsi_refresh_baseline_if_due( $storeid, $scfg );
   nimble_multipath_restore_aliases($storeid);
   return 1;
 }
@@ -3687,7 +3819,12 @@ sub rename_volume {
     $target_volname = $class->find_free_diskname( $storeid, $scfg, $target_vmid );
   }
   $class->unmap_volume( $storeid, $scfg, $source_volname );
+  # Nimble's per-volume target_name embeds the volume name, so it changes with the rename. Log out
+  # the old IQN first (while nimble_get_volume_info can still resolve the old name) — otherwise the
+  # node keeps a stale session + node-db records for a target that no longer exists.
+  eval { nimble_iscsi_logout_volume_local( $class, $scfg, $source_volname, $storeid ); };
   $class->nimble_rename_volume( $scfg, $storeid, $source_volname, $target_volname );
+  nimble_multipath_rename_cache_entry( $storeid, $source_volname, $target_volname );
   return "$storeid:$target_volname";
 }
 
@@ -3872,8 +4009,14 @@ sub volume_qemu_snapshot_method {
 
 # Return QEMU blockdev options for this volume (APIVER 12). Nimble volumes are raw block devices;
 # the host_device driver is the correct QEMU driver for mapped iSCSI/multipath block nodes.
+# Nimble array snapshots are not host-attachable block devices, so a snapshot blockdev request must
+# die rather than fall through to the live volume's device — silently attaching the current state
+# under a snapshot's name would hand QEMU the wrong data.
 sub qemu_blockdev_options {
   my ( $class, $scfg, $storeid, $volname, $machine_version, $options ) = @_;
+  my $snap = ref($options) eq 'HASH' ? $options->{'snapshot-name'} : undef;
+  die "Error :: cannot attach a snapshot of a Nimble volume as a block device (snapshot \"$snap\" of \"$volname\").\n"
+    if defined $snap && length $snap;
   my $path = $class->filesystem_path( $scfg, $volname, undef, $storeid );
   return undef unless length($path) && -b $path;
   return { driver => 'host_device', filename => $path };

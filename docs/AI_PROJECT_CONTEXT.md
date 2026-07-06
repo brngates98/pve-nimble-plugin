@@ -20,11 +20,11 @@ Read this first when resuming work. **Operators:** use [README.md](../README.md)
 - Initiator groups + ACLs; optional `initiator_group` or auto `pve-<nodename>`.
 - PVE snapshots: create, delete, rollback (array restore); clone from snapshot.
 - Multipath (serial discovery, alias files under `conf.d/nimble-<storeid>.conf`).
-- Auto iSCSI discovery (default on): subnets API → sendtargets → login each **portal** not already in session (Pure-style baseline on activate + ~60s from status); per-volume IQN login on map when ACL adds a new target. Login is scoped to exactly the `(portal, iqn)` records each sendtargets call reports — never a scan of the host's whole iscsiadm node database (would touch other storage plugins'/manually-managed targets).
+- Auto iSCSI discovery (default on): subnets API → sendtargets → login each **portal** not already in session; one 60s throttle shared by activate_storage and status(). Login scoping is two-layer: only the `(portal, iqn)` records each sendtargets call reports (never the host's whole iscsiadm node DB), **and** only Nimble vendor IQNs (`nimble_iscsi_iqn_is_nimble_target`) — a foreign portal in the IP list can't get its targets logged in. Session-derived portal IPs are a last-resort fallback only (they can belong to other vendors' arrays). Per-volume IQN login on map when ACL adds a new target.
 - Multipath alias register/deregister skip the write + `multipathd reconfigure` when the WWID is already correct/absent (was firing unconditionally on every map/unmap), and the WWID cache (shared cluster-wide via `/etc/pve/priv`) is now guarded by `PVE::Cluster::cfs_lock_storage` to avoid cross-node lost updates.
 - `raw+size` import/export (e.g. Veeam V13+).
 - Array snapshot **import** into QEMU VM configs (`nimble*` keys, throttled from `status()`).
-- APIVER 12–14 (`storage` QEMU snapshots, `qemu_blockdev_options`, `get_identity`, etc.).
+- APIVER 12–14 (`storage` QEMU snapshots, `qemu_blockdev_options`, `get_identity`, etc.). Note: `volume_resize` `$snapname` and `volume_snapshot_info` `virtual-size` are **APIVER 15** additions per pve-storage ApiChangeLog (earlier release notes said 14); implementing them while reporting 14 is safe (additive).
 - Package + CI + unit tests (no live Nimble in CI).
 
 ### Partial / needs validation
@@ -37,7 +37,7 @@ Read this first when resuming work. **Operators:** use [README.md](../README.md)
 
 - **Synchronous replication** on volume collections (especially **manual** membership in an existing sync-rep collection) — separate from PVE snapshots until field-tested; see README troubleshooting.
 - Firmware-specific API shapes (`GET snapshots` without filter, list row sparsity) — see [API_VALIDATION.md](API_VALIDATION.md).
-- Disconnect path fetches all ACRs (could filter by `vol_id`).
+- **Co-install with pve-purestorage-plugin:** still unsafe until Pure adds a declare-if-absent guard — see README Requirements note. Our `properties()` guard covers only the case where our properties register second.
 
 ---
 
@@ -61,9 +61,17 @@ debian/  scripts/  tests/  .github/workflows/
 
 ### Config (`storage.cfg`)
 
-`address`, `username`, `password` (in cfg, cluster-replicated; mirrored to priv `.pw` on add/update), optional `port` (default 5392), `initiator_group`, `vnprefix`, `pool_name`, `volume_collection`, `check_ssl`, `token_ttl`, `debug`, `auto_iscsi_discovery` (default **on**), `iscsi_discovery_ips`, `content` (default `images`, `rootdir`, `none`).
+`address`, `username`, `password` (**sensitive** since v0.0.24: lives in `/etc/pve/priv/storage/<id>.pw`, not storage.cfg; `nimble_api_credentials` reads priv file first, legacy cfg line as fallback), optional `port` (default 5392), `initiator_group`, `vnprefix`, `pool_name`, `volume_collection`, `check_ssl`, `token_ttl`, `debug`, `auto_iscsi_discovery` (default **on**), `iscsi_discovery_ips`, `content` (default `images`, `rootdir`, `none`).
 
-Do **not** add undeclared keys to `properties()` — PVE SectionConfig will reject them. Do **not** put `username`/`password` in `properties()` (global registry); use `options()` only.
+**Property registration rules (violating these kills every PVE daemon at startup):** PVE SectionConfig
+merges each plugin's `properties()` into ONE global namespace and **dies on any duplicate name**, even
+with an identical schema. Never declare in `properties()`: names the base class owns (`port`, `nodes`,
+`content`, `format`, `shared`, `options`, …), names core plugins own (`username`, `password`), or —
+guarded automatically — names another custom plugin may own (Pure: `address`, `vnprefix`, `check_ssl`,
+`token_ttl`, `debug`). `properties()` filters out anything already registered at call time; reference
+shared names in `options()` only. The Docker verify script runs a real register + init + createSchema
+load test to catch this class of bug (a plain `perl -c` cannot — init runs before a temp-path plugin
+is registered).
 
 ### Nimble API
 

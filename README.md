@@ -20,6 +20,16 @@ Array-created snapshots sync into the Proxmox VM snapshot tree as **`nimble*`** 
 - HPE Nimble array reachable on port 5392 (REST API)
 - `open-iscsi` installed on each node with an IQN in `/etc/iscsi/initiatorname.iscsi`
 
+> **Co-installation with [pve-purestorage-plugin](https://github.com/kolesa-team/pve-purestorage-plugin):**
+> PVE registers every storage plugin's config properties in one global namespace and refuses to start
+> its daemons if two plugins declare the same property name — even with identical definitions. Both
+> this plugin and the Pure plugin historically declared `address`, `vnprefix`, `check_ssl`,
+> `token_ttl`, and `debug`. Since v0.0.24 this plugin skips any name another plugin already
+> registered, so it survives loading alongside Pure — but the Pure plugin does not yet have the
+> equivalent guard, and Perl's randomized load order means a node with **both** plugins installed can
+> still fail to start its PVE daemons roughly half the time (when Pure's properties are registered
+> second). Until the Pure plugin adopts the same guard, do not install both plugins on the same node.
+
 ## Installation
 
 **Scripted install (recommended)** — sets up the APT repo, installs dependencies, restarts PVE services, and can install on every cluster node at once:
@@ -72,9 +82,10 @@ Use `images` only if you do not want LXC root disks on this store. Then in the P
 | Option | Required | Description |
 |--------|----------|-------------|
 | `address` | Yes | Nimble management URL, e.g. `https://nimble.example.com`. Port 5392 is used by default. |
+| `port` | No | Nimble management API port if not the default `5392`. |
 | `username` | Yes | Nimble REST API username |
-| `password` | Yes | API password. Stored in `storage.cfg` (cluster-replicated). Set via `pvesm add/set --password`. |
-| `initiator_group` | No | Existing Nimble initiator group name. If omitted, the plugin auto-creates `pve-<nodename>` using this node's IQN. |
+| `password` | Yes | API password. Stored in `/etc/pve/priv/storage/<storeid>.pw` (root-only, cluster-replicated) — not in `storage.cfg` (v0.0.24+). Change it with `pvesm set <id> --password ...` or the GUI, not by editing files. Older configs with a `password` line in `storage.cfg` keep working; the line becomes stale (and is ignored) after the first password change. |
+| `initiator_group` | No | Existing Nimble initiator group name shared by all cluster nodes. If omitted, the plugin auto-creates a per-node group `pve-<nodename>` using this node's IQN. |
 | `auto_iscsi_discovery` | No | Default `yes`. Runs iSCSI discovery and login when storage activates. Set to `no` to disable. |
 | `iscsi_discovery_ips` | No | Extra discovery portals (comma-separated) beyond what the Nimble subnets API returns. |
 | `vnprefix` | No | Prefix added to all volume names on the array |

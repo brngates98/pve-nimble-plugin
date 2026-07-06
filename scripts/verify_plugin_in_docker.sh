@@ -67,4 +67,24 @@ cmp -s "$SRC" "$DST" || { echo "Error: copy mismatch workspace -> $DST" >&2; exi
 echo "Compiling plugin from workspace (not from any .deb): $DST"
 perl -I"$LAYOUT" -I/usr/share/perl5 -c "$DST"
 echo "perl -c (local workspace copy at PVE/Storage/Custom/): OK"
+
+# Full load test: perl -c alone never exercises SectionConfig registration — PVE::Storage's
+# init() runs when the module loads, BEFORE a plugin compiled from a temp path is registered.
+# A property that collides with the global propertyList (e.g. redeclaring `port`, which the
+# base class owns) passes perl -c but kills every PVE daemon on a real install. Install the
+# plugin into the real Custom/ dir and load PVE::Storage so register + init actually run.
+echo "Load test: registering plugin with PVE::Storage (SectionConfig init)..."
+mkdir -p /usr/share/perl5/PVE/Storage/Custom
+cp -a "$SRC" /usr/share/perl5/PVE/Storage/Custom/NimbleStoragePlugin.pm
+perl -e '
+  use strict; use warnings;
+  use PVE::Storage;
+  my $plugins = PVE::Storage::Plugin->private()->{plugins};
+  die "plugin did not register as type nimble (check register-time warnings above)\n"
+    unless $plugins->{nimble};
+  # createSchema walks the merged propertyList + every plugin options(); catches dangling
+  # options() references to properties nobody registered.
+  PVE::Storage::Plugin->createSchema();
+  print "PVE::Storage register + init + createSchema: OK\n";
+'
 DOCKER_SCRIPT
