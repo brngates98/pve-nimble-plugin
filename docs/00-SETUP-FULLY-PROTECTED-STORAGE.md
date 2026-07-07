@@ -94,15 +94,16 @@ From any node (config replicates):
 
 ```bash
 pvesm add nimble <storage_id> \
-  --address https://<NIMBLE_MGMT> \
+  --nimble_address https://<NIMBLE_MGMT> \
   --username <API_USER> \
   --password '<API_PASSWORD>' \
   --content images,rootdir
 ```
 
 - **`images` only** — omit LXC roots.
-- **`--initiator_group <name>`** — use an existing Nimble group instead of auto `pve-<nodename>`.
-- **iSCSI discovery** is **on** by default (`auto_iscsi_discovery`); set `0` only if you manage iSCSI yourself.
+- **`--nimble_initiator_group <name>`** — use an existing Nimble group instead of auto `pve-<nodename>`.
+- **iSCSI discovery** is **on** by default (`nimble_auto_iscsi_discovery`); set `0` only if you manage iSCSI yourself.
+- Configs created before v0.0.25 use unprefixed option names (`address`, `initiator_group`, …); they keep working — see README **Upgrading from v0.0.24 or earlier**.
 
 ---
 
@@ -130,7 +131,7 @@ Array schedules may also show as **`nimble*`** entries in the tree after sync.
 ![Snapshot task OK](images/pve-snapshot-task-viewer-success.png)  
 ![Snapshot tree](images/pve-vm-snapshots-nimble-tree.png)
 
-**Volume collections:** optional `volume_collection` in storage config adds **new** volumes to a Nimble collection. Putting disks into a **sync-replicated** collection by hand is **not** tested with PVE snapshots — use async protection or a separate DR collection.
+**Volume collections:** optional `nimble_volume_collection` in storage config adds **new** volumes to a Nimble collection. Putting disks into a **sync-replicated** collection by hand is **not** tested with PVE snapshots — use async protection or a separate DR collection.
 
 ---
 
@@ -159,7 +160,7 @@ REST restore example and offline requirements: [API_VALIDATION.md](API_VALIDATIO
 | Task | Command |
 |------|---------|
 | Add storage | `pvesm add nimble …` (see step 6) |
-| Debug | `pvesm set <id> --debug 1` or `NIMBLE_DEBUG=1 pvesm list <id>` |
+| Debug | `pvesm set <id> --nimble_debug 1` or `NIMBLE_DEBUG=1 pvesm list <id>` |
 | Sessions | `sudo iscsiadm -m session` |
 | Multipath | `sudo multipath -ll` |
 
@@ -170,7 +171,7 @@ REST restore example and offline requirements: [API_VALIDATION.md](API_VALIDATIO
 | Symptom | Check |
 |---------|--------|
 | Storage unavailable | Plugin on **all** nodes; `systemctl restart pvedaemon` after install |
-| No discovery IPs | Nimble subnets + `discovery_ip`; or `iscsi_discovery_ips` in storage config |
+| No discovery IPs | Nimble subnets + `discovery_ip`; or `nimble_iscsi_discovery_ips` in storage config |
 | No LUN after create | `iscsiadm -m session`; ACL / initiator group; data network |
 | `iscsiadm` exit **15** in debug | Usually already logged in — OK if disks work |
 | RAM snapshot fails | Restart VM; try without RAM; [GitHub issue](https://github.com/brngates98/pve-nimble-plugin/issues) |

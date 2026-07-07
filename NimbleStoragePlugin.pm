@@ -52,17 +52,42 @@ my $NIMBLE_API_VERSION = 'v1';
 my $default_port       = 5392;
 my $DEBUG              = $ENV{ NIMBLE_DEBUG } // 0;
 
+# Canonical storage.cfg keys are nimble_-prefixed (v0.0.25+) so they can never collide with another
+# plugin's properties() — PVE::SectionConfig merges every plugin's properties() into ONE global
+# namespace and dies on any duplicate name (pve-purestorage-plugin owns address/vnprefix/check_ssl/
+# token_ttl/debug; v0.0.23 died on the base class's `port`). Legacy pre-v0.0.25 spellings are still
+# accepted: properties() declares them when no other plugin claims the name, options() references
+# them when they exist globally, and check_config() rewrites them to the canonical key in-memory —
+# so internal code only ever reads the canonical keys, and any later storage.cfg write persists the
+# canonical spelling.
+our %NIMBLE_LEGACY_CONFIG_KEYS = (
+  nimble_address              => 'address',
+  nimble_vnprefix             => 'vnprefix',
+  nimble_check_ssl            => 'check_ssl',
+  nimble_token_ttl            => 'token_ttl',
+  nimble_debug                => 'debug',
+  nimble_initiator_group      => 'initiator_group',
+  nimble_pool_name            => 'pool_name',
+  nimble_volume_collection    => 'volume_collection',
+  nimble_auto_iscsi_discovery => 'auto_iscsi_discovery',
+  nimble_iscsi_discovery_ips  => 'iscsi_discovery_ips',
+  nimble_storeid              => 'storeid',
+);
+
 sub get_debug_level {
   my ( $scfg ) = @_;
-  return $scfg->{ debug } if defined $scfg && defined $scfg->{ debug };
-  return $DEBUG;
+  return $DEBUG unless defined $scfg;
+  # Legacy key read: $scfg is canonicalized by check_config in all PVE flows, but this helper also
+  # sees raw hashes (tests, defensive early-debug paths).
+  my $v = $scfg->{ nimble_debug } // $scfg->{ debug };
+  return defined $v ? $v : $DEBUG;
 }
 
 sub set_debug_from_config {
   my ( $scfg ) = @_;
-  if ( defined $scfg && defined $scfg->{ debug } ) {
-    $DEBUG = $scfg->{ debug };
-  }
+  return unless defined $scfg;
+  my $v = $scfg->{ nimble_debug } // $scfg->{ debug };
+  $DEBUG = $v if defined $v;
 }
 
 ### Configuration
@@ -101,97 +126,135 @@ sub plugindata {
   };
 }
 
+# Re-entrancy latch: our properties() probes other registered plugins' properties() (see below).
+# If a co-installed plugin ever copies that pattern and probes ours back, both would recurse — the
+# latch makes the inner call return the raw declaration list, which is exactly what a prober needs.
+our $properties_in_progress = 0;
+
 sub properties {
   # PVE::SectionConfig registers every plugin's properties() into ONE global propertyList and dies
   # ("duplicate property") on any name that is already there — regardless of whether the schemas are
-  # identical. Already-global names must therefore only be listed in options(), never redeclared here:
-  #   - `port` is declared by the PVE::Storage::Plugin base class itself (defaultData propertyList).
-  #   - `username`/`password` are declared by core plugins (RBD/CIFS/PBS).
-  #   - pve-purestorage-plugin declares address/vnprefix/check_ssl/token_ttl/debug; when both plugins
-  #     are installed, whichever one SectionConfig::init() merges second dies. The filter at the bottom
-  #     drops any name that is already registered by the time our properties() is called, so this
-  #     plugin survives loading after Pure (Pure loading after us still dies on ITS OWN redeclaration —
-  #     that half is only fixable in Pure; see README co-installation note).
-  my $props = {
-    address => {
+  # identical. Two consequences shape this sub:
+  #   - Canonical keys are nimble_-prefixed (v0.0.25+) so they cannot collide with the base class
+  #     (`port`, `nodes`, …), core plugins (`username`/`password`), or other custom plugins
+  #     (pve-purestorage-plugin owns address/vnprefix/check_ssl/token_ttl/debug).
+  #   - Legacy pre-v0.0.25 spellings are still declared so existing storage.cfg entries keep parsing,
+  #     but ONLY if no other registered plugin claims the name. The claim check walks the registered
+  #     plugin list, which PVE::Storage fully populates BEFORE init() calls any properties() — that
+  #     makes it deterministic for both merge orders. (The old check against the propertyList alone
+  #     was racy: init() merges plugins in random hash order, so co-install with Pure still died on
+  #     ~half of all daemon starts, whenever Pure's redeclaration merged second.)
+  my $canonical = {
+    nimble_address => {
       description => "HPE Nimble array management IP or DNS name.",
       type        => 'string'
     },
-    initiator_group => {
+    nimble_initiator_group => {
       description => "Initiator group name (optional). If unset, a group is created automatically using this host's iSCSI IQN.",
       type        => 'string'
     },
-    vnprefix => {
+    nimble_vnprefix => {
       description => "Prefix for volume names on the Nimble array.",
       type        => 'string'
     },
-    pool_name => {
+    nimble_pool_name => {
       description => "Pool name for new volumes (optional).",
       type        => 'string'
     },
-    volume_collection => {
+    nimble_volume_collection => {
       description => "Nimble volume collection name (optional). New volumes will be added to this collection so array-side protection/snapshot schedules apply.",
       type        => 'string'
     },
-    check_ssl => {
+    nimble_check_ssl => {
       description => "Verify the server's TLS certificate.",
       type        => 'boolean',
       default     => 'no'
     },
-    token_ttl => {
+    nimble_token_ttl => {
       description => "Session token time-to-live in seconds.",
       type        => 'integer',
       default     => 3600
     },
-    debug => {
+    nimble_debug => {
       description => "Enable debug logging (0=off, 1=basic, 2=verbose, 3=trace).",
       type        => 'integer',
       minimum     => 0,
       maximum     => 3,
       default     => 0
     },
-    auto_iscsi_discovery => {
+    nimble_auto_iscsi_discovery => {
       description => "When storage is activated, run iSCSI discovery and login using the array's discovery IPs (from Nimble subnets API). Default on; set to no/0 to disable.",
       type        => 'boolean',
       default     => 'yes'
     },
-    iscsi_discovery_ips => {
+    nimble_iscsi_discovery_ips => {
       description => "Optional extra iSCSI discovery portals (comma-separated; host or host:port). Merged after Nimble GET subnets + GET subnets/:id (authoritative). Use for additional paths or non-standard layouts.",
       type        => 'string',
     },
-    storeid => {
+    nimble_storeid => {
       description => "Proxmox storage ID (storage.cfg section name). Auto-set by the plugin to match the section name so workers can resolve priv/password and token paths when the explicit storeid argument is omitted (cluster import/migration). Do not change manually.",
       type        => 'string',
       optional    => 1,
     },
   };
+  my $props = { %$canonical };
+  for my $new ( keys %NIMBLE_LEGACY_CONFIG_KEYS ) {
+    my $old    = $NIMBLE_LEGACY_CONFIG_KEYS{ $new };
+    my %schema = %{ $canonical->{ $new } };
+    $schema{ description } = "Legacy alias of ${new} (pre-v0.0.25 configs). " . $schema{ description };
+    $props->{ $old } = \%schema;
+  }
+
+  return $props if $properties_in_progress;
+  local $properties_in_progress = 1;
+
   my $registered = eval { PVE::Storage::Plugin->private()->{ propertyList } } // {};
-  delete $props->{ $_ } for grep { $registered->{ $_ } } keys %$props;
+  my $plugins    = eval { PVE::Storage::Plugin->private()->{ plugins } }      // {};
+  my %foreign;
+  for my $type ( sort keys %$plugins ) {
+    next if $type eq type();
+    my $p = eval { $plugins->{ $type }->properties() } // {};
+    $foreign{ $_ } = 1 for keys %$p;
+  }
+  # Never (re)declare a name someone else owns: base-class/core names are already in the
+  # propertyList; other custom plugins are caught by the registered-plugin scan above regardless
+  # of whether their properties() merges before or after ours.
+  delete $props->{ $_ } for grep { $registered->{ $_ } || $foreign{ $_ } } keys %$props;
   return $props;
 }
 
 sub options {
-  return {
-    address   => { fixed => 1 },
-    port      => { optional => 1 },
-    username  => { fixed => 1 },
-    password  => { optional => 1 },
-    initiator_group => { optional => 1 },
+  my $opts = {
+    nimble_address => { fixed => 1 },
+    port           => { optional => 1 },
+    username       => { fixed => 1 },
+    password       => { optional => 1 },
+    nimble_initiator_group => { optional => 1 },
 
-    vnprefix  => { optional => 1 },
-    pool_name => { optional => 1 },
-    volume_collection => { optional => 1 },
-    check_ssl => { optional => 1 },
-    token_ttl => { optional => 1 },
-    debug     => { optional => 1 },
-    auto_iscsi_discovery => { optional => 1 },
-    iscsi_discovery_ips  => { optional => 1 },
-    storeid   => { optional => 1 },
-    nodes     => { optional => 1 },
-    disable   => { optional => 1 },
-    content   => { optional => 1 },
-    format    => { optional => 1 },
+    nimble_vnprefix  => { optional => 1 },
+    nimble_pool_name => { optional => 1 },
+    nimble_volume_collection => { optional => 1 },
+    nimble_check_ssl => { optional => 1 },
+    nimble_token_ttl => { optional => 1 },
+    nimble_debug     => { optional => 1 },
+    nimble_auto_iscsi_discovery => { optional => 1 },
+    nimble_iscsi_discovery_ips  => { optional => 1 },
+    nimble_storeid => { optional => 1 },
+    nodes          => { optional => 1 },
+    disable        => { optional => 1 },
+    content        => { optional => 1 },
+    format         => { optional => 1 },
   };
+  # Legacy spellings stay parseable whenever the property exists globally — either we declared it
+  # in properties() (no rival plugin claims it) or another plugin owns the name (for the names Pure
+  # owns the schemas match; ours were copied from Pure originally). init() calls options() AFTER
+  # merging every plugin's properties(), so the propertyList is complete here. Referencing a name
+  # nobody declared would make init() die ("undefined property"), hence the existence check.
+  my $registered = eval { PVE::Storage::Plugin->private()->{ propertyList } } // {};
+  for my $old ( values %NIMBLE_LEGACY_CONFIG_KEYS ) {
+    $opts->{ $old } = { optional => 1 } if $registered->{ $old };
+  }
+  return $opts;
 }
 
 sub check_config {
@@ -202,12 +265,22 @@ sub check_config {
     $config->{ username } //= $config->{ nimble_user };
   }
 
+  # Rewrite legacy (pre-v0.0.25) key spellings to the canonical nimble_-prefixed keys BEFORE the
+  # schema check: internal code reads only canonical keys, and any later storage.cfg write persists
+  # the canonical spelling (one-way migration). When both spellings are present, canonical wins.
+  for my $new ( keys %NIMBLE_LEGACY_CONFIG_KEYS ) {
+    my $old = $NIMBLE_LEGACY_CONFIG_KEYS{ $new };
+    next if !exists $config->{ $old };
+    my $v = delete $config->{ $old };
+    $config->{ $new } //= $v;
+  }
+
   my $opts = $class->SUPER::check_config( $sectionId, $config, $create, $skipSchemaCheck );
   # TrueNAS-style: keep section id on $scfg (storage_config omits the key name from the hash body).
   # Ensures nimble_effective_storeid finds a store id for priv files / token cache when PVE passes
   # only $scfg (e.g. some worker paths).
   if ( ref($opts) eq 'HASH' && defined $sectionId && $sectionId ne '' ) {
-    $opts->{ storeid } = $sectionId;
+    $opts->{ nimble_storeid } = $sectionId;
   }
   return $opts;
 }
@@ -323,8 +396,10 @@ sub nimble_effective_storeid {
   my ( $scfg, $storeid ) = @_;
   return $storeid if defined $storeid && $storeid ne '';
   return undef unless ref($scfg) eq 'HASH';
-  # Injected in check_config (TrueNAS-style); authoritative when present.
-  return $scfg->{ storeid } if defined $scfg->{ storeid } && $scfg->{ storeid } ne '';
+  # Injected in check_config (TrueNAS-style); authoritative when present. The legacy `storeid`
+  # spelling still appears in raw hashes that bypassed check_config (tests, defensive).
+  my $injected = $scfg->{ nimble_storeid } // $scfg->{ storeid };
+  return $injected if defined $injected && $injected ne '';
   for my $k (qw( storage storagename name id cfgkey section )) {
     my $v = $scfg->{ $k };
     return $v if defined $v && $v ne '';
@@ -396,7 +471,7 @@ sub exec_command {
 
 sub nimble_name_prefix {
   my ( $scfg ) = @_;
-  my $prefix = $scfg->{ vnprefix } // '';
+  my $prefix = $scfg->{ nimble_vnprefix } // '';
   return $prefix;
 }
 
@@ -1006,7 +1081,7 @@ sub is_token_valid {
 ### Nimble API
 sub nimble_base_url {
   my ( $scfg ) = @_;
-  my $addr = $scfg->{ address } or die "Error :: address not set\n";
+  my $addr = $scfg->{ nimble_address } or die "Error :: nimble_address not set\n";
   $addr =~ s/^https?:\/\///;
   $addr =~ s/\/.*$//;
   my $port = $scfg->{ port } // $default_port;
@@ -1031,7 +1106,7 @@ sub nimble_api_call {
   my $base       = nimble_base_url( $scfg );
   my $url        = $base . '/' . $NIMBLE_API_VERSION . '/' . $path;
   my $cache_path = ( defined $eff_sid && $eff_sid ne '' ) ? get_token_cache_path( $eff_sid ) : undef;
-  my $ttl        = $scfg->{ token_ttl } // 3600;
+  my $ttl        = $scfg->{ nimble_token_ttl } // 3600;
 
   my $auth = $scfg->{ _auth_token };
   if ( !$auth && $cache_path ) {
@@ -1044,7 +1119,7 @@ sub nimble_api_call {
   if ( !$auth ) {
     my $login_url = $base . '/' . $NIMBLE_API_VERSION . '/tokens';
     my $ua        = LWP::UserAgent->new( timeout => 15 );
-    $ua->ssl_opts( verify_hostname => 0, SSL_verify_mode => 0x00 ) unless $scfg->{ check_ssl };
+    $ua->ssl_opts( verify_hostname => 0, SSL_verify_mode => 0x00 ) unless $scfg->{ nimble_check_ssl };
     my $req = HTTP::Request->new( 'POST', $login_url );
     $req->header( 'Content-Type' => 'application/json' );
     # HPE Perl sample: request body is { "data": { "username", "password" } }; response has session_token under "data"
@@ -1064,7 +1139,7 @@ sub nimble_api_call {
   }
 
   my $ua = LWP::UserAgent->new( timeout => 30 );
-  $ua->ssl_opts( verify_hostname => 0, SSL_verify_mode => 0x00 ) unless $scfg->{ check_ssl };
+  $ua->ssl_opts( verify_hostname => 0, SSL_verify_mode => 0x00 ) unless $scfg->{ nimble_check_ssl };
   my $req = HTTP::Request->new( $method, $url );
   $req->header( 'Content-Type' => 'application/json' );
   $req->header( 'X-Auth-Token' => $auth );
@@ -1371,7 +1446,7 @@ sub nimble_best_snapshot_row_for_nimble_target_ts {
 
 # GET v1/pools list rows may omit capacity (summary-only). GET v1/pools/:id returns full pool (SDK: capacity, usage, free_space in bytes).
 
-# storage.cfg pool_name may match pool name, search_name, or full_name; GET arrays rows often only have pool_id / pool_name.
+# storage.cfg nimble_pool_name may match pool name, search_name, or full_name; GET arrays rows often only have pool_id / pool_name.
 sub nimble_pool_identifier_matches_want {
   my ( $row, $want ) = @_;
   return 1 if !defined $want || $want eq '';
@@ -1552,7 +1627,7 @@ sub nimble_hydrate_network_interface_summaries {
 
 sub nimble_parse_manual_discovery_ips {
   my ($scfg) = @_;
-  my $s = $scfg->{ iscsi_discovery_ips };
+  my $s = $scfg->{ nimble_iscsi_discovery_ips };
   return () if !defined $s || $s eq '';
   my @out;
   my %seen;
@@ -2215,7 +2290,7 @@ sub nimble_get_initiator_group_id {
 # Resolve initiator group ID without POST (for disconnect / deactivate). Returns undef if none exists yet.
 sub nimble_resolve_initiator_group_id_no_create {
   my ( $scfg, $storeid ) = @_;
-  my $ig_name = $scfg->{ initiator_group };
+  my $ig_name = $scfg->{ nimble_initiator_group };
   if ( defined $ig_name && $ig_name ne '' ) {
     my $id = eval { nimble_get_initiator_group_id( $scfg, $ig_name, $storeid ) };
     return $id if defined $id && $id ne '' && !$@;
@@ -2240,12 +2315,12 @@ sub nimble_resolve_initiator_group_id_no_create {
 # Resolve initiator group ID: use config name if set, else reuse existing group containing this IQN, else pve-<nodename> (create if missing).
 sub nimble_ensure_initiator_group_id {
   my ( $scfg, $storeid ) = @_;
-  my $ig_name = $scfg->{ initiator_group };
+  my $ig_name = $scfg->{ nimble_initiator_group };
   if ( defined $ig_name && $ig_name ne '' ) {
     return nimble_get_initiator_group_id( $scfg, $ig_name, $storeid );
   }
   my $iqn = nimble_get_local_iscsi_iqn();
-  die "Error :: initiator_group not set and could not read a valid IQN from /etc/iscsi/initiatorname.iscsi (install open-iscsi; need an uncommented line InitiatorName=iqn...., or set initiator_group to an existing Nimble group).\n"
+  die "Error :: nimble_initiator_group not set and could not read a valid IQN from /etc/iscsi/initiatorname.iscsi (install open-iscsi; need an uncommented line InitiatorName=iqn...., or set nimble_initiator_group to an existing Nimble group).\n"
     unless $iqn;
   my $existing = nimble_resolve_initiator_group_id_no_create( $scfg, $storeid );
   return $existing if $existing;
@@ -2352,14 +2427,14 @@ sub nimble_volume_connection {
     $class->nimble_iscsi_establish_volume_session( $scfg, $volname, $storeid );
     return 1;
   }
-  # Disconnect: the ACR is per (volume, initiator group). A configured `initiator_group` (or an
+  # Disconnect: the ACR is per (volume, initiator group). A configured `nimble_initiator_group` (or an
   # auto-selected group listing several hosts' IQNs) is shared by every cluster node, so there is
   # exactly ONE record granting access — deleting it here would revoke the volume for all nodes.
   # During live migration the source node deactivates AFTER the VM is already running on the target;
   # deleting a shared ACR at that point cuts the running VM off from its disk. Only revoke when the
   # group is this node's own single-node auto group (pve-<nodename>); shared-group ACLs stay until
   # nimble_remove_volume / restore-disconnect delete all records for the volume.
-  return 1 if defined $scfg->{ initiator_group } && $scfg->{ initiator_group } ne '';
+  return 1 if defined $scfg->{ nimble_initiator_group } && $scfg->{ nimble_initiator_group } ne '';
   my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   return 1 unless $vol_id;
   my $node_group = 'pve-' . PVE::INotify::nodename();
@@ -2433,7 +2508,7 @@ sub nimble_iscsi_establish_volume_session {
   my @dip = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
   if ( !@dip ) {
     warn "Warning :: No iSCSI discovery IPs for storage \"$storeid\"; cannot log in to "
-      . "\"$iqn\". Check GET v1/subnets discovery_ip or set iscsi_discovery_ips.\n";
+      . "\"$iqn\". Check GET v1/subnets discovery_ip or set nimble_iscsi_discovery_ips.\n";
     return 0;
   }
 
@@ -2673,7 +2748,8 @@ sub nimble_create_volume {
   my $name    = nimble_volname( $scfg, $volname, undef );
   my $size_mb = size_bytes_to_mb( $size_bytes );
   my $body = { name => $name, size => $size_mb, multi_initiator => JSON::XS::true };
-  $body->{ pool_name } = $scfg->{ pool_name } if $scfg->{ pool_name };
+  # Note: the API body key stays `pool_name` (Nimble REST parameter); only the config key is nimble_-prefixed.
+  $body->{ pool_name } = $scfg->{ nimble_pool_name } if $scfg->{ nimble_pool_name };
   my $r      = nimble_api_call( $scfg, 'POST', 'volumes', $body, $storeid );
   my $vol    = $r->{ data } || $r;
   my $serial = $vol->{ serial_number } or die "Error :: No serial_number in create response\n";
@@ -2683,13 +2759,13 @@ sub nimble_create_volume {
   eval {
     my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
     nimble_post_access_control_record_idempotent( $scfg, $vol->{ id }, $ig_id, $storeid );
-    if ( $scfg->{ volume_collection } ) {
-      my $volcoll_id = nimble_get_volume_collection_id( $scfg, $scfg->{ volume_collection }, $storeid );
+    if ( $scfg->{ nimble_volume_collection } ) {
+      my $volcoll_id = nimble_get_volume_collection_id( $scfg, $scfg->{ nimble_volume_collection }, $storeid );
       if ( $volcoll_id ) {
         nimble_api_call( $scfg, 'PUT', "volumes/$vol->{ id }", { volcoll_id => $volcoll_id }, $storeid );
-        print "Info :: Volume \"$volname\" added to volume collection \"$scfg->{ volume_collection }\".\n";
+        print "Info :: Volume \"$volname\" added to volume collection \"$scfg->{ nimble_volume_collection }\".\n";
       } else {
-        warn "Warning :: volume_collection \"$scfg->{ volume_collection }\" not found; volume not added to any collection.\n";
+        warn "Warning :: nimble_volume_collection \"$scfg->{ nimble_volume_collection }\" not found; volume not added to any collection.\n";
       }
     }
   };
@@ -3048,13 +3124,13 @@ sub nimble_clone_from_snapshot {
   eval {
     my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
     nimble_post_access_control_record_idempotent( $scfg, $vol_id, $ig_id, $storeid );
-    if ( $scfg->{ volume_collection } ) {
-      my $volcoll_id = nimble_get_volume_collection_id( $scfg, $scfg->{ volume_collection }, $storeid );
+    if ( $scfg->{ nimble_volume_collection } ) {
+      my $volcoll_id = nimble_get_volume_collection_id( $scfg, $scfg->{ nimble_volume_collection }, $storeid );
       if ( $volcoll_id ) {
         nimble_api_call( $scfg, 'PUT', "volumes/$vol_id", { volcoll_id => $volcoll_id }, $storeid );
-        print "Info :: Cloned volume \"$new_volname\" added to volume collection \"$scfg->{ volume_collection }\".\n";
+        print "Info :: Cloned volume \"$new_volname\" added to volume collection \"$scfg->{ nimble_volume_collection }\".\n";
       } else {
-        warn "Warning :: volume_collection \"$scfg->{ volume_collection }\" not found; clone not added to any collection.\n";
+        warn "Warning :: nimble_volume_collection \"$scfg->{ nimble_volume_collection }\" not found; clone not added to any collection.\n";
       }
     }
   };
@@ -3531,7 +3607,7 @@ sub status {
     for my $p (@pools) {
       nimble_hydrate_pool_for_capacity( $scfg, $storeid, $p );
     }
-    my $want = $scfg->{ pool_name };
+    my $want = $scfg->{ nimble_pool_name };
     my @use = @pools;
     if ( defined $want && $want ne '' ) {
       my @m = grep { nimble_pool_identifier_matches_want( $_, $want ) } @pools;
@@ -3539,7 +3615,7 @@ sub status {
         @use = @m;
       }
       else {
-        warn "Warning :: Nimble storage \"$storeid\" status: pool_name \"$want\" not found in pools list; using all pools.\n";
+        warn "Warning :: Nimble storage \"$storeid\" status: nimble_pool_name \"$want\" not found in pools list; using all pools.\n";
       }
     }
     for my $p (@use) {
@@ -3547,7 +3623,7 @@ sub status {
       $used  += nimble_pool_used_bytes($p);
     }
     if ( $total <= 0 ) {
-      my ( $at, $au ) = nimble_status_arrays_fallback_bytes( $scfg, $storeid, $scfg->{ pool_name }, \@use );
+      my ( $at, $au ) = nimble_status_arrays_fallback_bytes( $scfg, $storeid, $scfg->{ nimble_pool_name }, \@use );
       if ( $at > 0 ) {
         $total = $at;
         # Always take fallback usage (may be 0); avoids leaving stale pool-path $used when $total was 0 before fallback.
@@ -3595,7 +3671,7 @@ sub status {
 sub nimble_auto_iscsi_discovery_enabled {
   my ($scfg) = @_;
   return 0 unless ref($scfg) eq 'HASH';
-  my $v = $scfg->{ auto_iscsi_discovery };
+  my $v = $scfg->{ nimble_auto_iscsi_discovery };
   return 1 if !defined($v);
   my $s = "$v";
   return 0 if $s eq '0' || $s eq 'no';
@@ -3946,7 +4022,7 @@ sub volume_snapshot_info {
 sub get_identity {
   my ( $class, $scfg, $storeid ) = @_;
   my @use_pools;
-  my $want = $scfg->{ pool_name };
+  my $want = $scfg->{ nimble_pool_name };
   my $pr   = eval { nimble_api_call( $scfg, 'GET', 'pools', undef, $storeid ) };
   if ($pr) {
     my @pools = grep { ref($_) eq 'HASH' } @{ nimble_data_as_list( $pr->{ data } ) };
@@ -3969,7 +4045,7 @@ sub get_identity {
       return $ident if defined $ident;
     }
   }
-  my $addr = $scfg->{ address } // '';
+  my $addr = $scfg->{ nimble_address } // '';
   return "nimble:$addr" if length($addr);
   die "Error :: Could not determine Nimble array identity (arrays API unavailable and no address in storage config).\n";
 }

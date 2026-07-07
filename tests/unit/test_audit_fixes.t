@@ -31,13 +31,24 @@ BEGIN {
 }
 
 our $fake_property_list = {};
+our $fake_plugins       = {};
 
 BEGIN {
   package PVE::Storage::Plugin;
   our @SHARED_STORAGE;
   sub get_next_vm_diskname { return 'vm-100-disk-0'; }
-  sub private { return { propertyList => $main::fake_property_list }; }
+  sub private { return { propertyList => $main::fake_property_list, plugins => $main::fake_plugins }; }
+  # Passthrough stand-in for SectionConfig::check_config (schema validation is not under test here).
+  sub check_config { my ( $class, $sid, $config ) = @_; return { %$config }; }
   $INC{'PVE/Storage/Plugin.pm'} = 1;
+}
+
+# Stand-in for a co-installed pve-purestorage-plugin: registered plugin claiming the generic names.
+BEGIN {
+  package Fake::PurePlugin;
+  sub properties {
+    return { address => {}, vnprefix => {}, check_ssl => {}, token_ttl => {}, debug => {}, token => {} };
+  }
 }
 
 BEGIN {
@@ -55,13 +66,17 @@ BEGIN {
 require './NimbleStoragePlugin.pm';
 my $P = 'PVE::Storage::Custom::NimbleStoragePlugin';
 
-### properties() guard: never redeclare a property that is already globally registered
+### properties(): canonical nimble_* names always declared; legacy spellings only when unclaimed
 
 {
+  # Nimble-only install: canonical AND legacy spellings declared (legacy keeps old configs parsing).
   local $main::fake_property_list = {};
+  local $main::fake_plugins       = {};
   my $props = $P->properties();
-  ok( exists $props->{address},   'clean registry: address declared' );
-  ok( exists $props->{check_ssl}, 'clean registry: check_ssl declared' );
+  ok( exists $props->{nimble_address},   'clean registry: nimble_address declared' );
+  ok( exists $props->{nimble_check_ssl}, 'clean registry: nimble_check_ssl declared' );
+  ok( exists $props->{$_}, "clean registry: legacy alias '$_' declared (pre-v0.0.25 configs)" )
+    for qw(address vnprefix check_ssl token_ttl debug initiator_group pool_name volume_collection);
   ok( !exists $props->{port},
     'port never declared in properties() (base class owns it globally; redeclaring kills SectionConfig init)' );
   ok( !exists $props->{username} && !exists $props->{password},
@@ -69,22 +84,83 @@ my $P = 'PVE::Storage::Custom::NimbleStoragePlugin';
 }
 
 {
-  # Simulate load order where another plugin (e.g. pve-purestorage-plugin) already registered the
-  # names it shares with us: our properties() must silently drop them, not collide.
-  local $main::fake_property_list =
-    { address => {}, vnprefix => {}, check_ssl => {}, token_ttl => {}, debug => {}, port => {} };
+  # Co-install: another REGISTERED plugin claims the generic names. This must hold regardless of
+  # which plugin's properties() SectionConfig::init() merges first (random hash order), so the
+  # guard checks the registered plugin list — populated before init() — not just the propertyList.
+  local $main::fake_property_list = {};
+  local $main::fake_plugins       = { purestorage => 'Fake::PurePlugin' };
   my $props = $P->properties();
-  ok( !exists $props->{$_}, "guard drops already-registered '$_'" )
+  ok( !exists $props->{$_}, "registered rival plugin: legacy '$_' not declared (Pure owns it; both merge orders safe)" )
     for qw(address vnprefix check_ssl token_ttl debug);
-  ok( exists $props->{initiator_group},   'guard keeps nimble-only initiator_group' );
-  ok( exists $props->{pool_name},         'guard keeps nimble-only pool_name' );
-  ok( exists $props->{volume_collection}, 'guard keeps nimble-only volume_collection' );
+  ok( exists $props->{nimble_address}, 'registered rival plugin: canonical nimble_address still declared' );
+  ok( exists $props->{initiator_group},   'rival plugin: unclaimed legacy initiator_group still declared' );
+  ok( exists $props->{pool_name},         'rival plugin: unclaimed legacy pool_name still declared' );
+  ok( exists $props->{volume_collection}, 'rival plugin: unclaimed legacy volume_collection still declared' );
 }
 
 {
+  # Names already merged into the global propertyList (base class / core plugins / earlier merge).
+  local $main::fake_property_list =
+    { address => {}, vnprefix => {}, check_ssl => {}, token_ttl => {}, debug => {}, port => {} };
+  local $main::fake_plugins = {};
+  my $props = $P->properties();
+  ok( !exists $props->{$_}, "guard drops already-registered '$_'" )
+    for qw(address vnprefix check_ssl token_ttl debug);
+  ok( exists $props->{nimble_address}, 'already-registered legacy names do not suppress canonical nimble_address' );
+}
+
+{
+  # Legacy names in options() only when the property exists globally: referencing an undeclared
+  # property makes SectionConfig::init() die ("undefined property").
+  local $main::fake_property_list = {};
+  local $main::fake_plugins       = {};
   my $opts = $P->options();
   ok( $opts->{port} && $opts->{port}{optional}, 'options() references global port property' );
-  ok( $opts->{address} && $opts->{address}{fixed}, 'options() keeps address fixed' );
+  ok( $opts->{nimble_address} && $opts->{nimble_address}{fixed}, 'options() keeps nimble_address fixed' );
+  ok( !exists $opts->{address}, 'legacy address not referenced while unregistered' );
+
+  local $main::fake_property_list = { address => {}, vnprefix => {} };
+  $opts = $P->options();
+  ok( $opts->{address}  && $opts->{address}{optional},  'legacy address referenced once registered' );
+  ok( $opts->{vnprefix} && $opts->{vnprefix}{optional}, 'legacy vnprefix referenced once registered' );
+  ok( !exists $opts->{check_ssl}, 'unregistered legacy check_ssl still not referenced' );
+}
+
+### check_config: legacy keys canonicalized in-memory (upgrade path from <= v0.0.24)
+
+{
+  my $opts = $P->check_config( 'st1', {
+    address     => 'array.example',
+    vnprefix    => 'pve-',
+    check_ssl   => 0,
+    token_ttl   => 1800,
+    debug       => 2,
+    pool_name   => 'default',
+    volume_collection => 'coll1',
+    initiator_group   => 'ig1',
+    auto_iscsi_discovery => 1,
+    iscsi_discovery_ips  => '10.0.0.1',
+    username    => 'admin',
+  }, 1, 1 );
+  is( $opts->{nimble_address},   'array.example', 'legacy address -> nimble_address' );
+  is( $opts->{nimble_vnprefix},  'pve-',          'legacy vnprefix -> nimble_vnprefix' );
+  is( $opts->{nimble_check_ssl}, 0,               'legacy check_ssl -> nimble_check_ssl (defined-false preserved)' );
+  is( $opts->{nimble_token_ttl}, 1800,            'legacy token_ttl -> nimble_token_ttl' );
+  is( $opts->{nimble_debug},     2,               'legacy debug -> nimble_debug' );
+  is( $opts->{nimble_pool_name}, 'default',       'legacy pool_name -> nimble_pool_name' );
+  is( $opts->{nimble_volume_collection}, 'coll1', 'legacy volume_collection -> nimble_volume_collection' );
+  is( $opts->{nimble_initiator_group},   'ig1',   'legacy initiator_group -> nimble_initiator_group' );
+  is( $opts->{nimble_auto_iscsi_discovery}, 1,    'legacy auto_iscsi_discovery -> canonical' );
+  is( $opts->{nimble_iscsi_discovery_ips}, '10.0.0.1', 'legacy iscsi_discovery_ips -> canonical' );
+  ok( !exists $opts->{$_}, "legacy key '$_' removed after canonicalization" )
+    for qw(address vnprefix check_ssl token_ttl debug pool_name volume_collection initiator_group);
+  is( $opts->{nimble_storeid}, 'st1', 'section id injected as nimble_storeid' );
+}
+
+{
+  my $opts = $P->check_config( 'st1', { address => 'old.example', nimble_address => 'new.example' }, 1, 1 );
+  is( $opts->{nimble_address}, 'new.example', 'canonical key wins when both spellings present' );
+  ok( !exists $opts->{address}, 'losing legacy key still removed' );
 }
 
 ### plugindata: password is a sensitive property (kept out of storage.cfg by PVE)
@@ -114,14 +190,14 @@ my $P = 'PVE::Storage::Custom::NimbleStoragePlugin';
 {
   no strict 'refs';
   my $url = \&{"${P}::nimble_base_url"};
-  is( $url->({ address => '10.0.0.5' }),               'https://10.0.0.5:5392',     'bare IPv4' );
-  is( $url->({ address => '10.0.0.5:5392' }),          'https://10.0.0.5:5392',     'IPv4 with port stripped' );
-  is( $url->({ address => 'https://array.example' }),  'https://array.example:5392', 'scheme stripped' );
-  is( $url->({ address => 'array.example:9999' }),     'https://array.example:5392', 'hostname port replaced by default' );
-  is( $url->({ address => 'array.example', port => 9999 }), 'https://array.example:9999', 'port property honored' );
-  is( $url->({ address => 'fd00::5392' }),             'https://[fd00::5392]:5392', 'unbracketed IPv6 not mangled' );
-  is( $url->({ address => '[fd00::1]:9440' }),         'https://[fd00::1]:5392',    'bracketed IPv6 with port' );
-  is( $url->({ address => '[fd00::1]', port => 9999 }), 'https://[fd00::1]:9999',   'bracketed IPv6 + port property' );
+  is( $url->({ nimble_address => '10.0.0.5' }),               'https://10.0.0.5:5392',     'bare IPv4' );
+  is( $url->({ nimble_address => '10.0.0.5:5392' }),          'https://10.0.0.5:5392',     'IPv4 with port stripped' );
+  is( $url->({ nimble_address => 'https://array.example' }),  'https://array.example:5392', 'scheme stripped' );
+  is( $url->({ nimble_address => 'array.example:9999' }),     'https://array.example:5392', 'hostname port replaced by default' );
+  is( $url->({ nimble_address => 'array.example', port => 9999 }), 'https://array.example:9999', 'port property honored' );
+  is( $url->({ nimble_address => 'fd00::5392' }),             'https://[fd00::5392]:5392', 'unbracketed IPv6 not mangled' );
+  is( $url->({ nimble_address => '[fd00::1]:9440' }),         'https://[fd00::1]:5392',    'bracketed IPv6 with port' );
+  is( $url->({ nimble_address => '[fd00::1]', port => 9999 }), 'https://[fd00::1]:9999',   'bracketed IPv6 + port property' );
 }
 
 ### parse_volname: core plugin contract
@@ -153,7 +229,7 @@ my $P = 'PVE::Storage::Custom::NimbleStoragePlugin';
   isnt( $vn->( $scfg, 'vm-100-disk-0', 'snap-x' ), $vn->( $scfg, 'vm-100-disk-0', 'x' ),
     'PVE snapshots "snap-x" and "x" map to different array names' );
   is( $vn->( $scfg, 'vm-100-disk-0', 'veeam_job1' ), 'vm-100-disk-0.snap-veeam-job1', 'veeam_ normalized' );
-  is( $vn->( { vnprefix => 'pveA-' }, 'vm-100-disk-0' ), 'pveA-vm-100-disk-0', 'prefix without snap' );
+  is( $vn->( { nimble_vnprefix => 'pveA-' }, 'vm-100-disk-0' ), 'pveA-vm-100-disk-0', 'prefix without snap' );
 }
 
 done_testing();

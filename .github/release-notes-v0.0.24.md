@@ -1,5 +1,11 @@
 # Release notes – v0.0.24
 
+> **Erratum (superseded by v0.0.25):** this release's guidance that co-installation with
+> pve-purestorage-plugin stays unsafe "until the Pure plugin adopts the guard" was the wrong fix
+> direction. v0.0.25 renames this plugin's config options to unique `nimble_*` names, making
+> co-installation safe in both load orders with **no changes needed in the Pure plugin**. See the
+> v0.0.25 release notes.
+
 **Proxmox VE Plugin for HPE Nimble Storage (iSCSI)**
 
 This plugin adds HPE Nimble Storage as a custom storage backend in Proxmox VE. It uses the Nimble REST API to create and manage volumes and presents them as VM disks (and LXC root volumes) over iSCSI, with optional multipath.

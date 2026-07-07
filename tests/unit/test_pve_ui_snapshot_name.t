@@ -6,7 +6,7 @@ use Test::More tests => 5;
 
 sub nimble_name_prefix {
   my ($scfg) = @_;
-  return $scfg->{ vnprefix } // '';
+  return $scfg->{ nimble_vnprefix } // '';
 }
 
 sub nimble_volname {
@@ -31,7 +31,7 @@ sub is_pve_ui_snapshot {
   return ( $suffix =~ /^snap-/ ) ? 1 : 0;
 }
 
-my $scfg = { vnprefix => 'nimble-' };
+my $scfg = { nimble_vnprefix => 'nimble-' };
 my $vol  = 'vm-100-disk-0';
 
 ok(
@@ -41,10 +41,10 @@ ok(
 ok( !is_pve_ui_snapshot( $scfg, $vol, 'NSs-vm-100-disk-0-2024-01-01::12:00:00.000' ), 'Nimble NSs-* name is not PVE UI' );
 ok( !is_pve_ui_snapshot( $scfg, $vol, 'veeam-backup-1' ), 'Unprefixed array name is not PVE UI' );
 
-my $plain = { vnprefix => '' };
+my $plain = { nimble_vnprefix => '' };
 ok(
   is_pve_ui_snapshot( $plain, $vol, nimble_volname( $plain, $vol, 'x' ) ),
-  'empty vnprefix: PVE UI snap still detected'
+  'empty nimble_vnprefix: PVE UI snap still detected'
 );
 
 ok(

@@ -20,15 +20,15 @@ Array-created snapshots sync into the Proxmox VM snapshot tree as **`nimble*`** 
 - HPE Nimble array reachable on port 5392 (REST API)
 - `open-iscsi` installed on each node with an IQN in `/etc/iscsi/initiatorname.iscsi`
 
-> **Co-installation with [pve-purestorage-plugin](https://github.com/kolesa-team/pve-purestorage-plugin):**
+> **Co-installation with other storage plugins (e.g. [pve-purestorage-plugin](https://github.com/kolesa-team/pve-purestorage-plugin)):**
 > PVE registers every storage plugin's config properties in one global namespace and refuses to start
-> its daemons if two plugins declare the same property name — even with identical definitions. Both
-> this plugin and the Pure plugin historically declared `address`, `vnprefix`, `check_ssl`,
-> `token_ttl`, and `debug`. Since v0.0.24 this plugin skips any name another plugin already
-> registered, so it survives loading alongside Pure — but the Pure plugin does not yet have the
-> equivalent guard, and Perl's randomized load order means a node with **both** plugins installed can
-> still fail to start its PVE daemons roughly half the time (when Pure's properties are registered
-> second). Until the Pure plugin adopts the same guard, do not install both plugins on the same node.
+> its daemons if two plugins declare the same property name — even with identical definitions.
+> Since v0.0.25 all of this plugin's config options use **`nimble_`-prefixed names**
+> (`nimble_address`, `nimble_vnprefix`, …), which cannot collide with any other plugin. The old
+> generic spellings (`address`, `check_ssl`, …) are still accepted for existing configs, but the
+> plugin only declares them when no other installed plugin claims the name — so a node with both
+> this plugin and the Pure plugin installed starts reliably, regardless of load order. Existing
+> `storage.cfg` entries keep working unchanged; see **Upgrading from v0.0.24 or earlier** below.
 
 ## Installation
 
@@ -69,7 +69,7 @@ No need to pre-create an initiator group — the plugin creates one automaticall
 
 ```bash
 pvesm add nimble <storage_id> \
-  --address https://<nimble_ip_or_fqdn> \
+  --nimble_address https://<nimble_ip_or_fqdn> \
   --username <user> \
   --password '<password>' \
   --content images,rootdir
@@ -81,30 +81,48 @@ Use `images` only if you do not want LXC root disks on this store. Then in the P
 
 | Option | Required | Description |
 |--------|----------|-------------|
-| `address` | Yes | Nimble management URL, e.g. `https://nimble.example.com`. Port 5392 is used by default. |
+| `nimble_address` | Yes | Nimble management URL, e.g. `https://nimble.example.com`. Port 5392 is used by default. |
 | `port` | No | Nimble management API port if not the default `5392`. |
 | `username` | Yes | Nimble REST API username |
 | `password` | Yes | API password. Stored in `/etc/pve/priv/storage/<storeid>.pw` (root-only, cluster-replicated) — not in `storage.cfg` (v0.0.24+). Change it with `pvesm set <id> --password ...` or the GUI, not by editing files. Older configs with a `password` line in `storage.cfg` keep working; the line becomes stale (and is ignored) after the first password change. |
-| `initiator_group` | No | Existing Nimble initiator group name shared by all cluster nodes. If omitted, the plugin auto-creates a per-node group `pve-<nodename>` using this node's IQN. |
-| `auto_iscsi_discovery` | No | Default `yes`. Runs iSCSI discovery and login when storage activates. Set to `no` to disable. |
-| `iscsi_discovery_ips` | No | Extra discovery portals (comma-separated) beyond what the Nimble subnets API returns. |
-| `vnprefix` | No | Prefix added to all volume names on the array |
-| `pool_name` | No | Nimble pool for new volumes |
-| `volume_collection` | No | Volume collection name. New volumes are added to this collection for array-side snapshot schedules. |
-| `check_ssl` | No | Default `no`. Set to `yes` to verify TLS certificates. |
-| `token_ttl` | No | Session token cache TTL in seconds (default `3600`) |
-| `debug` | No | `0`=off, `1`=basic, `2`=verbose, `3`=trace |
+| `nimble_initiator_group` | No | Existing Nimble initiator group name shared by all cluster nodes. If omitted, the plugin auto-creates a per-node group `pve-<nodename>` using this node's IQN. |
+| `nimble_auto_iscsi_discovery` | No | Default `yes`. Runs iSCSI discovery and login when storage activates. Set to `no` to disable. |
+| `nimble_iscsi_discovery_ips` | No | Extra discovery portals (comma-separated) beyond what the Nimble subnets API returns. |
+| `nimble_vnprefix` | No | Prefix added to all volume names on the array |
+| `nimble_pool_name` | No | Nimble pool for new volumes |
+| `nimble_volume_collection` | No | Volume collection name. New volumes are added to this collection for array-side snapshot schedules. |
+| `nimble_check_ssl` | No | Default `no`. Set to `yes` to verify TLS certificates. |
+| `nimble_token_ttl` | No | Session token cache TTL in seconds (default `3600`) |
+| `nimble_debug` | No | `0`=off, `1`=basic, `2`=verbose, `3`=trace |
 
 **Example `storage.cfg` entry:**
 
 ```text
 nimble: my-nimble
-  address https://nimble.example.com
+  nimble_address https://nimble.example.com
   username admin
   content images,rootdir
-  # initiator_group my-pve-group   # optional
-  # volume_collection pve-vols      # optional
+  # nimble_initiator_group my-pve-group   # optional
+  # nimble_volume_collection pve-vols     # optional
 ```
+
+### Upgrading from v0.0.24 or earlier (option names)
+
+Before v0.0.25 the options used generic names without the `nimble_` prefix (`address`, `vnprefix`,
+`check_ssl`, `token_ttl`, `debug`, `initiator_group`, `pool_name`, `volume_collection`,
+`auto_iscsi_discovery`, `iscsi_discovery_ips`, `storeid`). **Existing `storage.cfg` entries keep
+working without any edits** — the plugin reads the old spellings and treats them as the new names.
+
+Notes:
+
+- The next time Proxmox rewrites `storage.cfg` (any `pvesm add`/`set`/`remove`, including for other
+  storages), nimble sections are re-written with the new `nimble_`-prefixed names automatically.
+- **Clusters:** upgrade the plugin package on *all* nodes before making storage config changes.
+  Nodes still running ≤ v0.0.24 cannot parse the new `nimble_*` keys and would lose the storage
+  definition until upgraded.
+- The old spellings are only parseable while either (a) no other installed plugin claims those
+  names, or (b) a co-installed plugin (e.g. Pure) declares them with a compatible schema. Migrated
+  (`nimble_*`) configs are immune to this — prefer the new names in scripts and documentation.
 
 ## Feature comparison (vs other Proxmox storage)
 
@@ -193,9 +211,9 @@ The maintainer has exercised most day-to-day flows on **real Proxmox VE + HPE Ni
 | Error | Fix |
 |-------|-----|
 | `could not read local iSCSI IQN` | Install `open-iscsi`, add `InitiatorName=iqn.…` to `/etc/iscsi/initiatorname.iscsi`, restart `iscsid` |
-| `Initiator group X not found` | Group set in config doesn't exist on the array. Create it in the Nimble UI or remove `initiator_group` from config to auto-create |
-| API timeout / TLS error | Check `address`, firewall (port 5392), and set `check_ssl no` if using self-signed certs |
-| No iSCSI session / map timeout | Run `iscsiadm -m session` on the affected node. Check L3 connectivity to Nimble data IPs. Use `iscsi_discovery_ips` if the subnets API doesn't return the right portals |
+| `Initiator group X not found` | Group set in config doesn't exist on the array. Create it in the Nimble UI or remove `nimble_initiator_group` from config to auto-create |
+| API timeout / TLS error | Check `nimble_address`, firewall (port 5392), and set `nimble_check_ssl no` if using self-signed certs |
+| No iSCSI session / map timeout | Run `iscsiadm -m session` on the affected node. Check L3 connectivity to Nimble data IPs. Use `nimble_iscsi_discovery_ips` if the subnets API doesn't return the right portals |
 | `iscsiadm … login` exit code 15 in debug log | Usually means the target was **already logged in** (common with multipath or LVM on the same array). Safe to ignore if disks map and snapshots work |
 | Snapshot **with RAM** fails (`failed to open ''` or `snapshot already started`) | Use snapshots **without RAM**, or **restart the VM** after a failed attempt. Plugin maps the temporary state volume when Proxmox asks for its path; report persistent failures on GitHub |
 | Volume collection + **sync replication** | Not lab-tested with a replication partner. Adding PVE-managed disks to a sync-rep collection can cause timeouts or extra volumes — use async protection or a separate collection for DR; see setup guide |
@@ -205,7 +223,7 @@ The maintainer has exercised most day-to-day flows on **real Proxmox VE + HPE Ni
 
 ```bash
 # Enable persistent debug (stored in config)
-pvesm set <storage_id> --debug 1
+pvesm set <storage_id> --nimble_debug 1
 
 # One-off debug for a single command
 NIMBLE_DEBUG=1 pvesm list <storage_id>

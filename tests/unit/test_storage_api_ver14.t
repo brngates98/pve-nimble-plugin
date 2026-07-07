@@ -180,7 +180,7 @@ like(
     die "unexpected endpoint: $method $endpoint";
   };
   is(
-    $class->get_identity( { pool_name => 'default' }, 'nimble1' ),
+    $class->get_identity( { nimble_pool_name => q{default} }, 'nimble1' ),
     'nimble:array-a',
     'get_identity picks pool-scoped array sorted by id',
   );
@@ -191,7 +191,7 @@ like(
   no strict 'refs';
   *{'PVE::Storage::Custom::NimbleStoragePlugin::nimble_api_call'} = sub { return undef };
   is(
-    $class->get_identity( { address => 'nimble.example.com' }, 'nimble1' ),
+    $class->get_identity( { nimble_address => q{nimble.example.com} }, 'nimble1' ),
     'nimble:nimble.example.com',
     'get_identity falls back to address when arrays API fails',
   );
