@@ -5,3 +5,9 @@ build/
 *.changes
 changelog
 .DS_Store
+
+
+## misc
+pve-common
+pve-manager
+pve-storage
