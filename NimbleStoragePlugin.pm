@@ -195,6 +195,16 @@ sub properties {
       description => "Nimble folder name. New volumes are created inside this folder (POST v1/volumes folder_id). Leave unset to use the root folder (default Nimble behaviour).",
       type        => 'string',
     },
+    nimble_limit_iops => {
+      description => "IOPS limit for new volumes. Applied as limit_iops on POST v1/volumes. Range: 256–4294967294, or -1 for unlimited (default). If both limit_iops and limit_mbps are set, the IOPS constraint must not be hit after the MBPS limit (limit_iops <= limit_mbps*1048576/block_size). Does not retroactively change existing volumes.",
+      type        => 'integer',
+      default     => -1,
+    },
+    nimble_limit_mbps => {
+      description => "Throughput limit in MB/s for new volumes. Applied as limit_mbps on POST v1/volumes. Range: 1–4294967294, or -1 for unlimited (default). If both limit_iops and limit_mbps are set, the MBPS limit must not be hit before the IOPS limit. Does not retroactively change existing volumes.",
+      type        => 'integer',
+      default     => -1,
+    },
     nimble_storeid => {
       description => "Proxmox storage ID (storage.cfg section name). Auto-set by the plugin to match the section name so workers can resolve priv/password and token paths when the explicit storeid argument is omitted (cluster import/migration). Do not change manually.",
       type        => 'string',
@@ -243,8 +253,10 @@ sub options {
     nimble_debug     => { optional => 1 },
     nimble_auto_iscsi_discovery => { optional => 1 },
     nimble_iscsi_discovery_ips  => { optional => 1 },
-    nimble_folder  => { optional => 1 },
-    nimble_storeid => { optional => 1 },
+    nimble_folder      => { optional => 1 },
+    nimble_limit_iops  => { optional => 1 },
+    nimble_limit_mbps  => { optional => 1 },
+    nimble_storeid     => { optional => 1 },
     nodes          => { optional => 1 },
     disable        => { optional => 1 },
     content        => { optional => 1 },
@@ -2911,6 +2923,22 @@ sub size_bytes_to_mb {
   return $size_mb < 1 ? 1 : $size_mb;
 }
 
+# Apply nimble_limit_iops / nimble_limit_mbps from storage config to a volume API request body.
+# Called before POST volumes (create and clone). Values of -1 or 0 mean unlimited (omitted).
+# Constraint: if both are set, limit_iops <= (limit_mbps * 1048576 / block_size).
+# The plugin does not enforce this — the array will reject invalid combinations with an error.
+sub nimble_apply_qos_to_body {
+  my ( $scfg, $body ) = @_;
+  my $iops = $scfg->{ nimble_limit_iops };
+  my $mbps = $scfg->{ nimble_limit_mbps };
+  if ( defined $iops && $iops =~ /^-?\d+$/ && $iops + 0 >= 256 ) {
+    $body->{ limit_iops } = $iops + 0;
+  }
+  if ( defined $mbps && $mbps =~ /^-?\d+$/ && $mbps + 0 >= 1 ) {
+    $body->{ limit_mbps } = $mbps + 0;
+  }
+}
+
 sub nimble_create_volume {
   my ( $class, $scfg, $volname, $size_bytes, $storeid ) = @_;
   my $name    = nimble_volname( $scfg, $volname, undef );
@@ -2918,6 +2946,7 @@ sub nimble_create_volume {
   my $body = { name => $name, size => $size_mb, multi_initiator => JSON::XS::true };
   # Note: the API body key stays `pool_name` (Nimble REST parameter); only the config key is nimble_-prefixed.
   $body->{ pool_name } = $scfg->{ nimble_pool_name } if $scfg->{ nimble_pool_name };
+  nimble_apply_qos_to_body( $scfg, $body );
 
   # Resolve folder name → folder_id and pass it to the create body.
   # POST v1/volumes accepts `folder_id` (the Nimble API field name); the plugin config key is
@@ -2941,7 +2970,15 @@ sub nimble_create_volume {
   my $vol    = $r->{ data } || $r;
   my $serial = $vol->{ serial_number } or die "Error :: No serial_number in create response\n";
   $vol->{ id } or die "Error :: No id in create response\n";
-  print "Info :: Volume \"$volname\" created (serial=$serial).\n";
+  my $qos_info = '';
+  if ( defined $body->{ limit_iops } || defined $body->{ limit_mbps } ) {
+    $qos_info = join( ', ',
+      ( defined $body->{ limit_iops } ? "IOPS=$body->{limit_iops}" : () ),
+      ( defined $body->{ limit_mbps } ? "MBPS=$body->{limit_mbps}" : () ),
+    );
+    $qos_info = " [QoS: $qos_info]";
+  }
+  print "Info :: Volume \"$volname\" created (serial=$serial)$qos_info.\n";
   my $create_err;
   eval {
     my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
@@ -3295,6 +3332,7 @@ sub nimble_volume_restore {
 # Create a new volume from a snapshot (clone). API: POST volumes with clone=true, name, base_snap_id.
 sub nimble_clone_from_snapshot {
   my ( $class, $scfg, $storeid, $new_volname, $source_volname, $snap_name ) = @_;
+  print "Info :: Cloning \"$source_volname\" (snap \"$snap_name\") → \"$new_volname\" on Nimble array...\n";
   my $snap_full = nimble_volname( $scfg, $source_volname, $snap_name );
   my $enc       = uri_escape( $snap_full );
   my $r         = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
@@ -3305,12 +3343,23 @@ sub nimble_clone_from_snapshot {
   }
   die "Error :: Snapshot \"$snap_name\" not found for volume \"$source_volname\".\n" unless $snap_id;
   my $name_on_array = nimble_volname( $scfg, $new_volname, undef );
+  print "Info :: Sending clone request to array (instant server-side copy)...\n";
   my $body = { clone => JSON::XS::true, name => $name_on_array, base_snap_id => $snap_id, multi_initiator => JSON::XS::true };
+  nimble_apply_qos_to_body( $scfg, $body );
   $r = nimble_api_call( $scfg, 'POST', 'volumes', $body, $storeid );
   my $vol = $r->{ data } || $r;
   my $vol_id = $vol->{ id } or die "Error :: Clone did not return volume id.\n";
+  # Report QoS limits applied if any
+  if ( defined $body->{ limit_iops } || defined $body->{ limit_mbps } ) {
+    my $qos = join( ', ',
+      ( defined $body->{ limit_iops } ? "IOPS=$body->{limit_iops}" : () ),
+      ( defined $body->{ limit_mbps } ? "MBPS=$body->{limit_mbps}" : () ),
+    );
+    print "Info :: QoS limits applied to clone \"$new_volname\": $qos\n";
+  }
   my $clone_err;
   eval {
+    print "Info :: Granting iSCSI access to clone \"$new_volname\"...\n";
     my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
     nimble_post_access_control_record_idempotent( $scfg, $vol_id, $ig_id, $storeid );
     if ( $scfg->{ nimble_volume_collection } ) {
@@ -3327,7 +3376,7 @@ sub nimble_clone_from_snapshot {
     nimble_volume_offline_then_delete_best_effort( $scfg, $vol_id, $storeid, $new_volname );
     die $clone_err;
   }
-  print "Info :: Cloned volume \"$new_volname\" from \"$source_volname\" snapshot \"$snap_name\".\n";
+  print "Info :: Clone complete: \"$new_volname\" is ready (array-side instant copy — no data moved on host).\n";
   return 1;
 }
 
