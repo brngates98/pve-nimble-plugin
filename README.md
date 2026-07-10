@@ -179,14 +179,23 @@ defaults {
     user_friendly_names yes
     find_multipaths     no
 }
+
 blacklist {
     devnode "^(ram|raw|loop|fd|md|dm-|sr|scd|st)[0-9]*"
     devnode "^hd[a-z]"
-    device { vendor ".*" product ".*" }
+    device {
+        vendor ".*"
+        product ".*"
+    }
 }
+
 blacklist_exceptions {
-    device { vendor "Nimble" product "Server" }
+    device {
+        vendor "Nimble"
+        product "Server"
+    }
 }
+
 devices {
     device {
         vendor               "Nimble"
