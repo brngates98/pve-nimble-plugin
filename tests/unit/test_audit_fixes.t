@@ -116,7 +116,7 @@ my $P = 'PVE::Storage::Custom::NimbleStoragePlugin';
   local $main::fake_plugins       = {};
   my $opts = $P->options();
   ok( $opts->{port} && $opts->{port}{optional}, 'options() references global port property' );
-  ok( $opts->{nimble_address} && $opts->{nimble_address}{fixed}, 'options() keeps nimble_address fixed' );
+  ok( $opts->{nimble_address} && $opts->{nimble_address}{optional}, 'options() declares nimble_address optional' );
   ok( !exists $opts->{address}, 'legacy address not referenced while unregistered' );
 
   local $main::fake_property_list = { address => {}, vnprefix => {} };
@@ -230,6 +230,40 @@ my $P = 'PVE::Storage::Custom::NimbleStoragePlugin';
     'PVE snapshots "snap-x" and "x" map to different array names' );
   is( $vn->( $scfg, 'vm-100-disk-0', 'veeam_job1' ), 'vm-100-disk-0.snap-veeam-job1', 'veeam_ normalized' );
   is( $vn->( { nimble_vnprefix => 'pveA-' }, 'vm-100-disk-0' ), 'pveA-vm-100-disk-0', 'prefix without snap' );
+}
+
+### New properties: nimble_limit_iops, nimble_limit_mbps, nimble_folder declared
+
+{
+  local $main::fake_property_list = {};
+  local $main::fake_plugins       = {};
+  my $props = $P->properties();
+  ok( exists $props->{nimble_limit_iops},
+    'nimble_limit_iops declared in properties()' );
+  ok( exists $props->{nimble_limit_mbps},
+    'nimble_limit_mbps declared in properties()' );
+  ok( exists $props->{nimble_folder},
+    'nimble_folder declared in properties()' );
+  is( $props->{nimble_limit_iops}{type}, 'integer',
+    'nimble_limit_iops type is integer' );
+  is( $props->{nimble_limit_mbps}{type}, 'integer',
+    'nimble_limit_mbps type is integer' );
+  is( $props->{nimble_limit_iops}{default}, -1,
+    'nimble_limit_iops default is -1 (unlimited)' );
+  is( $props->{nimble_limit_mbps}{default}, -1,
+    'nimble_limit_mbps default is -1 (unlimited)' );
+}
+
+{
+  local $main::fake_property_list = {};
+  local $main::fake_plugins       = {};
+  my $opts = $P->options();
+  ok( $opts->{nimble_limit_iops} && $opts->{nimble_limit_iops}{optional},
+    'options() declares nimble_limit_iops optional' );
+  ok( $opts->{nimble_limit_mbps} && $opts->{nimble_limit_mbps}{optional},
+    'options() declares nimble_limit_mbps optional' );
+  ok( $opts->{nimble_folder} && $opts->{nimble_folder}{optional},
+    'options() declares nimble_folder optional' );
 }
 
 done_testing();
