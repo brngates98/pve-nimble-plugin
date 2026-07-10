@@ -40,6 +40,17 @@ Ext.define('PVE.storage.NimbleInputPanel', {
 	    }
 	});
 
+	// nimble_limit_iops / nimble_limit_mbps: -1 means unlimited.
+	// Remove them when unset (empty) so the array keeps its current setting unchanged.
+	['nimble_limit_iops', 'nimble_limit_mbps'].forEach(function(key) {
+	    if (values[key] === undefined || String(values[key]).length === 0) {
+		delete values[key];
+		if (!me.isCreate) {
+		    values['delete'] = (values['delete'] ? values['delete'] + ',' : '') + key;
+		}
+	    }
+	});
+
 	return me.callParent([values]);
     },
 
@@ -158,7 +169,7 @@ Ext.define('PVE.storage.NimbleInputPanel', {
 	    },
 	];
 
-	// ---- Advanced column 2: iSCSI / TLS ----
+	// ---- Advanced column 2: iSCSI / TLS / QoS ----
 	me.advancedColumn2 = [
 	    {
 		xtype: 'proxmoxcheckbox',
@@ -174,6 +185,32 @@ Ext.define('PVE.storage.NimbleInputPanel', {
 		fieldLabel: 'Auto iSCSI Discovery',
 		uncheckedValue: 0,
 		checked: true,
+		deleteEmpty: !me.isCreate,
+	    },
+	    {
+		// IOPS limit applied to every new volume (and clone) via limit_iops on POST v1/volumes.
+		// Valid range: 256–4294967294. Leave empty or set -1 for unlimited (default).
+		// Does NOT retroactively change existing volumes.
+		xtype: 'proxmoxintegerfield',
+		name: 'nimble_limit_iops',
+		fieldLabel: 'IOPS Limit (new volumes)',
+		emptyText: gettext('Unlimited (-1)'),
+		value: -1,
+		minValue: -1,
+		allowBlank: true,
+		deleteEmpty: !me.isCreate,
+	    },
+	    {
+		// Throughput limit in MB/s applied to every new volume (and clone) via limit_mbps.
+		// Valid range: 1–4294967294. Leave empty or set -1 for unlimited (default).
+		// Does NOT retroactively change existing volumes.
+		xtype: 'proxmoxintegerfield',
+		name: 'nimble_limit_mbps',
+		fieldLabel: 'Throughput Limit MB/s',
+		emptyText: gettext('Unlimited (-1)'),
+		value: -1,
+		minValue: -1,
+		allowBlank: true,
 		deleteEmpty: !me.isCreate,
 	    },
 	];
