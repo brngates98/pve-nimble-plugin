@@ -67,6 +67,16 @@ sudo apt install ./libpve-storage-nimble-perl_<version>-1_all.deb
 
 No need to pre-create an initiator group — the plugin creates one automatically from this node's IQN.
 
+### Via the Web UI (recommended)
+
+Go to **Datacenter → Storage → Add → HPE Nimble** and fill in the dialog. The plugin ships a JavaScript panel (`NimbleEdit.js`) that registers "HPE Nimble" in the standard Add dropdown and enables the Edit button for existing Nimble storage entries.
+
+See **[docs/GUI_ADD_EDIT_STORAGE.md](docs/GUI_ADD_EDIT_STORAGE.md)** for a full walkthrough with field descriptions.
+
+> **Note:** If the UI shows a blank Edit dialog or Nimble is missing from the Add dropdown after installing the package, hard-refresh the browser (`Ctrl+F5`) and check that `pveproxy` was restarted during installation.
+
+### Via the command line
+
 ```bash
 pvesm add nimble <storage_id> \
   --nimble_address https://<nimble_ip_or_fqdn> \
