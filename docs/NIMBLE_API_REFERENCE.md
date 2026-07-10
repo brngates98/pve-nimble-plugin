@@ -174,6 +174,7 @@ The plugin uses **subnets** (and optional **network_interfaces** fallback) to bu
 | Update volume | PUT | volumes/:id | size, name, or volcoll_id (to add/remove from volume collection) |
 | Delete volume | DELETE | volumes/:id | — |
 | List volume collections | GET | volume_collections or volume_collections?name=... | — |
+| List folders | GET | folders or folders?name=... | — |
 | Restore volume | POST | volumes/:id/actions/restore | id, base_snap_id |
 | Create ACL | POST | access_control_records | vol_id, initiator_group_id |
 | Create snapshot | POST | snapshots | vol_id, name |
