@@ -117,6 +117,7 @@ my $P = 'PVE::Storage::Custom::NimbleStoragePlugin';
   my $opts = $P->options();
   ok( $opts->{port} && $opts->{port}{optional}, 'options() references global port property' );
   ok( $opts->{nimble_address} && $opts->{nimble_address}{fixed}, 'options() keeps nimble_address fixed' );
+  ok( $opts->{username} && $opts->{username}{fixed}, 'options() keeps username fixed' );
   ok( !exists $opts->{address}, 'legacy address not referenced while unregistered' );
 
   local $main::fake_property_list = { address => {}, vnprefix => {} };
@@ -230,6 +231,137 @@ my $P = 'PVE::Storage::Custom::NimbleStoragePlugin';
     'PVE snapshots "snap-x" and "x" map to different array names' );
   is( $vn->( $scfg, 'vm-100-disk-0', 'veeam_job1' ), 'vm-100-disk-0.snap-veeam-job1', 'veeam_ normalized' );
   is( $vn->( { nimble_vnprefix => 'pveA-' }, 'vm-100-disk-0' ), 'pveA-vm-100-disk-0', 'prefix without snap' );
+}
+
+### New properties: nimble_limit_iops, nimble_limit_mbps, nimble_folder declared
+
+{
+  local $main::fake_property_list = {};
+  local $main::fake_plugins       = {};
+  my $props = $P->properties();
+  ok( exists $props->{nimble_limit_iops},
+    'nimble_limit_iops declared in properties()' );
+  ok( exists $props->{nimble_limit_mbps},
+    'nimble_limit_mbps declared in properties()' );
+  ok( exists $props->{nimble_folder},
+    'nimble_folder declared in properties()' );
+  is( $props->{nimble_limit_iops}{type}, 'integer',
+    'nimble_limit_iops type is integer' );
+  is( $props->{nimble_limit_mbps}{type}, 'integer',
+    'nimble_limit_mbps type is integer' );
+  is( $props->{nimble_limit_iops}{default}, -1,
+    'nimble_limit_iops default is -1 (unlimited)' );
+  is( $props->{nimble_limit_mbps}{default}, -1,
+    'nimble_limit_mbps default is -1 (unlimited)' );
+}
+
+{
+  local $main::fake_property_list = {};
+  local $main::fake_plugins       = {};
+  my $opts = $P->options();
+  ok( $opts->{nimble_limit_iops} && $opts->{nimble_limit_iops}{optional},
+    'options() declares nimble_limit_iops optional' );
+  ok( $opts->{nimble_limit_mbps} && $opts->{nimble_limit_mbps}{optional},
+    'options() declares nimble_limit_mbps optional' );
+  ok( $opts->{nimble_folder} && $opts->{nimble_folder}{optional},
+    'options() declares nimble_folder optional' );
+  ok( $opts->{nimble_iscsi_discovery_override} && $opts->{nimble_iscsi_discovery_override}{optional},
+    'options() declares nimble_iscsi_discovery_override optional' );
+  ok( $opts->{nimble_legacy_name_fallback} && $opts->{nimble_legacy_name_fallback}{optional},
+    'options() declares nimble_legacy_name_fallback optional' );
+}
+
+### Opt-in booleans: default OFF, PVE boolean spellings honored
+
+{
+  local $main::fake_property_list = {};
+  local $main::fake_plugins       = {};
+  my $props = $P->properties();
+  is( $props->{nimble_iscsi_discovery_override}{default}, 'no',
+    'nimble_iscsi_discovery_override default is no (existing configs keep API-discovered portals)' );
+  is( $props->{nimble_legacy_name_fallback}{default}, 'no',
+    'nimble_legacy_name_fallback default is no (bare-name fallback never silent)' );
+
+  no strict 'refs';
+  my $ovr = \&{"${P}::nimble_iscsi_discovery_override_enabled"};
+  ok( !$ovr->({}),                                          'override off when unset' );
+  ok( !$ovr->({ nimble_iscsi_discovery_override => 0 }),    'override off for 0' );
+  ok( !$ovr->({ nimble_iscsi_discovery_override => 'no' }), 'override off for "no"' );
+  ok( $ovr->({ nimble_iscsi_discovery_override => 1 }),     'override on for 1' );
+  ok( $ovr->({ nimble_iscsi_discovery_override => 'yes' }), 'override on for "yes"' );
+
+  my $leg = \&{"${P}::nimble_legacy_name_fallback_enabled"};
+  ok( !$leg->({}),                                       'legacy fallback off when unset' );
+  ok( !$leg->({ nimble_legacy_name_fallback => 'no' }),  'legacy fallback off for "no"' );
+  ok( $leg->({ nimble_legacy_name_fallback => 1 }),      'legacy fallback on for 1' );
+}
+
+### nimble_actual_array_volname: no API traffic unless legacy fallback is opted in
+
+{
+  no strict 'refs';
+  my $actual = \&{"${P}::nimble_actual_array_volname"};
+  # Fallback OFF (default): pure construction, identical to nimble_volname (would die on any
+  # API attempt here — no nimble_address in $scfg).
+  my $scfg = { nimble_vnprefix => 'pveA-' };
+  is( $actual->( $scfg, 'vm-100-disk-0', undef, 'st1' ), 'pveA-vm-100-disk-0',
+    'fallback off: constructed name, no API lookup' );
+  is( $actual->( $scfg, 'vm-100-disk-0', 'daily', 'st1' ), 'pveA-vm-100-disk-0.snap-daily',
+    'fallback off: snap suffix matches nimble_volname' );
+  is( $actual->( $scfg, 'vm-100-disk-0', 'veeam_job1', 'st1' ), 'pveA-vm-100-disk-0.snap-veeam-job1',
+    'fallback off: veeam_ normalization matches nimble_volname' );
+  # Fallback ON with a known array name: no lookup either, suffix applied to the real name.
+  my $scfg_on = { nimble_vnprefix => 'pveA-', nimble_legacy_name_fallback => 1 };
+  is( $actual->( $scfg_on, 'vm-100-disk-0', 'daily', 'st1', 'vm-100-disk-0' ),
+    'vm-100-disk-0.snap-daily',
+    'fallback on + known array name: snap suffix on bare legacy name' );
+}
+
+### nimble_array_snapshot_is_pve_ui_snapshot: constructed and known-array-name bases
+
+{
+  no strict 'refs';
+  my $is_ui = \&{"${P}::nimble_array_snapshot_is_pve_ui_snapshot"};
+  my $scfg = { nimble_vnprefix => 'pveA-' };
+  ok( $is_ui->( $scfg, 'vm-100-disk-0', 'pveA-vm-100-disk-0.snap-daily' ),
+    'prefixed PVE UI snapshot recognized (constructed base)' );
+  ok( !$is_ui->( $scfg, 'vm-100-disk-0', 'pveA-vm-100-disk-0.hourly' ),
+    'array schedule snapshot not treated as PVE UI snapshot' );
+  ok( $is_ui->( $scfg, 'vm-100-disk-0', 'vm-100-disk-0.snap-daily', 'vm-100-disk-0' ),
+    'legacy bare-named volume: UI snapshot recognized via known array name' );
+  ok( !$is_ui->( $scfg, 'vm-100-disk-0', 'vm-100-disk-0.snap-daily' ),
+    'without known array name, bare-named snapshot not matched (prefix base)' );
+}
+
+### nimble_apply_qos_to_body: valid limits applied, invalid ones warn instead of silently no-op
+
+{
+  no strict 'refs';
+  my $qos = \&{"${P}::nimble_apply_qos_to_body"};
+
+  my $body = {};
+  $qos->( { nimble_limit_iops => 1000, nimble_limit_mbps => 200 }, $body );
+  is( $body->{limit_iops}, 1000, 'limit_iops >= 256 applied' );
+  is( $body->{limit_mbps}, 200,  'limit_mbps >= 1 applied' );
+
+  $body = {};
+  $qos->( { nimble_limit_iops => -1, nimble_limit_mbps => -1 }, $body );
+  ok( !exists $body->{limit_iops} && !exists $body->{limit_mbps},
+    '-1 (unlimited) omits both limits' );
+
+  $body = {};
+  my @warnings;
+  {
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+    $qos->( { nimble_limit_iops => 100 }, $body );
+  }
+  ok( !exists $body->{limit_iops}, 'iops below Nimble minimum (256) not applied' );
+  ok( ( grep { /below the Nimble minimum of 256/ } @warnings ),
+    'sub-256 iops warns instead of silently ignoring' );
+
+  $body = {};
+  $qos->( {}, $body );
+  is_deeply( $body, {}, 'no QoS config leaves body untouched' );
 }
 
 done_testing();

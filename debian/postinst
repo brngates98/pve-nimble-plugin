@@ -21,10 +21,41 @@ restart_pve_stack() {
   "${cmd[@]}" try-restart pvescheduler.service 2>/dev/null || true
 }
 
+# Inject the Nimble GUI script tag into the pveproxy HTML template so the
+# ExtJS InputPanel and storageSchema registration load in the browser.
+# The tag is placed just before </head> and is idempotent (safe to re-run).
+inject_gui_script() {
+  local tpl="/usr/share/pve-manager/index.html.tpl"
+  local tag='    <script type="text/javascript" src="/pve2/js/NimbleEdit.js"></script>'
+  local marker="NimbleEdit.js"
+
+  if [ ! -f "$tpl" ]; then
+    echo "WARNING: $tpl not found — Nimble GUI script tag not injected." >&2
+    return 0
+  fi
+
+  # Idempotent: skip if already present
+  if grep -qF "$marker" "$tpl"; then
+    return 0
+  fi
+
+  # Insert our <script> tag on the line before </head>
+  sed -i "s|</head>|${tag}\n  </head>|" "$tpl"
+}
+
 case "$1" in
   configure)
+    inject_gui_script
     if [ -d /run/systemd/system ]; then
       restart_pve_stack
     fi
+    ;;
+  triggered)
+    # dpkg file trigger (debian/triggers): pve-manager upgrades replace index.html.tpl and wipe
+    # our script tag — re-inject automatically instead of requiring a plugin reinstall.
+    # No pveproxy restart here: pve-manager's own postinst restarts it during the same run.
+    inject_gui_script
+    ;;
+  abort-upgrade|abort-remove|abort-deconfigure)
     ;;
 esac

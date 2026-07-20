@@ -1,0 +1,3 @@
+# Re-run postinst ("triggered") whenever pve-manager (re)installs index.html.tpl, so the
+# NimbleEdit.js <script> tag survives pve-manager upgrades without reinstalling this package.
+interest-noawait /usr/share/pve-manager/index.html.tpl

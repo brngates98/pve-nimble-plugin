@@ -20,8 +20,17 @@ restart_pve_stack() {
   "${cmd[@]}" try-restart pvescheduler.service 2>/dev/null || true
 }
 
+remove_gui_script() {
+  local tpl="/usr/share/pve-manager/index.html.tpl"
+  local marker="NimbleEdit.js"
+  if [ -f "$tpl" ]; then
+    sed -i "/${marker}/d" "$tpl"
+  fi
+}
+
 case "$1" in
   remove|purge)
+    remove_gui_script
     if [ -d /run/systemd/system ]; then
       restart_pve_stack
     fi

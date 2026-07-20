@@ -188,8 +188,32 @@ sub properties {
       default     => 'yes'
     },
     nimble_iscsi_discovery_ips => {
-      description => "Optional extra iSCSI discovery portals (comma-separated; host or host:port). Merged after Nimble GET subnets + GET subnets/:id (authoritative). Use for additional paths or non-standard layouts.",
+      description => "Optional extra iSCSI discovery portals (comma-separated; host or host:port). Merged after Nimble GET subnets + GET subnets/:id (authoritative). Use for additional paths or non-standard layouts. With nimble_iscsi_discovery_override, these become the ONLY portals used (subnets/network_interfaces APIs skipped).",
       type        => 'string',
+    },
+    nimble_iscsi_discovery_override => {
+      description => "Use ONLY nimble_iscsi_discovery_ips for iSCSI discovery — skip the Nimble subnets and network_interfaces APIs and the session-derived fallback. Pins discovery to known-reachable portals so unreachable API-reported subnets (VLAN/firewall) cannot cause sendtargets timeouts. Requires nimble_iscsi_discovery_ips to be set. Default off (portals from config are merged with API-discovered ones).",
+      type        => 'boolean',
+      default     => 'no',
+    },
+    nimble_legacy_name_fallback => {
+      description => "When a prefixed volume name (nimble_vnprefix + volname) is not found on the array, also try the bare un-prefixed name. Lets this storage manage volumes created before nimble_vnprefix was configured (snapshots, clones, resize, delete included). CAUTION: do NOT enable on multiple storages that share one array separated only by prefix — a bare-named volume would become manageable (and deletable) from every such storage at once. Default off.",
+      type        => 'boolean',
+      default     => 'no',
+    },
+    nimble_folder => {
+      description => "Nimble folder name. New volumes are created inside this folder (POST v1/volumes folder_id). Leave unset to use the root folder (default Nimble behaviour).",
+      type        => 'string',
+    },
+    nimble_limit_iops => {
+      description => "IOPS limit for new volumes. Applied as limit_iops on POST v1/volumes. Range: 256–4294967294, or -1 for unlimited (default). If both limit_iops and limit_mbps are set, the IOPS constraint must not be hit after the MBPS limit (limit_iops <= limit_mbps*1048576/block_size). Does not retroactively change existing volumes.",
+      type        => 'integer',
+      default     => -1,
+    },
+    nimble_limit_mbps => {
+      description => "Throughput limit in MB/s for new volumes. Applied as limit_mbps on POST v1/volumes. Range: 1–4294967294, or -1 for unlimited (default). If both limit_iops and limit_mbps are set, the MBPS limit must not be hit before the IOPS limit. Does not retroactively change existing volumes.",
+      type        => 'integer',
+      default     => -1,
     },
     nimble_storeid => {
       description => "Proxmox storage ID (storage.cfg section name). Auto-set by the plugin to match the section name so workers can resolve priv/password and token paths when the explicit storeid argument is omitted (cluster import/migration). Do not change manually.",
@@ -239,7 +263,12 @@ sub options {
     nimble_debug     => { optional => 1 },
     nimble_auto_iscsi_discovery => { optional => 1 },
     nimble_iscsi_discovery_ips  => { optional => 1 },
-    nimble_storeid => { optional => 1 },
+    nimble_iscsi_discovery_override => { optional => 1 },
+    nimble_legacy_name_fallback => { optional => 1 },
+    nimble_folder      => { optional => 1 },
+    nimble_limit_iops  => { optional => 1 },
+    nimble_limit_mbps  => { optional => 1 },
+    nimble_storeid     => { optional => 1 },
     nodes          => { optional => 1 },
     disable        => { optional => 1 },
     content        => { optional => 1 },
@@ -475,32 +504,85 @@ sub nimble_name_prefix {
   return $prefix;
 }
 
+# Append the array-side ".snap-<name>" suffix to a base volume name. Single home for the
+# normalization so nimble_volname and nimble_actual_array_volname cannot drift apart.
+sub nimble_snap_fullname {
+  my ( $base_name, $snapname ) = @_;
+  my $snap = $snapname;
+  $snap =~ s/^(veeam_)/veeam-/;
+  # Always prefix — a conditional prefix made PVE snapshots "x" and "snap-x" map to the SAME
+  # array snapshot name (".snap-x"), so deleting one deleted the other's data. Reverse mapping in
+  # volume_snapshot_info strips exactly one leading "snap-", so ".snap-snap-x" round-trips to
+  # "snap-x" correctly. (Array snapshots created by pre-v0.0.24 plugins for PVE snapshots that
+  # themselves started with "snap-" — a naming collision case — resolve as not-found afterwards.)
+  $snap = 'snap-' . $snap;
+  return $base_name . '.' . $snap;
+}
+
 sub nimble_volname {
   my ( $scfg, $volname, $snapname ) = @_;
   $snapname //= '';
   my $name = nimble_name_prefix( $scfg ) . $volname;
-  if ( length( $snapname ) ) {
-    my $snap = $snapname;
-    $snap =~ s/^(veeam_)/veeam-/;
-    # Always prefix — a conditional prefix made PVE snapshots "x" and "snap-x" map to the SAME
-    # array snapshot name (".snap-x"), so deleting one deleted the other's data. Reverse mapping in
-    # volume_snapshot_info strips exactly one leading "snap-", so ".snap-snap-x" round-trips to
-    # "snap-x" correctly. (Array snapshots created by pre-v0.0.24 plugins for PVE snapshots that
-    # themselves started with "snap-" — a naming collision case — resolve as not-found afterwards.)
-    $snap = 'snap-' . $snap;
-    $name .= '.' . $snap;
-  }
+  $name = nimble_snap_fullname( $name, $snapname ) if length($snapname);
   return $name;
+}
+
+# Opt-in (default OFF): resolve volumes by their bare un-prefixed name when the prefixed name is
+# not on the array. Deliberately opt-in — with it on, a bare-named volume is manageable (resize,
+# DELETE included) from every storage that enables it, so two prefix-separated storages on one
+# array could reach each other's legacy volumes.
+sub nimble_legacy_name_fallback_enabled {
+  my ($scfg) = @_;
+  return 0 unless ref($scfg) eq 'HASH';
+  my $v = $scfg->{ nimble_legacy_name_fallback };
+  return 0 if !defined($v);
+  my $s = "$v";
+  return 0 if $s eq '0' || $s eq 'no' || $s eq '';
+  return 1;
+}
+
+# Resolve the actual array-side name for $volname. With nimble_legacy_name_fallback OFF (default)
+# this is exactly nimble_volname — no API traffic. With it ON, the array is queried so volumes
+# created before nimble_vnprefix was set resolve to their bare name; snapshot/clone/rollback then
+# target the correct array object (e.g. "vm-111-disk-0.snap-foo", not "pve-vm-111-disk-0.snap-foo").
+# $known_array_name skips the API round-trip when the caller already holds the volume row
+# (nimble_get_volume_id returns it); on lookup failure the constructed name is used so callers
+# don't break when the array is temporarily unreachable.
+sub nimble_actual_array_volname {
+  my ( $scfg, $volname, $snapname, $storeid, $known_array_name ) = @_;
+  $snapname //= '';
+
+  return nimble_volname( $scfg, $volname, $snapname )
+    unless nimble_legacy_name_fallback_enabled($scfg);
+
+  my $base_name = $known_array_name;
+  if ( !length( $base_name // '' ) ) {
+    my $vol = eval {
+      my ( undef, $v ) = nimble_get_volume_id( $scfg, $volname, $storeid );
+      $v;
+    };
+    $base_name = ( $vol && ref($vol) eq 'HASH' && length( $vol->{ name } // '' ) )
+      ? $vol->{ name }
+      : nimble_volname( $scfg, $volname, undef );
+  }
+
+  $base_name = nimble_snap_fullname( $base_name, $snapname ) if length($snapname);
+  return $base_name;
 }
 
 # True if this Nimble snapshot row was created by Proxmox through this plugin (POST snapshots with
 # nimble_volname(vol, snap) => prefix+volname.snap-<name>). Those snaps are already represented in
 # the VM config under the user snapshot name; nimble_sync_array_snapshots must not also treat them
 # as array-only imports (nimble<epoch>), or the GUI shows two entries for one LUN snapshot.
+# $array_vol_name: the volume's real name on the array when the caller already knows it (the sync
+# loop iterates rows keyed by array name) — required for legacy bare-named volumes; falls back to
+# the constructed prefix+volname otherwise.
 sub nimble_array_snapshot_is_pve_ui_snapshot {
-  my ( $scfg, $pve_volname, $array_snap_name ) = @_;
+  my ( $scfg, $pve_volname, $array_snap_name, $array_vol_name ) = @_;
   return 0 unless defined $array_snap_name && length $array_snap_name;
-  my $base = nimble_volname( $scfg, $pve_volname );
+  my $base = length( $array_vol_name // '' )
+    ? $array_vol_name
+    : nimble_volname( $scfg, $pve_volname );
   return 0 unless index( $array_snap_name, "$base." ) == 0;
   my $suffix = substr( $array_snap_name, length($base) + 1 );
   return ( $suffix =~ /^snap-/ ) ? 1 : 0;
@@ -1664,9 +1746,40 @@ sub get_iscsi_discovery_ips_from_running_sessions {
   return @ips;
 }
 
-### Discovery IPs: GET subnets, GET subnets/:id per row (authoritative), optional iscsi_discovery_ips, then session supplement.
+# Opt-in (default OFF): pin discovery to nimble_iscsi_discovery_ips only. Kept separate from the
+# IP list itself so existing configs that use the list as EXTRA portals keep their API-discovered
+# (multipath) portals on upgrade.
+sub nimble_iscsi_discovery_override_enabled {
+  my ($scfg) = @_;
+  return 0 unless ref($scfg) eq 'HASH';
+  my $v = $scfg->{ nimble_iscsi_discovery_override };
+  return 0 if !defined($v);
+  my $s = "$v";
+  return 0 if $s eq '0' || $s eq 'no' || $s eq '';
+  return 1;
+}
+
+### Discovery IPs: GET subnets, GET subnets/:id per row (authoritative), optional iscsi_discovery_ips,
+### then session supplement. With nimble_iscsi_discovery_override: ONLY the configured IPs.
 sub get_nimble_iscsi_discovery_ips {
   my ( $scfg, $storeid ) = @_;
+
+  my @manual = nimble_parse_manual_discovery_ips($scfg);
+
+  # Strict override (opt-in): use ONLY the configured IPs and skip the Nimble
+  # subnets/network_interfaces APIs entirely, so unreachable API-reported subnets
+  # (wrong VLAN, firewall, separate management network) never cause sendtargets timeouts.
+  if ( nimble_iscsi_discovery_override_enabled($scfg) ) {
+    if ( @manual ) {
+      print "Debug :: Discovery override on: using ONLY nimble_iscsi_discovery_ips, skipping Nimble subnets API: @manual\n"
+        if $DEBUG >= 1;
+      return @manual;
+    }
+    warn "Warning :: nimble_iscsi_discovery_override is set but nimble_iscsi_discovery_ips is empty; "
+      . "falling back to Nimble API discovery.\n";
+  }
+
+  # --- Dynamic path: query the Nimble API for discovery IPs ---
   my @session_supplement = get_iscsi_discovery_ips_from_running_sessions();
   my @ips;
   eval {
@@ -1743,7 +1856,7 @@ sub get_nimble_iscsi_discovery_ips {
       print "Debug :: network_interfaces fallback for discovery IPs: $e\n";
     }
   }
-  for my $m ( nimble_parse_manual_discovery_ips($scfg) ) {
+  for my $m ( @manual ) {
     push @ips, $m if !$seen_ip{$m}++;
   }
   my $from_api_or_manual = @ips;
@@ -2317,7 +2430,14 @@ sub nimble_ensure_initiator_group_id {
   my ( $scfg, $storeid ) = @_;
   my $ig_name = $scfg->{ nimble_initiator_group };
   if ( defined $ig_name && $ig_name ne '' ) {
-    return nimble_get_initiator_group_id( $scfg, $ig_name, $storeid );
+    my $id = nimble_get_initiator_group_id( $scfg, $ig_name, $storeid );
+    if ( $DEBUG >= 1 ) {
+      my $local_iqn = nimble_get_local_iscsi_iqn() // '(unknown)';
+      print "Debug :: Using configured initiator group \"$ig_name\" (id=$id). "
+        . "This node's IQN: $local_iqn. "
+        . "Verify this IQN is a member of that group on the Nimble array if sendtargets returns no targets.\n";
+    }
+    return $id;
   }
   my $iqn = nimble_get_local_iscsi_iqn();
   die "Error :: nimble_initiator_group not set and could not read a valid IQN from /etc/iscsi/initiatorname.iscsi (install open-iscsi; need an uncommented line InitiatorName=iqn...., or set nimble_initiator_group to an existing Nimble group).\n"
@@ -2469,9 +2589,14 @@ sub nimble_ensure_volume_acl_for_current_node {
   my ( $vol_id, $vol ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   return 1 unless $vol_id;
   my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
-  return 1 if nimble_volume_has_acl_for_ig( $scfg, $vol_id, $ig_id, $storeid );
+  if ( nimble_volume_has_acl_for_ig( $scfg, $vol_id, $ig_id, $storeid ) ) {
+    print "Debug :: Volume \"$volname\" already has ACL for initiator group (id=$ig_id). "
+      . "If sendtargets still returns no targets, verify this node's IQN is a member of that group.\n"
+      if $DEBUG >= 1;
+    return 1;
+  }
   if ( nimble_post_access_control_record_idempotent( $scfg, $vol_id, $ig_id, $storeid ) ) {
-    print "Info :: Volume \"$volname\" granted Nimble access (initiator group ACL).\n";
+    print "Info :: Volume \"$volname\" granted Nimble access (initiator group ACL, ig_id=$ig_id).\n";
     # ACL propagation is handled by the sendtargets retry loop in nimble_iscsi_establish_volume_session.
   }
   return 1;
@@ -2513,8 +2638,12 @@ sub nimble_iscsi_establish_volume_session {
   }
 
   # 2. Sendtargets retry loop — wait for this IQN to appear in the node DB.
+  #    Also collect portals directly from sendtargets output as a fallback so
+  #    we can login even when the node DB write is delayed or suppressed.
   my $max_rounds  = 12;    # up to 24 s (12 x 2 s)
   my $in_node_db  = 0;
+  my @direct_portals;      # portals reported by sendtargets for THIS IQN
+  my %seen_dp;             # dedupe across discovery IPs AND retry rounds
   for my $round ( 1 .. $max_rounds ) {
     @known_portals = nimble_iscsi_node_portals_for_target($iqn);
     if ( @known_portals && nimble_iscsi_all_portals_in_sessions( $iqn, \@known_portals, 0 ) ) {
@@ -2522,21 +2651,51 @@ sub nimble_iscsi_establish_volume_session {
     }
 
     for my $dp ( @dip ) {
+      my @lines;
       eval {
         run_command(
           [ $iscsiadm, '-m', 'discovery', '-t', 'sendtargets', '-p', $dp ],
+          outfunc => sub { push @lines, shift },
           errfunc => sub { },
           timeout => 20,
           quiet   => 1
         );
       };
-      print "Debug :: sendtargets -p $dp: $@\n" if $@ && $DEBUG >= 1;
+      if ( $DEBUG >= 1 ) {
+        if ( $@ ) {
+          chomp( my $e = $@ );
+          print "Debug :: sendtargets -p $dp: FAILED: $e\n";
+        } else {
+          my $out = @lines ? join( '; ', @lines ) : '(no output)';
+          print "Debug :: sendtargets -p $dp: OK, response: $out\n";
+        }
+      }
+      # Collect portals that sendtargets itself reported for this exact IQN.
+      # Format: "10.x.x.x:3260,2460 iqn.xxx"
+      my $iqn_lc = lc($iqn);
+      for my $line ( @lines ) {
+        next unless defined $line;
+        if ( $line =~ m/^(\S+)\s+(\S+)/i && lc($2) eq $iqn_lc ) {
+          my $portal = $1;
+          $portal =~ s/,[0-9]+\z//;    # strip TPGT
+          push @direct_portals, $portal unless $seen_dp{$portal}++;
+        }
+      }
     }
 
     if ( nimble_iscsi_node_portals_for_target($iqn) ) {
       print "Info :: \"$iqn\" discovered in node DB (sendtargets round $round).\n"
         if $round > 1 || $DEBUG >= 1;
       $in_node_db = 1;
+      last;
+    }
+
+    # Also exit early if sendtargets already told us the portal directly
+    if ( @direct_portals ) {
+      print "Info :: \"$iqn\" seen in sendtargets output (round $round); "
+        . "will login on direct portal(s): " . join(', ', @direct_portals) . "\n"
+        if $DEBUG >= 1;
+      $in_node_db = 1;    # treat as found — proceed to login
       last;
     }
 
@@ -2553,9 +2712,31 @@ sub nimble_iscsi_establish_volume_session {
   }
 
   # 3. Login to every portal the node DB has for this IQN.
-  #    iscsiadm -m node --targetname <iqn> lists the portals sendtargets recorded.
-  #    Login per-portal with -T + -p (same as TrueNAS _iscsi_login_all).
+  #    Fall back to portals collected directly from sendtargets output when the
+  #    node DB is empty (e.g. iscsiadm version/config that delays DB writes).
+  #    "-m node --login" needs a DB record to exist, so create one per portal
+  #    with "--op new" first — without it this fallback could never log in.
   my @node_portals = nimble_iscsi_node_portals_for_target($iqn);
+  if ( !@node_portals && @direct_portals ) {
+    print "Info :: Node DB empty for \"$iqn\"; creating node records for portals from sendtargets output: "
+      . join( ', ', @direct_portals ) . "\n";
+    for my $raw_portal ( @direct_portals ) {
+      my $portal = nimble_untaint_iscsiadm_scalar($raw_portal);
+      next unless length $portal;
+      eval {
+        run_command(
+          [ $iscsiadm, '-m', 'node', '-T', $iqn, '-p', $portal, '--op', 'new' ],
+          timeout => 15,
+          quiet   => 1
+        );
+      };
+      if ( $@ && $DEBUG >= 1 ) {
+        chomp( my $e = $@ );
+        print "Debug :: iscsiadm node --op new $iqn @ $portal: $e\n";
+      }
+    }
+    @node_portals = @direct_portals;
+  }
   if ( !@node_portals ) {
     warn "Warning :: No node DB records for \"$iqn\" after sendtargets. "
       . "Check: ACL for this node's initiator group on the Nimble, L3 path from this "
@@ -2600,14 +2781,29 @@ sub nimble_get_volume_collection_id {
   return undef;
 }
 
+# Look up a Nimble folder by name and return its id (or undef if not found).
+# API: GET v1/folders?name=<name>  — the `folders` object set is listed in the Nimble API
+# reference alongside volume_collections, pools, etc.  Each row has `id` and `name`.
+sub nimble_get_folder_id {
+  my ( $scfg, $name, $storeid ) = @_;
+  return undef if !defined $name || $name eq '';
+  my $enc  = uri_escape( $name );
+  my $r    = nimble_api_call( $scfg, 'GET', "folders?name=$enc", undef, $storeid );
+  my $list = nimble_data_as_list( $r->{ data } );
+  for my $f ( @$list ) {
+    return $f->{ id } if ref($f) eq 'HASH' && $f->{ name } eq $name;
+  }
+  return undef;
+}
+
 sub nimble_get_volume_id {
   my ( $scfg, $volname, $storeid ) = @_;
   my $name = nimble_volname( $scfg, $volname, undef );
   my $match = sub {
-    my ($list) = @_;
+    my ($list, $want) = @_;
     for my $v ( @$list ) {
       next unless ref($v) eq 'HASH' && defined $v->{ name };
-      return $v if $v->{ name } eq $name;
+      return $v if $v->{ name } eq $want;
     }
     return undef;
   };
@@ -2615,13 +2811,45 @@ sub nimble_get_volume_id {
   my $enc  = uri_escape($name);
   my $r    = nimble_api_call( $scfg, 'GET', "volumes?name=$enc", undef, $storeid );
   my $list = nimble_data_as_list( $r->{ data } );
-  my $vol  = $match->($list);
+  my $vol  = $match->($list, $name);
 
   if ( !$vol ) {
     $r    = nimble_api_call( $scfg, 'GET', 'volumes', undef, $storeid );
     $list = nimble_data_as_list( $r->{ data } );
-    $vol  = $match->($list);
+    $vol  = $match->($list, $name);
   }
+
+  # Opt-in fallback (nimble_legacy_name_fallback): if a volume prefix is configured and the
+  # prefixed name was not found, try the bare volname without the prefix.  This handles volumes
+  # that were created before the nimble_vnprefix was set (or imported outside of PVE) so they
+  # still exist on the array under their original name.  A clear warning is emitted so the
+  # operator knows the prefix mismatch exists and can rename volumes if desired.
+  # NOT enabled by default: this sub feeds every operation including resize and DELETE, so a
+  # silent fallback would let two prefix-separated storages on one array reach each other's
+  # bare-named volumes.
+  if ( !$vol && nimble_legacy_name_fallback_enabled($scfg) ) {
+    my $prefix = nimble_name_prefix( $scfg );
+    if ( length($prefix) && index( $name, $prefix ) == 0 ) {
+      my $bare = substr( $name, length($prefix) );
+      if ( length($bare) ) {
+        my $enc_bare = uri_escape($bare);
+        my $r2   = eval { nimble_api_call( $scfg, 'GET', "volumes?name=$enc_bare", undef, $storeid ) };
+        if ( $r2 ) {
+          my $list2 = nimble_data_as_list( $r2->{ data } );
+          $vol = $match->($list2, $bare);
+        }
+        if ( !$vol ) {
+          $vol = $match->($list, $bare);
+        }
+        if ( $vol ) {
+          warn "Warning :: Volume \"$volname\" found on array as \"$bare\" (without prefix \"$prefix\"). "
+            . "Consider renaming it to \"$name\" on the Nimble array to match the configured "
+            . "nimble_vnprefix, or clear the prefix in storage config.\n";
+        }
+      }
+    }
+  }
+
   return ( undef, undef ) unless $vol;
 
   # List/search often omit serial_number, target_name (per-volume iSCSI IQN), size, and
@@ -2657,8 +2885,30 @@ sub nimble_list_volumes {
   my @volumes;
   for my $v ( @$list ) {
     my $name = $v->{ name };
-    next if length( $prefix ) && index( $name, $prefix ) != 0;
-    my $volname = length( $prefix ) ? substr( $name, length( $prefix ) ) : $name;
+
+    # Primary match: name starts with configured prefix (or prefix is empty).
+    my $volname;
+    if ( !length($prefix) ) {
+      $volname = $name;
+    } elsif ( index( $name, $prefix ) == 0 ) {
+      $volname = substr( $name, length($prefix) );
+    } elsif ( nimble_legacy_name_fallback_enabled($scfg) ) {
+      # Opt-in fallback: volume was created before nimble_vnprefix was set (or imported outside
+      # PVE). Include it if the bare name looks like a PVE volume (vm-<id>-disk/cloudinit/state).
+      # Gated behind nimble_legacy_name_fallback — otherwise bare-named volumes would show up in
+      # EVERY prefix-separated storage on the same array at once.
+      if ( $name =~ m/^vm-\d+-(disk-|cloudinit|state-)/ ) {
+        $volname = $name;
+        print "Debug :: nimble_list_volumes: volume \"$name\" has no prefix \"$prefix\" — "
+          . "created before nimble_vnprefix was configured. Showing without prefix.\n"
+          if $DEBUG >= 2;
+      } else {
+        next;
+      }
+    } else {
+      next;
+    }
+
     next unless $volname =~ m/^vm-\d+-(disk-|cloudinit|state-)/;
     my ( undef, undef, $volvm ) = $class->parse_volname( $volname );
     # List endpoint sometimes omits size (returns 0) and/or times used for the GUI Date column.
@@ -2722,7 +2972,10 @@ sub nimble_get_volume_info {
   return undef unless $vol;
   my $array_name = $vol->{ name };
   my $prefix     = nimble_name_prefix( $scfg );
-  $array_name = substr( $array_name, length( $prefix ) ) if length( $prefix );
+  # Only strip the prefix if the array name actually starts with it (fallback lookup
+  # may have found a bare-named volume that doesn't carry the prefix).
+  $array_name = substr( $array_name, length( $prefix ) )
+    if length($prefix) && index( $array_name, $prefix ) == 0;
   return {
     name         => $array_name,
     serial       => $vol->{ serial_number },
@@ -2743,6 +2996,33 @@ sub size_bytes_to_mb {
   return $size_mb < 1 ? 1 : $size_mb;
 }
 
+# Apply nimble_limit_iops / nimble_limit_mbps from storage config to a volume API request body.
+# Called before POST volumes (create and clone). -1 means unlimited (omitted).
+# Constraint: if both are set, limit_iops <= (limit_mbps * 1048576 / block_size).
+# The plugin does not enforce this — the array will reject invalid combinations with an error.
+sub nimble_apply_qos_to_body {
+  my ( $scfg, $body ) = @_;
+  my $iops = $scfg->{ nimble_limit_iops };
+  my $mbps = $scfg->{ nimble_limit_mbps };
+  if ( defined $iops && $iops =~ /^-?\d+$/ ) {
+    my $n = $iops + 0;
+    if ( $n >= 256 ) {
+      $body->{ limit_iops } = $n;
+    } elsif ( $n > 0 ) {
+      # Below the array minimum: silently ignoring would cost the operator a confused hour.
+      warn "Warning :: nimble_limit_iops=$n is below the Nimble minimum of 256; NO IOPS limit will be applied. Use 256 or higher, or -1 for unlimited.\n";
+    }
+  }
+  if ( defined $mbps && $mbps =~ /^-?\d+$/ ) {
+    my $n = $mbps + 0;
+    if ( $n >= 1 ) {
+      $body->{ limit_mbps } = $n;
+    } elsif ( $n == 0 ) {
+      warn "Warning :: nimble_limit_mbps=0 is not a valid limit; NO throughput limit will be applied. Use 1 or higher, or -1 for unlimited.\n";
+    }
+  }
+}
+
 sub nimble_create_volume {
   my ( $class, $scfg, $volname, $size_bytes, $storeid ) = @_;
   my $name    = nimble_volname( $scfg, $volname, undef );
@@ -2750,11 +3030,38 @@ sub nimble_create_volume {
   my $body = { name => $name, size => $size_mb, multi_initiator => JSON::XS::true };
   # Note: the API body key stays `pool_name` (Nimble REST parameter); only the config key is nimble_-prefixed.
   $body->{ pool_name } = $scfg->{ nimble_pool_name } if $scfg->{ nimble_pool_name };
+  nimble_apply_qos_to_body( $scfg, $body );
+
+  # Resolve folder name → folder_id and pass it to the create body.
+  # POST v1/volumes accepts `folder_id` (the Nimble API field name); the plugin config key is
+  # `nimble_folder` (the human-readable folder name). The operator explicitly asked for a folder,
+  # so a missing/unresolvable folder is an error — silently creating in root would scatter volumes.
+  if ( $scfg->{ nimble_folder } ) {
+    my $folder_id = eval { nimble_get_folder_id( $scfg, $scfg->{ nimble_folder }, $storeid ) };
+    if ( $@ ) {
+      chomp( my $e = $@ );
+      die "Error :: Could not look up Nimble folder \"$scfg->{ nimble_folder }\": $e\n";
+    }
+    die "Error :: Nimble folder \"$scfg->{ nimble_folder }\" not found (GET v1/folders returned no match). Create it on the array or remove nimble_folder from the storage config.\n"
+      unless $folder_id;
+    $body->{ folder_id } = $folder_id;
+    print "Info :: Volume \"$volname\" will be created in folder \"$scfg->{ nimble_folder }\" (id=$folder_id).\n"
+      if $DEBUG >= 1;
+  }
+
   my $r      = nimble_api_call( $scfg, 'POST', 'volumes', $body, $storeid );
   my $vol    = $r->{ data } || $r;
   my $serial = $vol->{ serial_number } or die "Error :: No serial_number in create response\n";
   $vol->{ id } or die "Error :: No id in create response\n";
-  print "Info :: Volume \"$volname\" created (serial=$serial).\n";
+  my $qos_info = '';
+  if ( defined $body->{ limit_iops } || defined $body->{ limit_mbps } ) {
+    $qos_info = join( ', ',
+      ( defined $body->{ limit_iops } ? "IOPS=$body->{limit_iops}" : () ),
+      ( defined $body->{ limit_mbps } ? "MBPS=$body->{limit_mbps}" : () ),
+    );
+    $qos_info = " [QoS: $qos_info]";
+  }
+  print "Info :: Volume \"$volname\" created (serial=$serial)$qos_info.\n";
   my $create_err;
   eval {
     my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
@@ -2998,10 +3305,12 @@ sub nimble_rename_volume {
 
 sub nimble_snapshot_create {
   my ( $class, $scfg, $storeid, $volname, $snap_name ) = @_;
-  my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
+  my ( $vol_id, $vol ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   die "Error :: Volume \"$volname\" not found\n" unless $vol_id;
-  # Full snapshot name on array: prefix + volname + .snap-<name> (nimble_volname normalizes veeam_ → veeam-, adds snap-)
-  my $snap_full_name = nimble_volname( $scfg, $volname, $snap_name );
+  # Full snapshot name on array: actual array base + .snap-<name>. With nimble_legacy_name_fallback,
+  # prefix-less volumes get snapshots named after their real array name (e.g. "vm-111-disk-0.snap-foo"
+  # not "pve-vm-111-disk-0.snap-foo"). $vol->{name} from the lookup above skips a second API query.
+  my $snap_full_name = nimble_actual_array_volname( $scfg, $volname, $snap_name, $storeid, $vol->{ name } );
   nimble_api_call( $scfg, 'POST', 'snapshots', { vol_id => $vol_id, name => $snap_full_name }, $storeid );
   print "Info :: Snapshot \"$snap_name\" created for volume \"$volname\".\n";
   return 1;
@@ -3030,7 +3339,7 @@ sub nimble_snapshot_delete {
       $snap_id = $best->{ id } if $best;
     }
   } else {
-    my $snap_full = nimble_volname( $scfg, $volname, $snap_name );
+    my $snap_full = nimble_actual_array_volname( $scfg, $volname, $snap_name, $storeid );
     my $enc  = uri_escape( $snap_full );
     my $r    = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
     my $list = nimble_data_as_list( $r->{ data } );
@@ -3070,7 +3379,8 @@ sub nimble_volume_restore {
     die "Error :: Nimble snapshot for \"$svolname\" at time $target_ts not found\n" unless $best;
     $snap_id = $best->{ id };
   } else {
-    my $snap_full = nimble_volname( $scfg, $svolname, $snap );
+    # Same name resolution as nimble_snapshot_create (legacy bare-named volumes included).
+    my $snap_full = nimble_actual_array_volname( $scfg, $svolname, $snap, $storeid );
     my $enc  = uri_escape( $snap_full );
     my $r    = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
     my $list = nimble_data_as_list( $r->{ data } );
@@ -3106,7 +3416,10 @@ sub nimble_volume_restore {
 # Create a new volume from a snapshot (clone). API: POST volumes with clone=true, name, base_snap_id.
 sub nimble_clone_from_snapshot {
   my ( $class, $scfg, $storeid, $new_volname, $source_volname, $snap_name ) = @_;
-  my $snap_full = nimble_volname( $scfg, $source_volname, $snap_name );
+  print "Info :: Cloning \"$source_volname\" (snap \"$snap_name\") → \"$new_volname\" on Nimble array...\n";
+  # Same name resolution as nimble_snapshot_create, so snapshots of legacy bare-named volumes
+  # (nimble_legacy_name_fallback) are found under the name they were created with.
+  my $snap_full = nimble_actual_array_volname( $scfg, $source_volname, $snap_name, $storeid );
   my $enc       = uri_escape( $snap_full );
   my $r         = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
   my $list      = nimble_data_as_list( $r->{ data } );
@@ -3116,12 +3429,25 @@ sub nimble_clone_from_snapshot {
   }
   die "Error :: Snapshot \"$snap_name\" not found for volume \"$source_volname\".\n" unless $snap_id;
   my $name_on_array = nimble_volname( $scfg, $new_volname, undef );
+  print "Info :: Sending clone request to array (instant server-side copy)...\n";
+  # No folder_id here on purpose: a Nimble clone is created in the base snapshot's pool/folder,
+  # so clones inherit the parent volume's folder rather than nimble_folder from storage config.
   my $body = { clone => JSON::XS::true, name => $name_on_array, base_snap_id => $snap_id, multi_initiator => JSON::XS::true };
+  nimble_apply_qos_to_body( $scfg, $body );
   $r = nimble_api_call( $scfg, 'POST', 'volumes', $body, $storeid );
   my $vol = $r->{ data } || $r;
   my $vol_id = $vol->{ id } or die "Error :: Clone did not return volume id.\n";
+  # Report QoS limits applied if any
+  if ( defined $body->{ limit_iops } || defined $body->{ limit_mbps } ) {
+    my $qos = join( ', ',
+      ( defined $body->{ limit_iops } ? "IOPS=$body->{limit_iops}" : () ),
+      ( defined $body->{ limit_mbps } ? "MBPS=$body->{limit_mbps}" : () ),
+    );
+    print "Info :: QoS limits applied to clone \"$new_volname\": $qos\n";
+  }
   my $clone_err;
   eval {
+    print "Info :: Granting iSCSI access to clone \"$new_volname\"...\n";
     my $ig_id = nimble_ensure_initiator_group_id( $scfg, $storeid );
     nimble_post_access_control_record_idempotent( $scfg, $vol_id, $ig_id, $storeid );
     if ( $scfg->{ nimble_volume_collection } ) {
@@ -3138,7 +3464,7 @@ sub nimble_clone_from_snapshot {
     nimble_volume_offline_then_delete_best_effort( $scfg, $vol_id, $storeid, $new_volname );
     die $clone_err;
   }
-  print "Info :: Cloned volume \"$new_volname\" from \"$source_volname\" snapshot \"$snap_name\".\n";
+  print "Info :: Clone complete: \"$new_volname\" is ready (array-side instant copy — no data moved on host).\n";
   return 1;
 }
 
@@ -3432,7 +3758,7 @@ sub nimble_sync_array_snapshots {
     my $vname = nimble_snapshot_effective_vol_name( $s, undef );
     next unless length($vname) && exists $vol_map{ $vname };
     next
-      if nimble_array_snapshot_is_pve_ui_snapshot( $scfg, $vol_map{ $vname }{ volname }, $s->{ name } // '' );
+      if nimble_array_snapshot_is_pve_ui_snapshot( $scfg, $vol_map{ $vname }{ volname }, $s->{ name } // '', $vname );
     my $vmid = $vol_map{ $vname }{ vmid };
     my $ctime = nimble_snapshot_effective_creation_time($s);
     push @{ $by_vmid{ $vmid }{ $vname } }, {
@@ -3919,7 +4245,7 @@ sub volume_snapshot_rollback {
 sub volume_rollback_is_possible {
   my ( $class, $scfg, $storeid, $volname, $snap, $blockers ) = @_;
   my $ok = eval {
-    my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
+    my ( $vol_id, $vol ) = nimble_get_volume_id( $scfg, $volname, $storeid );
     die "Error :: Volume \"$volname\" not found\n" unless $vol_id;
 
     if ( $snap =~ /^nimble(\d+)$/ ) {
@@ -3938,7 +4264,8 @@ sub volume_rollback_is_possible {
       }
       die "Error :: Snapshot \"$snap\" not found for volume \"$volname\"\n" unless $best;
     } else {
-      my $snap_full = nimble_volname( $scfg, $volname, $snap );
+      # Same name resolution as nimble_snapshot_create; $vol->{name} skips a second lookup.
+      my $snap_full = nimble_actual_array_volname( $scfg, $volname, $snap, $storeid, $vol->{ name } );
       my $enc  = uri_escape( $snap_full );
       my $r    = nimble_api_call( $scfg, 'GET', "snapshots?name=$enc", undef, $storeid );
       my $list = nimble_data_as_list( $r->{ data } );
@@ -3980,14 +4307,15 @@ sub nimble_snapshot_virtual_size_bytes {
 # (prefix+volname+.snap-name); array-created snaps fall back to nimble<epoch> (nimble_sync_array_snapshots).
 sub volume_snapshot_info {
   my ( $class, $scfg, $storeid, $volname ) = @_;
-  my ( $vol_id ) = nimble_get_volume_id( $scfg, $volname, $storeid );
+  my ( $vol_id, $vol ) = nimble_get_volume_id( $scfg, $volname, $storeid );
   return {} unless $vol_id;
   my $enc_vid = uri_escape($vol_id);
   my $r = eval { nimble_api_call( $scfg, 'GET', "snapshots?vol_id=$enc_vid", undef, $storeid ) };
   return {} unless $r;
   my $list = nimble_data_as_list( $r->{ data } );
-  # Compute the array-side base name (prefix + volname, no snap suffix) once.
-  my $sep = nimble_volname( $scfg, $volname ) . '.';
+  # Array-side base name via the actual array volume name (handles prefix-less legacy volumes
+  # when nimble_legacy_name_fallback is on); $vol->{name} skips a second API lookup.
+  my $sep = nimble_actual_array_volname( $scfg, $volname, undef, $storeid, $vol->{ name } ) . '.';
   my %info;
   my %snap_coll_cache;
   for my $s ( @$list ) {

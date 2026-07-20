@@ -29,6 +29,8 @@ Read this first when resuming work. **Operators:** use [README.md](../README.md)
 
 ### Partial / needs validation
 
+- **Web GUI panel (PR #9 lineage):** `www/NimbleEdit.js` registers "HPE Nimble" in the storage Add dropdown / Edit dialog; installed to `/usr/share/pve-manager/js/`, script tag injected into `index.html.tpl` by `debian/postinst` and kept alive across pve-manager upgrades via a dpkg file trigger (`debian/triggers`). Needs validation on a real PVE node. See `docs/GUI_ADD_EDIT_STORAGE.md`.
+- **QoS (`nimble_limit_iops`/`nimble_limit_mbps`), `nimble_folder`, discovery override, legacy name fallback:** implemented (PR #9 lineage, reworked: override + fallback are opt-in booleans; folder-not-found dies; legacy resolution unified across snapshot create/clone/rollback/restore). Needs validation against a live array.
 - **RAM snapshots (vmstate):** `nimble_resolve_block_path_for_volname` activates/maps if `path()` runs before the LUN is visible — confirm on PVE 9.2+ with RAM enabled.
 - **LXC `rootdir`:** implemented; exercise on your array if you rely on it.
 - **`volume_collection`:** applied on **new** volumes/clones via storage config; normal snapshots OK in testing.
@@ -66,7 +68,14 @@ Canonical keys are **`nimble_`-prefixed** since v0.0.25: `nimble_address`, `user
 `nimble_api_credentials` reads priv file first, legacy cfg line as fallback), optional `port`
 (default 5392), `nimble_initiator_group`, `nimble_vnprefix`, `nimble_pool_name`,
 `nimble_volume_collection`, `nimble_check_ssl`, `nimble_token_ttl`, `nimble_debug`,
-`nimble_auto_iscsi_discovery` (default **on**), `nimble_iscsi_discovery_ips`, `content` (default
+`nimble_auto_iscsi_discovery` (default **on**), `nimble_iscsi_discovery_ips`,
+`nimble_iscsi_discovery_override` (opt-in: use ONLY the configured discovery IPs, skip subnets/
+network_interfaces APIs), `nimble_folder` (create new volumes in this array folder; dies if the
+folder does not exist; clones inherit the parent's folder), `nimble_limit_iops` /
+`nimble_limit_mbps` (QoS on POST volumes for create + clone; -1 = unlimited; sub-minimum values
+warn and are omitted), `nimble_legacy_name_fallback` (opt-in: also resolve bare un-prefixed
+volume names — never enable on multiple prefix-separated storages sharing one array; feeds
+resize/DELETE too), `content` (default
 `images`, `rootdir`, `none`). Legacy pre-v0.0.25 spellings (`address`, `vnprefix`, …; map:
 `%NIMBLE_LEGACY_CONFIG_KEYS`) still parse and are **canonicalized in-memory by `check_config`**
 (legacy key deleted, canonical wins if both present) — internal code reads ONLY canonical keys.
