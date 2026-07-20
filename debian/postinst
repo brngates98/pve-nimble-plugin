@@ -43,23 +43,18 @@ inject_gui_script() {
   sed -i "s|</head>|${tag}\n  </head>|" "$tpl"
 }
 
-remove_gui_script() {
-  local tpl="/usr/share/pve-manager/index.html.tpl"
-  local marker="NimbleEdit.js"
-
-  if [ ! -f "$tpl" ]; then
-    return 0
-  fi
-
-  sed -i "/${marker}/d" "$tpl"
-}
-
 case "$1" in
   configure)
     inject_gui_script
     if [ -d /run/systemd/system ]; then
       restart_pve_stack
     fi
+    ;;
+  triggered)
+    # dpkg file trigger (debian/triggers): pve-manager upgrades replace index.html.tpl and wipe
+    # our script tag — re-inject automatically instead of requiring a plugin reinstall.
+    # No pveproxy restart here: pve-manager's own postinst restarts it during the same run.
+    inject_gui_script
     ;;
   abort-upgrade|abort-remove|abort-deconfigure)
     ;;

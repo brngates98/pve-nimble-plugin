@@ -64,14 +64,18 @@ During `.deb` removal, `debian/postrm`:
 5. Optional fields:
    - **Volume Name Prefix**: Prefix for volume names (default: `pve`)
    - **Pool Name**: Nimble pool for new volumes (default: array's default pool)
+   - **Folder**: Nimble folder for new volumes (default: root; creation fails if the folder does not exist on the array)
    - **Initiator Group**: Pre-existing initiator group (default: auto-created from IQN)
 6. Advanced settings (expand the Advanced tab):
    - **Volume Collection**: Add new volumes to this collection (applies array-side protection schedules)
-   - **Extra Discovery IPs**: Additional iSCSI portals (comma-separated)
+   - **Discovery Portals**: Additional iSCSI discovery portals (comma-separated), merged with portals auto-detected from the Nimble subnets API
+   - **Discovery Override**: Use **only** the Discovery Portals above; skip the Nimble subnets/network_interfaces APIs (default: off). Use when the array reports subnets this host cannot reach and sendtargets times out
    - **Session Token TTL**: API session token lifetime in seconds (default: 3600)
    - **Debug Level**: 0=off, 1=basic, 2=verbose, 3=trace (default: 0)
    - **Verify TLS Certificate**: Enable/disable TLS verification (default: disabled)
    - **Auto iSCSI Discovery**: Automatically discover and login to iSCSI targets (default: enabled)
+   - **IOPS Limit / Throughput Limit MB/s**: QoS limits applied to newly created volumes and clones (default: unlimited; IOPS minimum is 256)
+   - **Legacy Name Fallback**: Also resolve volumes by their bare un-prefixed array name (default: off). **Caution:** do not enable on multiple storages that share one array separated only by prefix
 7. Click **Add**
 
 ### Editing Nimble Storage
@@ -97,13 +101,18 @@ During `.deb` removal, `debian/postrm`:
 | Enable | `disable` | No | Default: enabled |
 | Volume Name Prefix | `nimble_vnprefix` | No | Default: `pve` |
 | Pool Name | `nimble_pool_name` | No | Default: array's default pool |
+| Folder | `nimble_folder` | No | Default: root folder |
 | Initiator Group | `nimble_initiator_group` | No | Default: auto-created from IQN |
 | Volume Collection | `nimble_volume_collection` | No | Default: none |
-| Extra Discovery IPs | `nimble_iscsi_discovery_ips` | No | Comma-separated list |
+| Discovery Portals | `nimble_iscsi_discovery_ips` | No | Comma-separated list, merged with API-discovered portals |
+| Discovery Override | `nimble_iscsi_discovery_override` | No | Default: off. Use only the configured portals, skip the Nimble subnets API |
 | Session Token TTL | `nimble_token_ttl` | No | Default: 3600 |
 | Debug Level | `nimble_debug` | No | Default: 0 |
 | Verify TLS Certificate | `nimble_check_ssl` | No | Default: disabled (0) |
 | Auto iSCSI Discovery | `nimble_auto_iscsi_discovery` | No | Default: enabled (1) |
+| IOPS Limit (new volumes) | `nimble_limit_iops` | No | Default: -1 (unlimited); minimum 256 |
+| Throughput Limit MB/s | `nimble_limit_mbps` | No | Default: -1 (unlimited); minimum 1 |
+| Legacy Name Fallback | `nimble_legacy_name_fallback` | No | Default: off. Also resolve bare un-prefixed volume names |
 
 ## Manual Override
 
@@ -141,12 +150,12 @@ Password should be placed in `/etc/pve/priv/storage/nimble1.pw` (v0.0.25+) for c
 
 ### pve-manager upgrades overwrite `index.html.tpl`
 
-- The `debian/postinst` script is idempotent and automatically re-injects the tag
-- After a `pve-manager` upgrade, reinstall or reconfigure the Nimble plugin package:
+- The package registers a **dpkg file trigger** (`debian/triggers`) on `/usr/share/pve-manager/index.html.tpl`: whenever a `pve-manager` upgrade replaces the template, `postinst` runs again in `triggered` mode and re-injects the script tag automatically — no manual step needed
+- If the tag is ever missing anyway (e.g. the template was edited by hand outside dpkg), re-inject manually:
   ```bash
-  apt-get install --reinstall libpve-storage-nimble-perl
-  # or
   dpkg-reconfigure libpve-storage-nimble-perl
+  # or
+  apt-get install --reinstall libpve-storage-nimble-perl
   ```
 
 ### Password not saved on Edit

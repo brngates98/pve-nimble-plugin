@@ -7,7 +7,7 @@
 set -euo pipefail
 
 readonly TARGET='/usr/share/perl5/PVE/Storage/Custom/NimbleStoragePlugin.pm'
-readonly DEFAULT_URL='https://raw.githubusercontent.com/rootcascadee/pve-nimble-plugin/refs/heads/main/NimbleStoragePlugin.pm'
+readonly DEFAULT_URL='https://raw.githubusercontent.com/brngates98/pve-nimble-plugin/main/NimbleStoragePlugin.pm'
 PLUGIN_URL="${PLUGIN_URL:-$DEFAULT_URL}"
 REMOTES="${REMOTES:-pve001 pve003}"
 THIS="$(hostname -s 2>/dev/null || hostname)"

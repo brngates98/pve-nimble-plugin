@@ -98,8 +98,13 @@ Use `images` only if you do not want LXC root disks on this store. Then in the P
 | `nimble_initiator_group` | No | Existing Nimble initiator group name shared by all cluster nodes. If omitted, the plugin auto-creates a per-node group `pve-<nodename>` using this node's IQN. |
 | `nimble_auto_iscsi_discovery` | No | Default `yes`. Runs iSCSI discovery and login when storage activates. Set to `no` to disable. |
 | `nimble_iscsi_discovery_ips` | No | Extra discovery portals (comma-separated) beyond what the Nimble subnets API returns. |
+| `nimble_iscsi_discovery_override` | No | Default `no`. When `yes`, use **only** `nimble_iscsi_discovery_ips` for discovery and skip the Nimble subnets/network_interfaces APIs — pins discovery to known-reachable portals when the array reports subnets this host cannot reach (VLAN/firewall). |
 | `nimble_vnprefix` | No | Prefix added to all volume names on the array |
+| `nimble_legacy_name_fallback` | No | Default `no`. When `yes`, volumes not found under `nimble_vnprefix`+name are also looked up by their bare name, so volumes created before the prefix was configured stay manageable (snapshots, clones, resize, delete). **Caution:** do not enable on multiple storages that share one array separated only by prefix — bare-named volumes become reachable (and deletable) from every such storage. |
 | `nimble_pool_name` | No | Nimble pool for new volumes |
+| `nimble_folder` | No | Nimble folder name — new volumes are created inside this folder (clones inherit the parent's folder). Volume creation fails if the folder does not exist on the array. |
+| `nimble_limit_iops` | No | IOPS limit applied to new volumes and clones (`limit_iops` on the array). `256`–`4294967294`, or `-1` for unlimited (default). Does not change existing volumes. |
+| `nimble_limit_mbps` | No | Throughput limit in MB/s applied to new volumes and clones (`limit_mbps`). `1`–`4294967294`, or `-1` for unlimited (default). Does not change existing volumes. |
 | `nimble_volume_collection` | No | Volume collection name. New volumes are added to this collection for array-side snapshot schedules. |
 | `nimble_check_ssl` | No | Default `no`. Set to `yes` to verify TLS certificates. |
 | `nimble_token_ttl` | No | Session token cache TTL in seconds (default `3600`) |

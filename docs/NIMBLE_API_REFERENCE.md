@@ -170,7 +170,7 @@ The plugin uses **subnets** (and optional **network_interfaces** fallback) to bu
 | List initiator groups | GET | initiator_groups?name=... | — |
 | Create initiator group | POST | initiator_groups | name, access_protocol, iscsi_initiators |
 | List volumes | GET | volumes or volumes?name=... | — |
-| Create volume | POST | volumes | name, size, optional pool_name |
+| Create volume | POST | volumes | name, size, optional pool_name, folder_id (from `nimble_folder` lookup), limit_iops / limit_mbps (from `nimble_limit_iops` / `nimble_limit_mbps`; iops >= 256, mbps >= 1, -1 = unlimited/omitted) |
 | Update volume | PUT | volumes/:id | size, name, or volcoll_id (to add/remove from volume collection) |
 | Delete volume | DELETE | volumes/:id | — |
 | List volume collections | GET | volume_collections or volume_collections?name=... | — |

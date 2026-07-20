@@ -158,17 +158,27 @@ Ext.define('PVE.storage.NimbleInputPanel', {
         deleteEmpty: !me.isCreate,
       },
       {
-        // Comma-separated list of iSCSI discovery portals (host or host:port).
-        // When set, ONLY these IPs are used for sendtargets — the Nimble subnets
-        // API is not queried. Leave empty to auto-detect from the array.
+        // Comma-separated list of extra iSCSI discovery portals (host or host:port),
+        // merged with portals auto-detected from the Nimble subnets API. With the
+        // "Discovery Override" checkbox, ONLY these IPs are used (API skipped).
         // Accepts any mix of formats: 10.0.0.1  or  10.0.0.1:3260
         // Multiple portals: 10.0.0.1,10.0.0.2  or  10.0.0.1:3260,10.0.0.2:3260
-        // or  10.0.0.1,10.0.0.2:3260  or  10.0.0.1:3260,10.0.0.2
         xtype: 'textfield',
         name: 'nimble_iscsi_discovery_ips',
         fieldLabel: 'Discovery Portals',
-        emptyText: 'e.g. 10.0.0.1,10.0.0.2:3260  (leave empty to auto-detect)',
+        emptyText: 'e.g. 10.0.0.1,10.0.0.2:3260  (merged with auto-detected)',
         allowBlank: true,
+      },
+      {
+        // Opt-in: use ONLY the portals above; skip the Nimble subnets/network_interfaces
+        // APIs so unreachable API-reported subnets cannot cause sendtargets timeouts.
+        xtype: 'proxmoxcheckbox',
+        name: 'nimble_iscsi_discovery_override',
+        fieldLabel: 'Discovery Override',
+        boxLabel: gettext('Use only the portals above'),
+        uncheckedValue: 0,
+        checked: false,
+        deleteEmpty: !me.isCreate,
       },
     ];
 
@@ -216,6 +226,18 @@ Ext.define('PVE.storage.NimbleInputPanel', {
         allowBlank: true,
         deleteEmpty: !me.isCreate,
       },
+      {
+        // Opt-in: also resolve volumes by their bare un-prefixed array name (volumes created
+        // before the Volume Name Prefix was set). CAUTION: do not enable on multiple storages
+        // that share one array separated only by prefix.
+        xtype: 'proxmoxcheckbox',
+        name: 'nimble_legacy_name_fallback',
+        fieldLabel: 'Legacy Name Fallback',
+        boxLabel: gettext('Manage pre-prefix volumes'),
+        uncheckedValue: 0,
+        checked: false,
+        deleteEmpty: !me.isCreate,
+      },
     ];
 
     me.callParent();
@@ -227,7 +249,12 @@ Ext.define('PVE.storage.NimbleInputPanel', {
 // and enables the Edit dialog.
 // ---------------------------------------------------------------------------
 (function () {
-  if (typeof PVE === 'undefined' || !PVE.Utils) { return; }
+  if (typeof PVE === 'undefined' || !PVE.Utils) {
+    // Load-order failure must not be invisible: without this registration, "HPE Nimble"
+    // silently disappears from the Add dropdown and Edit shows a blank dialog.
+    console.error('NimbleEdit.js: PVE.Utils not defined — script loaded before pvemanagerlib.js? "HPE Nimble" storage panel not registered.');
+    return;
+  }
   if (!PVE.Utils.storageSchema) { PVE.Utils.storageSchema = {}; }
   PVE.Utils.storageSchema['nimble'] = {
     name: 'Nimble',

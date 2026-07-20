@@ -4,10 +4,10 @@ This document explains how the Nimble storage plugin integrates with the Proxmox
 
 ## How Proxmox UI Configuration Works
 
-Proxmox VE dynamically generates the storage configuration UI based on the `properties()` and `options()` methods defined in the plugin class (`NimbleStoragePlugin.pm`).
+Proxmox VE does **not** auto-generate storage dialogs from the plugin schema. The backend (`properties()` / `options()` in `NimbleStoragePlugin.pm`) defines what the **API** accepts and validates; the form fields shown in the browser come from a hand-written ExtJS panel — that is why this plugin ships `www/NimbleEdit.js`. A new config key therefore needs **both** a backend declaration and a matching field in `NimbleEdit.js` to be editable from the GUI (keys without a GUI field remain settable via `pvesm set`).
 
 ### 1. The `properties()` Method
-The `properties()` method is the source of truth for the Web UI. Any key returned in this hash will result in a corresponding input field in the Proxmox "Add Storage" or "Edit Storage" dialog.
+The `properties()` method is the schema source of truth. Any key declared here (and referenced in `options()`) is accepted and validated by the PVE storage API (`pvesm` / `POST /api2/…/storage`).
 
 **Current Implementation in `NimbleStoragePlugin.pm`:**
 The plugin defines a `canonical` set of properties. For example:
@@ -35,7 +35,7 @@ nimble_pool_name => { optional => 1 }, # Allows the field to be empty
 
 ## How to Add New UI-Configurable Parameters
 
-If you want to add a new setting (e.g., a toggle to disable auto-discovery) that is editable via the Web UI, follow these steps:
+If you want to add a new setting (e.g., a toggle to disable auto-discovery) that is editable via the Web UI, follow these steps (Steps 1–3 make it work via API/`pvesm`; Step 4 exposes it in the GUI):
 
 ### Step 1: Update `properties()`
 Add the new key to the `$canonical` hash in the `properties()` method.
@@ -63,6 +63,9 @@ if ($scfg->{ nimble_disable_auto_discovery } eq 'yes' ) {
 }
 ```
 
+### Step 4: Add a Field to `www/NimbleEdit.js`
+Add a matching ExtJS field to `PVE.storage.NimbleInputPanel` (e.g. a `proxmoxcheckbox` in `advancedColumn2`) so the option appears in the Add/Edit dialog. Without this the option only works via `pvesm set <id> --nimble_disable_auto_discovery yes`.
+
 ---
 
 ## Troubleshooting UI Visibility
@@ -77,4 +80,5 @@ If a property is not appearing in the Web UI, check the following:
 3.  **Schema Validation**: Ensure the `type` specified in `properties()` (`string`, `integer`, `boolean`) matches the expected input.
 
 ## Summary of Configuration Flow
-**Web UI Change** $\rightarrow$ **`pveproxy` (API)** $\rightarrow$ **`storage.cfg` (Disk)** $\rightarrow$ **`NimbleStoragePlugin::check_config` (Plugin)** $\rightarrow$ **Internal `$scfg` hash**.
+
+**Web UI Change** → **`pveproxy` (API)** → **`storage.cfg` (Disk)** → **`NimbleStoragePlugin::check_config` (Plugin)** → **Internal `$scfg` hash**.
