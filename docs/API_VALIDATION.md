@@ -1,7 +1,9 @@
 # Nimble REST API Validation
 
 This document validates the API calls in `NimbleStoragePlugin.pm` against the **HPE Nimble Storage REST API Reference Version 5.1.1.0** (and v1 base path).  
-Reference: [REST API](https://support.hpe.com/docs/display/public/nmtp352en_us/wzk1480348939804.html). In-repo spec: `docs/NIMBLE_API_REFERENCE.md`.
+Reference: [REST API 5.1.1.0](https://support.hpe.com/docs/display/public/nmtp352en_us/wzk1480348939804.html). In-repo spec: `docs/NIMBLE_API_REFERENCE.md`.
+
+**Arrays:** HPE Nimble and **HPE Alletra 5000/6000**. Alletra 5000 and 6000 run NimbleOS and use this same v1 API on port 5392. The paths below were also checked against [REST API Reference 5.3.2.0](https://support.hpe.com/docs/display/public/nmtp350en_us/index.html): restore (`id` + `base_snap_id`), clone (`clone` + `name` + `base_snap_id`), and create attributes `folder_id`, `limit_iops`, `limit_mbps`, and `multi_initiator` are unchanged. `pool_id` is still the documented create field; the plugin still sends `pool_name`, which arrays accept in practice.
 
 ---
 

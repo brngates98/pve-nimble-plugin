@@ -13,7 +13,7 @@ The `properties()` method is the schema source of truth. Any key declared here (
 The plugin defines a `canonical` set of properties. For example:
 ```perl
 nimble_address => {
-  description => "HPE Nimble array management IP or DNS name.",
+  description => "HPE Nimble or Alletra 5000/6000 array management IP or DNS name.",
   type        => 'string'
 },
 nimble_iscsi_discovery_ips => {

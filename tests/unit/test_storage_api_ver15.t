@@ -55,6 +55,9 @@ sub set_pve_storage_api {
   *PVE::Storage::APIAGE = sub { $apiage };
 }
 
+set_pve_storage_api( 15, 6 );
+is( $class->api(), 15, 'api() reports 15 when host APIVER is 15' );
+
 set_pve_storage_api( 14, 5 );
 is( $class->api(), 14, 'api() reports 14 when host APIVER is 14' );
 
@@ -64,8 +67,8 @@ is( $class->api(), 13, 'api() reports 13 when host APIVER is 13 (backward compat
 set_pve_storage_api( 18, 5 );
 is(
   $class->api(),
-  14,
-  'api() reports tested 14 when host APIVER is newer but within APIAGE window',
+  15,
+  'api() reports tested 15 when host APIVER is newer but within APIAGE window',
 );
 
 is(
@@ -115,7 +118,7 @@ eval { $class->volume_resize( {}, 'nimble1', 'vm-100-disk-0', 1024 * 1024 * 1024
 like(
   $@,
   qr/Resizing a snapshot is not supported/,
-  'volume_resize dies when snapname is set (API 14)',
+  'volume_resize dies when snapname is set (API 15)',
 );
 
 {

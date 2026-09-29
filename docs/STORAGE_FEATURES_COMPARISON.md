@@ -1,6 +1,6 @@
 # Storage Features Comparison
 
-This document compares the **HPE Nimble Storage plugin** (`nimble`) for Proxmox VE with other common storage types: NFS, LVM/LVM-thin, standard iSCSI, and Ceph RBD. The Nimble plugin supports **VM disks** and **LXC container storage** (`rootdir`) on raw volumes when `content` includes `rootdir`.
+This document compares the **HPE Nimble Storage plugin** (`nimble`) for Proxmox VE with other common storage types: NFS, LVM/LVM-thin, standard iSCSI, and Ceph RBD. The plugin supports **VM disks** and **LXC container storage** (`rootdir`) on raw volumes when `content` includes `rootdir`. **HPE Alletra 5000 and Alletra 6000** use this plugin as well: they run NimbleOS and present the same REST API and iSCSI LUNs.
 
 The **feature** and **content type** tables below are also copied in the root **[README.md](../README.md)** for visibility. Update **both** places when you change those tables (see [CONTRIBUTING.md](../CONTRIBUTING.md#documentation)).
 
@@ -54,7 +54,7 @@ The **feature** and **content type** tables below are also copied in the root **
 
 ### Nimble plugin (`nimble`)
 
-- **What it is:** PVE storage plugin for HPE Nimble arrays. Uses the Nimble REST API to create and manage volumes and presents them as iSCSI LUNs to Proxmox.
+- **What it is:** PVE storage plugin for HPE Nimble and HPE Alletra 5000/6000 arrays. Uses the NimbleOS REST API to create and manage volumes and presents them as iSCSI LUNs to Proxmox.
 - **Content:** VM disks (`images`) and LXC root (`rootdir`) on raw volumes. No ISO, container templates, backup target, or snippets.
 - **Thin provisioning:** Yes; Nimble provides thin provisioning at the array.
 - **Snapshots:** Yes; storage-level snapshots via Nimble API (create, delete, rollback).
@@ -107,7 +107,7 @@ The **feature** and **content type** tables below are also copied in the root **
 
 ## When to use the Nimble plugin
 
-- You have **HPE Nimble** arrays and want **tight integration**: volume create/delete/resize/rename, ACL (initiator groups), and snapshots/clone from snapshot from the Proxmox UI/API.
+- You have **HPE Nimble** or **HPE Alletra 5000/6000** arrays and want **tight integration**: volume create/delete/resize/rename, ACL (initiator groups), and snapshots/clone from snapshot from the Proxmox UI/API.
 - You want **array-level thin provisioning and snapshots** without adding an extra layer (e.g. LVM thin on top).
 - You want **multipath** and optional **auto iSCSI discovery** for Nimble.
 

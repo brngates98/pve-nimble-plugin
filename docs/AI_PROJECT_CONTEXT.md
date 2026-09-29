@@ -6,7 +6,7 @@ Read this first when resuming work. **Operators:** use [README.md](../README.md)
 
 ## What this is
 
-- Proxmox VE storage plugin for **HPE Nimble** over **iSCSI** (REST API v1, port **5392**).
+- Proxmox VE storage plugin for **HPE Nimble** and **HPE Alletra 5000/6000** over **iSCSI**. Alletra 5000 and 6000 run NimbleOS and use the same REST API v1 (port **5392**).
 - **One Nimble volume per disk** — QEMU `images` and LXC `rootdir` (raw block).
 - **Code:** `NimbleStoragePlugin.pm` (`PVE::Storage::Custom::NimbleStoragePlugin`), Perl; patterns from [pve-purestorage-plugin](https://github.com/kolesa-team/pve-purestorage-plugin).
 
@@ -24,7 +24,7 @@ Read this first when resuming work. **Operators:** use [README.md](../README.md)
 - Multipath alias register/deregister skip the write + `multipathd reconfigure` when the WWID is already correct/absent (was firing unconditionally on every map/unmap), and the WWID cache (shared cluster-wide via `/etc/pve/priv`) is now guarded by `PVE::Cluster::cfs_lock_storage` to avoid cross-node lost updates.
 - `raw+size` import/export (e.g. Veeam V13+).
 - Array snapshot **import** into QEMU VM configs (`nimble*` keys, throttled from `status()`).
-- APIVER 12–14 (`storage` QEMU snapshots, `qemu_blockdev_options`, `get_identity`, etc.). Note: `volume_resize` `$snapname` and `volume_snapshot_info` `virtual-size` are **APIVER 15** additions per pve-storage ApiChangeLog (earlier release notes said 14); implementing them while reporting 14 is safe (additive).
+- Storage plugin API through **APIVER 15** (current `pve-storage`: APIVER 15, APIAGE 6). `api()` reports the host version when it is 2–15, so current PVE 9 does not log the older-API warning. Includes APIVER 12–14 (`storage` QEMU snapshots, `qemu_blockdev_options`, `get_identity`) and the APIVER 15 additions: `volume_resize` `$snapname` (dies; no snapshot-as-volume-chain) and `volume_snapshot_info` `virtual-size`.
 - Package + CI + unit tests (no live Nimble in CI).
 
 ### Partial / needs validation

@@ -10,7 +10,7 @@ Use this page to choose **guides** vs **API / development** material without hun
 
 | Doc | What it is |
 |-----|------------|
-| **[README.md](../README.md)** | Requirements, scripted install, `pvesm` options, multipath, troubleshooting, debug, informal real-array validation note. |
+| **[README.md](../README.md)** | Requirements, scripted install, `pvesm` options, multipath, troubleshooting, debug, informal real-array validation note. Covers HPE Nimble and HPE Alletra 5000/6000. |
 | **[00-SETUP-FULLY-PROTECTED-STORAGE.md](00-SETUP-FULLY-PROTECTED-STORAGE.md)** | Step-by-step setup: install, storage, multipath, disks, snapshots, migration. (The `00-` prefix sorts this guide first in listings.) |
 | **[STORAGE_FEATURES_COMPARISON.md](STORAGE_FEATURES_COMPARISON.md)** | How this Nimble plugin compares to NFS, LVM, plain iSCSI, Ceph RBD for features and workflows. |
 | **[images/README.md](images/README.md)** | Screenshot index (PVE storage, VM disks, snapshots, migration, Nimble UI) — figures used in the setup guide. |

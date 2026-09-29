@@ -28,7 +28,7 @@ What actually happened (error message, wrong result, crash, etc.). If there is a
 
 - **Plugin version:** (e.g. from `dpkg -l libpve-storage-nimble-perl` or manual install)
 - **Proxmox VE version:** (e.g. 8.2, 9.0 — from `pveversion -v` or Web UI)
-- **Nimble array / OS:** (e.g. NimbleOS version if known)
+- **Array / OS:** (Nimble, or Alletra 5000/6000, and NimbleOS version if known)
 - **Cluster or single node?**
 
 ## Storage configuration (optional)

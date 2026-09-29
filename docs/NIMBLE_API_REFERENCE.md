@@ -1,6 +1,6 @@
 # HPE Nimble Storage REST API Reference (in-repo extract)
 
-This file is an in-repo extract of the **HPE Nimble Storage REST API Reference Version 5.1.1.0** for AI and contributor context. Full docs: [REST API](https://support.hpe.com/docs/display/public/nmtp352en_us/wzk1480348939804.html).
+This file is an in-repo extract of the **HPE Nimble Storage REST API Reference Version 5.1.1.0** for AI and contributor context. Full docs: [REST API 5.1.1.0](https://support.hpe.com/docs/display/public/nmtp352en_us/wzk1480348939804.html). The same v1 contract (port 5392, `{ "data": ... }` envelope) is what **HPE Alletra 5000 and Alletra 6000** expose; they run NimbleOS. A later public reference, [REST API 5.3.2.0](https://support.hpe.com/docs/display/public/nmtp350en_us/index.html), still documents the operations this plugin calls (tokens, volume create/clone, restore, snapshots, QoS, folders).
 
 **Base URL:** `https://<array_mgmt_ip>:5392/v1/`  
 **Auth:** POST `tokens` with `data.username` and `data.password` → response `data.session_token`; use `X-Auth-Token` on subsequent requests.

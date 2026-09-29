@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Nimble Storage plugin now supports full GUI integration in the Proxmox VE web interface. You can:
+The Nimble Storage plugin now supports full GUI integration in the Proxmox VE web interface. HPE Alletra 5000 and Alletra 6000 use this same **HPE Nimble** entry; the storage type stays `nimble`. You can:
 
 - **Add** new Nimble storage via the Storage Add dropdown menu
 - **Edit** existing Nimble storage via the Edit button

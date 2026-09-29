@@ -18,7 +18,9 @@ Depends: ${perl:Depends}, ${misc:Depends},
  liburi-perl
 Description: HPE Nimble Storage integration for Proxmox VE
  This package provides a Perl library to integrate HPE Nimble Storage
- arrays with Proxmox VE storage management over iSCSI.
+ arrays with Proxmox VE storage management over iSCSI. HPE Alletra 5000
+ and Alletra 6000 are supported as well: they run NimbleOS and use the
+ same REST API.
  .
  It allows administrators to configure and manage Nimble volumes
  directly within Proxmox VE (create, delete, resize, snapshots).

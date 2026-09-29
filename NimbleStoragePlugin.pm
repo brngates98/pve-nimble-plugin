@@ -94,7 +94,10 @@ sub set_debug_from_config {
 sub api {
   # PVE::Storage::APIVER / APIAGE are `use constant` (subs), not package scalars — do not use $PVE::Storage::APIVER.
   # Call with (); bareword form trips strict subs under perl 5.36+ (e.g. CI Docker bookworm).
-  my $tested_apiver = 14;
+  # 15 is current pve-storage APIVER (APIAGE 6). volume_resize $snapname and
+  # volume_snapshot_info virtual-size are implemented; report the host version up to 15
+  # so PVE 9 does not warn that the plugin implements an older storage API.
+  my $tested_apiver = 15;
   my $apiver        = eval { PVE::Storage::APIVER() };
   my $apiage        = eval { PVE::Storage::APIAGE() };
   $apiver = $tested_apiver if !defined($apiver) || $apiver !~ /^\d+$/;
@@ -146,7 +149,7 @@ sub properties {
   #     ~half of all daemon starts, whenever Pure's redeclaration merged second.)
   my $canonical = {
     nimble_address => {
-      description => "HPE Nimble array management IP or DNS name.",
+      description => "HPE Nimble or Alletra 5000/6000 array management IP or DNS name.",
       type        => 'string'
     },
     nimble_initiator_group => {

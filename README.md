@@ -1,6 +1,8 @@
 # Proxmox VE Plugin for HPE Nimble Storage (iSCSI)
 
-Integrates HPE Nimble Storage with Proxmox VE over iSCSI. Manages volumes via the Nimble REST API and presents them as **QEMU VM disks** and **LXC container root** volumes (`rootdir`, raw block) with optional multipath.
+Integrates HPE Nimble Storage with Proxmox VE over iSCSI. Manages volumes via the NimbleOS REST API and presents them as **QEMU VM disks** and **LXC container root** volumes (`rootdir`, raw block) with optional multipath.
+
+**HPE Alletra 5000 and Alletra 6000** are supported with the same configuration. Those arrays run NimbleOS and expose the same REST API (`https://<array>:5392/v1/`) and iSCSI model, so the storage type stays `nimble`.
 
 ## Overview
 
@@ -17,7 +19,7 @@ Array-created snapshots sync into the Proxmox VM snapshot tree as **`nimble*`** 
 ## Requirements
 
 - Proxmox VE 8.2+
-- HPE Nimble array reachable on port 5392 (REST API)
+- HPE Nimble, or HPE Alletra 5000/6000, reachable on port 5392 (NimbleOS REST API)
 - `open-iscsi` installed on each node with an IQN in `/etc/iscsi/initiatorname.iscsi`
 
 > **Co-installation with other storage plugins (e.g. [pve-purestorage-plugin](https://github.com/kolesa-team/pve-purestorage-plugin)):**
@@ -69,7 +71,7 @@ No need to pre-create an initiator group — the plugin creates one automaticall
 
 ### Via the Web UI (recommended)
 
-Go to **Datacenter → Storage → Add → HPE Nimble** and fill in the dialog. The plugin ships a JavaScript panel (`NimbleEdit.js`) that registers "HPE Nimble" in the standard Add dropdown and enables the Edit button for existing Nimble storage entries.
+Go to **Datacenter → Storage → Add → HPE Nimble** and fill in the dialog. Alletra 5000/6000 use that same menu entry (storage type `nimble`). The plugin ships a JavaScript panel (`NimbleEdit.js`) that registers "HPE Nimble" in the standard Add dropdown and enables the Edit button for existing entries.
 
 See **[docs/GUI_ADD_EDIT_STORAGE.md](docs/GUI_ADD_EDIT_STORAGE.md)** for a full walkthrough with field descriptions.
 
@@ -141,7 +143,7 @@ Notes:
 
 ## Feature comparison (vs other Proxmox storage)
 
-How the **Nimble plugin** compares to common Proxmox storage types (NFS, LVM / LVM-thin, kernel iSCSI, Ceph RBD). ✅ = native / built-in, ⚠️ = depends on extra layer or setup, ❌ = not supported.
+How the **Nimble plugin** compares to common Proxmox storage types (NFS, LVM / LVM-thin, kernel iSCSI, Ceph RBD). The same column applies to Alletra 5000/6000. ✅ = native / built-in, ⚠️ = depends on extra layer or setup, ❌ = not supported.
 
 | Feature | Nimble plugin | NFS | LVM / LVM-thin | iSCSI (kernel) | Ceph RBD |
 |--------|----------------|-----|----------------|----------------|----------|
@@ -224,7 +226,7 @@ After editing, run `multipathd reconfigure`.
 
 ## Lab validation (informal)
 
-The maintainer has exercised most day-to-day flows on **real Proxmox VE + HPE Nimble** (volumes, QEMU VM and LXC root disks where applicable, PVE and array snapshots, rollback, clone, move disk, capacity/status, multipath, array snapshot import into the VM snapshot list including snap time and descriptions). That is **not** a guarantee for every firmware or cluster layout; treat your own checks as authoritative.
+The maintainer has exercised most day-to-day flows on **real Proxmox VE + HPE Nimble** (volumes, QEMU VM and LXC root disks where applicable, PVE and array snapshots, rollback, clone, move disk, capacity/status, multipath, array snapshot import into the VM snapshot list including snap time and descriptions). Alletra 5000/6000 use the same NimbleOS API, so those flows apply there too; that lab work was on Nimble. This is **not** a guarantee for every firmware or cluster layout; treat your own checks as authoritative.
 
 **Screenshots:** See **[Overview](#overview)** and **[docs/images/README.md](docs/images/README.md)**.
 

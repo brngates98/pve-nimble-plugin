@@ -1,5 +1,6 @@
 // HPE Nimble Storage Plugin — GUI Integration for Proxmox VE
 // Adds "HPE Nimble" to the Storage Add dropdown and enables the Edit dialog.
+// HPE Alletra 5000/6000 use this same entry (NimbleOS REST API, storage type nimble).
 //
 // Deployed to: /usr/share/pve-manager/js/NimbleEdit.js
 // Loaded via:  /usr/share/pve-manager/index.html.tpl  (injected by postinst)

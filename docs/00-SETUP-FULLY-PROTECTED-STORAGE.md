@@ -1,6 +1,6 @@
 # Setup guide: Nimble storage on Proxmox VE
 
-Step-by-step: install the plugin, add Nimble as storage, create disks, optional multipath, test snapshots.  
+Step-by-step: install the plugin, add Nimble as storage, create disks, optional multipath, test snapshots. **HPE Alletra 5000 and Alletra 6000** use this same guide: they run NimbleOS and speak the same REST API and iSCSI.  
 **Shorter reference:** [README.md](../README.md). **Feature comparison:** [STORAGE_FEATURES_COMPARISON.md](STORAGE_FEATURES_COMPARISON.md). **Screenshots:** [images/README.md](images/README.md).
 
 ---
@@ -15,7 +15,7 @@ Step-by-step: install the plugin, add Nimble as storage, create disks, optional 
 ## Before you start
 
 - [ ] Proxmox VE **8.2+** (9.x tested in the field).
-- [ ] Nimble: REST API (port **5392**), at least one iSCSI subnet with a **discovery IP**.
+- [ ] Nimble, or Alletra 5000/6000: REST API (port **5392**), at least one iSCSI subnet with a **discovery IP**.
 - [ ] Network: management reachable from all nodes; iSCSI VLANs planned.
 - [ ] API user that can create volumes, initiator groups, and ACLs.
 - [ ] Plugin installed on **each** cluster node (config syncs; the `.pm` file does not).
@@ -30,6 +30,8 @@ Step-by-step: install the plugin, add Nimble as storage, create disks, optional 
 ---
 
 ## 2. Nimble array
+
+Same steps on Alletra 5000/6000 (NimbleOS).
 
 - Enable REST API and iSCSI subnets (type **data** or **mgmt,data** with `discovery_ip`).
 - Confirm API login from a node:
