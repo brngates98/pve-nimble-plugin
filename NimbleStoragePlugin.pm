@@ -22,6 +22,7 @@ use URI::Escape qw( uri_escape );
 use File::Basename qw( basename dirname );
 use Time::HiRes qw( gettimeofday sleep );
 use Cwd qw( abs_path );
+use Fcntl qw( :flock );
 use Scalar::Util qw( looks_like_number );
 
 use base qw(PVE::Storage::Plugin);
@@ -841,11 +842,81 @@ sub nimble_multipath_active_wwid {
 
 # Tear down multipath for unmap/migration. multipathd remove map / multipath -f often return non-zero
 # (busy, already removed, race). exec_command(..., -1, quiet, errfunc): non-fatal, no Perl/task noise.
+# With multipath aliases (nimble-<storeid>-<volname>) the dm map and its kpartx partition maps are NOT named
+# after the WWID, so /dev/mapper/<wwid> does not exist and removing by WWID fails ("failed to stat()").
+# Resolve the real dm names from the dm UUIDs instead: the map is "mpath-<wwid>", partitions are
+# "partN-mpath-<wwid>". Returns ( $map_name_or_undef, @partition_names ).
+sub nimble_dm_names_for_wwid {
+  my ($wwid) = @_;
+  my @cands = map { lc $_ } nimble_multipath_wwid_try_list($wwid);
+  return ( undef ) unless @cands;
+  my @lines;
+  eval {
+    run_command(
+      [ get_command_path('dmsetup'), 'info', '-c', '--noheadings', '--separator', ':', '-o', 'name,uuid' ],
+      outfunc => sub { push @lines, shift },
+      errfunc => sub { },
+      quiet   => 1
+    );
+  };
+  my ( $map, @parts );
+  for my $l (@lines) {
+    next unless $l =~ /^\s*([^:\s]+):(\S+)\s*$/;
+    my ( $name, $uuid ) = ( $1, lc $2 );
+    next unless $name =~ /^([A-Za-z0-9_.+-]+)$/;
+    $name = $1;
+    for my $w (@cands) {
+      if ( $uuid eq "mpath-$w" ) { $map = $name; }
+      elsif ( $uuid =~ /^part\d+-mpath-\Q$w\E\z/ ) { push @parts, $name; }
+    }
+  }
+  return ( $map, @parts );
+}
+
+# Open count of the multipath map for $wwid (undef when there is no map). Nonzero means something
+# (a VM, a mount, stacked partition maps) still holds it, so its iSCSI session must not be dropped.
+sub nimble_dm_map_open_count {
+  my ($wwid) = @_;
+  my @cands = map { lc $_ } nimble_multipath_wwid_try_list($wwid);
+  return undef unless @cands;
+  my @lines;
+  eval {
+    run_command(
+      [ get_command_path('dmsetup'), 'info', '-c', '--noheadings', '--separator', ':', '-o', 'uuid,open' ],
+      outfunc => sub { push @lines, shift },
+      errfunc => sub { },
+      quiet   => 1
+    );
+  };
+  for my $l (@lines) {
+    next unless $l =~ /^\s*(\S+?):(\d+)\s*$/;
+    my ( $uuid, $open ) = ( lc $1, $2 );
+    for my $w (@cands) {
+      return int($open) if $uuid eq "mpath-$w";
+    }
+  }
+  return undef;
+}
+
 sub nimble_multipath_teardown_for_unmap {
   my ($wwid) = @_;
   return unless length($wwid);
   my $mp = get_command_path('multipath');
   my %silent = ( quiet => 1, errfunc => sub { } );
+  # Partition maps first: they hold the multipath map open, so removing the map fails while they exist.
+  my ( $dm_map, @dm_parts ) = nimble_dm_names_for_wwid($wwid);
+  for my $part ( reverse sort @dm_parts ) {
+    exec_command( [ get_command_path('dmsetup'), 'remove', $part ], -1, %silent );
+  }
+  if ( defined $dm_map && length $dm_map ) {
+    exec_command( [ 'multipathd', 'remove', 'map', $dm_map ], -1, %silent );
+    exec_command( [ $mp, '-f', $dm_map ], -1, %silent );
+    my ($still) = nimble_dm_names_for_wwid($wwid);
+    exec_command( [ get_command_path('dmsetup'), 'remove', $still ], -1, %silent ) if defined $still && length $still;
+  }
+  # Name-by-WWID fallback only when no map was found by UUID (maps without an alias are named by WWID).
+  # Running it after a successful alias-aware removal just prints "failed to stat() /dev/mapper/<wwid>".
+  return if defined $dm_map && length $dm_map;
   for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
     next unless length($w);
     my $t = nimble_untaint_multipath_wwid($w);
@@ -916,12 +987,15 @@ sub nimble_multipath_wwid_in_main_conf {
   return index( lc($content), lc($wwid) ) >= 0 ? 1 : 0;
 }
 
+# Returns 1 only when the file on disk actually changed (written or removed), so callers can skip
+# `multipathd reconfigure` when the alias set is unchanged.
 sub nimble_multipath_write_conf {
   my ( $storeid, $aliases ) = @_;
   my $path = nimble_multipath_conf_path($storeid);
   unless ( keys %$aliases ) {
-    unlink $path if -f $path;
-    return;
+    return 0 unless -f $path;
+    unlink $path;
+    return 1;
   }
   my $content = "# Managed by pve-nimble-plugin. Do not edit manually.\n";
   $content .= "multipaths {\n";
@@ -932,6 +1006,10 @@ sub nimble_multipath_write_conf {
     $content .= "    }\n";
   }
   $content .= "}\n";
+  if ( -f $path ) {
+    my $old = eval { file_get_contents($path) };
+    return 0 if defined $old && $old eq $content;
+  }
   File::Path::make_path( dirname($path) ) unless -d dirname($path);
   my $tmp = "$path.tmp.$$";
   eval {
@@ -943,7 +1021,9 @@ sub nimble_multipath_write_conf {
   if ($@) {
     unlink $tmp;
     warn "Warning :: [nimble-multipath] Failed to write conf.d for $storeid: $@\n";
+    return 0;
   }
+  return 1;
 }
 
 sub nimble_multipath_build_aliases {
@@ -958,8 +1038,93 @@ sub nimble_multipath_build_aliases {
   return %aliases;
 }
 
+# `multipathd reconfigure` is host-wide and slow when paths are failing (it re-checks every map). Unbounded,
+# concurrent calls from pvestatd / tasks / several storages queue up inside multipathd and, combined with the
+# uevent storm when paths return, can wedge or crash it. So reconfigures are:
+#  - serialized host-wide with a flock (tmpfs), waiting at most $MPATH_RECONF_LOCK_WAIT seconds;
+#  - coalesced: a caller that waited on the lock skips its run if a reconfigure STARTED after it asked
+#    (that run already read the conf.d file this caller wrote);
+#  - spaced at least $MPATH_RECONF_MIN_GAP seconds apart;
+#  - never lost: the pending flag stays set when the lock wait times out or the command fails, and
+#    nimble_multipath_restore_aliases (every activate_storage) retries it.
+my $MPATH_RECONF_LOCK      = '/var/run/pve-nimble-multipath-reconfigure.lock';
+my $MPATH_RECONF_STAMP     = '/var/run/pve-nimble-multipath-reconfigure.ts';
+my $MPATH_RECONF_PENDING   = '/var/run/pve-nimble-multipath-reconfigure.pending';
+my $MPATH_RECONF_MIN_GAP   = 5;
+my $MPATH_RECONF_LOCK_WAIT = 20;
+
+sub nimble_multipath_reconfigure_pending {
+  return -e $MPATH_RECONF_PENDING ? 1 : 0;
+}
+
+sub nimble_multipath_reconfigure_mark_pending {
+  if ( open my $fh, '>', $MPATH_RECONF_PENDING ) { close $fh; }
+}
+
 sub nimble_multipath_reconfigure {
-  exec_command( ['multipathd', 'reconfigure'], -1, timeout => 15 );
+  my $requested = Time::HiRes::time();
+  nimble_multipath_reconfigure_mark_pending();
+
+  my $lock_fh;
+  if ( !open( $lock_fh, '>>', $MPATH_RECONF_LOCK ) ) {
+    warn "Warning :: [nimble-multipath] cannot open $MPATH_RECONF_LOCK ($!); deferring multipathd reconfigure.\n";
+    return 0;
+  }
+  my $deadline = $requested + $MPATH_RECONF_LOCK_WAIT;
+  my $locked   = 0;
+  while (1) {
+    if ( flock( $lock_fh, LOCK_EX | LOCK_NB ) ) { $locked = 1; last; }
+    last if Time::HiRes::time() >= $deadline;
+    sleep(0.25);
+  }
+  if ( !$locked ) {
+    close $lock_fh;
+    warn "Warning :: [nimble-multipath] another multipathd reconfigure is still running after "
+      . "${MPATH_RECONF_LOCK_WAIT}s; deferring (will retry on next activate_storage).\n";
+    return 0;
+  }
+
+  my $last = 0;
+  if ( open my $sfh, '<', $MPATH_RECONF_STAMP ) {
+    my $l = <$sfh>;
+    close $sfh;
+    $last = $1 if defined $l && $l =~ /^\s*([0-9]+(?:\.[0-9]+)?)\s*$/;
+  }
+  my $now = Time::HiRes::time();
+  $last = 0 if $last > $now;    # clock stepped back: ignore the stamp rather than stall or skip
+  if ( $last > $requested ) {
+    # A reconfigure began after our request (and after our conf.d write) — it already covered us.
+    close $lock_fh;
+    return 1;
+  }
+  my $wait = $MPATH_RECONF_MIN_GAP - ( $now - $last );
+  sleep($wait) if $wait > 0;
+
+  my $start = Time::HiRes::time();
+  my $tmp   = "$MPATH_RECONF_STAMP.tmp.$$";
+  if ( open my $sfh, '>', $tmp ) {
+    print $sfh $start;
+    close $sfh;
+    rename( $tmp, $MPATH_RECONF_STAMP );
+  }
+  # Cleared before running: a request arriving during this run re-sets it and is not coalesced away
+  # (its $requested is later than $start).
+  unlink $MPATH_RECONF_PENDING;
+
+  my $mpd = eval { get_command_path('multipathd') } || '/sbin/multipathd';
+  print "Debug :: execute '$mpd reconfigure'\n" if $DEBUG >= 2;
+  my $ok = eval {
+    run_command( [ $mpd, 'reconfigure' ], timeout => 15, quiet => 1, errfunc => sub { } );
+    1;
+  };
+  if ( !$ok ) {
+    my $err = $@ // '';
+    chomp $err;
+    nimble_multipath_reconfigure_mark_pending();
+    warn "Warning :: [nimble-multipath] multipathd reconfigure failed ($err); will retry on next activate_storage.\n";
+  }
+  close $lock_fh;
+  return $ok ? 1 : 0;
 }
 
 # The WWID cache lives under /etc/pve/priv (pmxcfs, replicated to every cluster node), and
@@ -968,11 +1133,22 @@ sub nimble_multipath_reconfigure {
 # cfs_lock_storage uses pmxcfs's own distributed lock (a local flock would not exclude other nodes).
 # PVE::Cluster is soft-required: unit tests and other non-PVE contexts run without it, so degrade to
 # unlocked best-effort there rather than failing the whole map/unmap.
+# Set (via `local`) by callers that PVE already runs under cluster_lock_storage for this storage
+# (free_image, rename_volume; the type is in SHARED_STORAGE so that is the cfs lock). pmxcfs locks are not
+# re-entrant: taking the same lock again waits the full timeout on ourselves, so skip it there.
+our $STORAGE_LOCK_HELD = 0;
+
 sub nimble_multipath_with_storage_lock {
   my ( $storeid, $code ) = @_;
+  return $code->() if $STORAGE_LOCK_HELD;
   return $code->() unless eval { require PVE::Cluster; 1 };
-  my $res = eval { PVE::Cluster::cfs_lock_storage( $storeid, 10, $code ); };
+  # cfs_lock_storage does not die: on lock timeout it sets $@ and returns WITHOUT running the callback
+  # (and an eval around it would clear $@ on exit, silently skipping the alias update after waiting the
+  # full timeout). So call it bare, then tell "callback never ran" apart from "callback died".
+  my $ran = 0;
+  my $res = PVE::Cluster::cfs_lock_storage( $storeid, 3, sub { $ran = 1; return $code->(); } );
   if ( my $err = $@ ) {
+    die $err if $ran;
     chomp $err;
     warn "Warning :: [nimble-multipath] Could not lock storage \"$storeid\" for multipath alias update;"
       . " proceeding unlocked: $err\n";
@@ -1000,8 +1176,7 @@ sub nimble_multipath_register {
     $cache->{$volname} = $sane_wwid;
     nimble_multipath_save_wwid_cache( $storeid, $cache );
     my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
-    nimble_multipath_write_conf( $storeid, \%aliases );
-    nimble_multipath_reconfigure();
+    nimble_multipath_reconfigure() if nimble_multipath_write_conf( $storeid, \%aliases );
   } );
 }
 
@@ -1014,8 +1189,7 @@ sub nimble_multipath_deregister {
     delete $cache->{$volname};
     nimble_multipath_save_wwid_cache( $storeid, $cache );
     my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
-    nimble_multipath_write_conf( $storeid, \%aliases );
-    nimble_multipath_reconfigure();
+    nimble_multipath_reconfigure() if nimble_multipath_write_conf( $storeid, \%aliases );
   } );
 }
 
@@ -1031,19 +1205,22 @@ sub nimble_multipath_rename_cache_entry {
     $cache->{$new_volname} = delete $cache->{$old_volname};
     nimble_multipath_save_wwid_cache( $storeid, $cache );
     my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
-    nimble_multipath_write_conf( $storeid, \%aliases );
-    nimble_multipath_reconfigure();
+    nimble_multipath_reconfigure() if nimble_multipath_write_conf( $storeid, \%aliases );
   } );
 }
 
+# Runs on every activate_storage (which PVE calls very often, incl. pvestatd status cycles), so it must be
+# a no-op in steady state: rewrite conf.d only when it differs, and reconfigure only when it changed or an
+# earlier reconfigure was deferred/failed.
 sub nimble_multipath_restore_aliases {
   my ($storeid) = @_;
-  my $cache = nimble_multipath_load_wwid_cache($storeid);
-  return unless keys %$cache;
-  my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
-  return unless keys %aliases;
-  nimble_multipath_write_conf( $storeid, \%aliases );
-  nimble_multipath_reconfigure();
+  my $changed = 0;
+  my $cache   = nimble_multipath_load_wwid_cache($storeid);
+  if ( keys %$cache ) {
+    my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
+    $changed = nimble_multipath_write_conf( $storeid, \%aliases ) if keys %aliases;
+  }
+  nimble_multipath_reconfigure() if $changed || nimble_multipath_reconfigure_pending();
 }
 
 # Same as PureStoragePlugin: remove LVM/partition DM stacks above a multipath map before array-side delete.
@@ -2075,7 +2252,7 @@ sub nimble_iscsi_target_in_sessions {
 # targets) so login / node.startup changes only ever touch targets that belong to this array.
 # Caller then runs targeted --login; do not mix with global `node --login` on map.
 sub iscsi_sendtargets_on_ips {
-  my ($ips_ref) = @_;
+  my ( $ips_ref, $stats ) = @_;    # $stats (optional hashref): { failed => N } = discovery IPs that did not answer
   return () unless ref($ips_ref) eq 'ARRAY' && @$ips_ref;
   my $iscsiadm = nimble_iscsiadm_path();
   return () unless -x $iscsiadm;
@@ -2098,6 +2275,7 @@ sub iscsi_sendtargets_on_ips {
     if ( $@ ) {
       chomp( my $e = $@ );
       print "Debug :: sendtargets -p $disc_ip: $e\n" if $DEBUG >= 1;
+      $stats->{ failed }++ if ref($stats) eq 'HASH';
       next;
     }
     for my $line (@lines) {
@@ -2197,7 +2375,8 @@ sub nimble_iscsi_logout_volume_local {
   return 0 unless length($iqn) && $iqn =~ m/^iqn\./i;
   my $iscsiadm = nimble_iscsiadm_path();
   return 0 unless -x $iscsiadm;
-  for my $portal ( nimble_iscsi_node_portals_for_target($iqn) ) {
+  my @node_portals = nimble_iscsi_node_portals_for_target($iqn);
+  for my $portal (@node_portals) {
     my $p = nimble_untaint_iscsiadm_scalar($portal);
     next unless length $p;
     eval {
@@ -2208,9 +2387,25 @@ sub nimble_iscsi_logout_volume_local {
       );
     };
   }
-  if ( nimble_iscsi_target_in_sessions( $iqn, 0 ) ) {
+  # Sessions that survive the node-DB logout (portal not in the node DB, or redirected portal): log out by
+  # session id. `-m session -T` is not valid, so pick sids from the session listing.
+  my $iqn_lc = lc($iqn);
+  for my $line ( split /\n/, nimble_iscsi_session_output() ) {
+    next unless $line =~ m/^\s*\w+:\s*\[(\d+)\]\s+\S+\s+(\S+)/ && lc($2) eq $iqn_lc;
+    my $sid = $1;
+    eval { run_command( [ $iscsiadm, '-m', 'session', '-r', $sid, '-u' ], timeout => 45, quiet => 1 ); };
+  }
+  # Drop the node DB records too: a leftover record (node.startup=automatic) makes iscsid retry login
+  # forever once the array volume is deleted ("login rejected: initiator error (02/04)" every 2s).
+  for my $portal ( nimble_iscsi_node_portals_for_target($iqn) ) {
+    my $p = nimble_untaint_iscsiadm_scalar($portal);
+    next unless length $p;
     eval {
-      run_command( [ $iscsiadm, '-m', 'session', '-u', '-T', $iqn ], timeout => 45, quiet => 1 );
+      run_command(
+        [ $iscsiadm, '-m', 'node', '-T', $iqn, '-p', $p, '--op', 'delete' ],
+        timeout => 15,
+        quiet   => 1
+      );
     };
   }
   return 1;
@@ -2252,7 +2447,8 @@ sub run_iscsi_discovery_and_login {
     warn "Warning :: iscsiadm not found or not executable; skipping auto iSCSI discovery for storage \"$storeid\".\n";
     return;
   }
-  my @recs = grep { nimble_iscsi_iqn_is_nimble_target( $_->{ iqn } ) } iscsi_sendtargets_on_ips($ips_ref);
+  my %st = ( failed => 0 );
+  my @recs = grep { nimble_iscsi_iqn_is_nimble_target( $_->{ iqn } ) } iscsi_sendtargets_on_ips( $ips_ref, \%st );
   if ( !@recs ) {
     print "Debug :: sendtargets on discovery IP(s) for \"$storeid\" reported no Nimble target records.\n"
       if $DEBUG >= 1;
@@ -2273,6 +2469,159 @@ sub run_iscsi_discovery_and_login {
   print "Debug :: iSCSI baseline for \"$storeid\": $skipped portal(s) already logged in, "
     . "$logged newly logged in, $failed failed.\n"
     if $DEBUG >= 1 && ( $logged || $failed );
+  # Only prune on a complete picture: every discovery IP answered (a partial listing would look like
+  # "volume gone" for IQNs served only by the silent one).
+  eval { nimble_iscsi_prune_stale_targets( $storeid, $ips_ref, \@recs ) } unless $st{ failed };
+  warn "Warning :: iSCSI stale-target prune for \"$storeid\": $@" if $@;
+}
+
+# The baseline logs every node in to every volume IQN on the array, so deleting a volume leaves a session
+# and a node.startup=automatic record on every OTHER node (the deleting node cleans only itself), and
+# iscsid then retries that login every 2s forever ("login rejected: initiator error (02/04)").
+# Prune: Nimble IQNs on this array's portals that sendtargets no longer reports. Guards, because logging
+# out a live disk is far worse than leaving a stale session for another minute:
+#  - caller only runs this when every discovery IP answered and the listing is non-empty;
+#  - an IQN must stay missing for >= $grace seconds across baseline runs (survives a one-off glitch);
+#  - skipped while any multipath map or partition on its SCSI disks is open (a VM is using it).
+sub nimble_iscsi_prune_stale_targets {
+  my ( $storeid, $ips_ref, $recs_ref, $grace ) = @_;
+  $grace //= 90;
+  return unless ref($recs_ref) eq 'ARRAY' && @$recs_ref;
+  my $iscsiadm = nimble_iscsiadm_path();
+  return unless -x $iscsiadm;
+
+  my %live  = map { lc( $_->{ iqn } ) => 1 } @$recs_ref;
+  my %arr_hosts;    # portal hosts belonging to THIS array (never touch another array's sessions)
+  for my $r (@$recs_ref) { my $h = nimble_iscsi_portal_host( $r->{ portal } ); $arr_hosts{ $h } = 1 if length $h; }
+  for my $ip (@$ips_ref) { my $h = nimble_iscsi_portal_host($ip); $arr_hosts{ $h } = 1 if length $h; }
+
+  # Candidate IQN => { sid => [...] , portals => [...] } from sessions and from the node DB.
+  my %cand;
+  for my $line ( split /\n/, nimble_iscsi_session_output() ) {
+    next unless $line =~ m/^\s*\w+:\s*\[(\d+)\]\s+(\S+)\s+(iqn\S+)/i;
+    my ( $sid, $portal, $iqn ) = ( $1, $2, $3 );
+    next unless nimble_iscsi_iqn_is_nimble_target($iqn) && $arr_hosts{ nimble_iscsi_portal_host($portal) };
+    next if $live{ lc $iqn };
+    push @{ $cand{ $iqn }{ sids } }, $sid;
+  }
+  my @node_lines;
+  eval {
+    run_command( [ $iscsiadm, '-m', 'node' ], outfunc => sub { push @node_lines, shift },
+      errfunc => sub { }, timeout => 25, quiet => 1 );
+  };
+  for my $line (@node_lines) {
+    next unless $line =~ m/^\s*(\S+)\s+(iqn\S+)/i;
+    my ( $portal, $iqn ) = ( $1, $2 );
+    next unless nimble_iscsi_iqn_is_nimble_target($iqn) && $arr_hosts{ nimble_iscsi_portal_host($portal) };
+    next if $live{ lc $iqn };
+    $cand{ $iqn } ||= { sids => [] };
+    push @{ $cand{ $iqn }{ portals } }, nimble_iscsi_portal_strip_tpgt($portal);
+  }
+
+  # Grace-period state (tmpfs): iqn => epoch first seen missing. Keep only still-missing IQNs.
+  my $state_file = "/var/run/pve-nimble-prune-${storeid}.json";
+  my $state = {};
+  if ( open my $fh, '<', $state_file ) {
+    local $/;
+    my $j = <$fh>;
+    close $fh;
+    $state = eval { decode_json($j) } || {};
+  }
+  my $now = time();
+  my %next;
+  for my $iqn ( keys %cand ) {
+    my $since = $state->{ $iqn } // $now;
+    $next{ $iqn } = $since;
+    next if $now - $since < $grace;
+    next if nimble_iscsi_target_in_use( $iqn, $cand{ $iqn }{ sids } );
+    my $safe = nimble_untaint_iscsiadm_scalar($iqn);
+    next unless length($safe) && $safe =~ m/^iqn\./i;
+    print "Info :: Pruning stale iSCSI target \"$safe\" (no longer on the array).\n";
+    for my $sid ( @{ $cand{ $iqn }{ sids } } ) {
+      next unless $sid =~ m/^(\d+)$/;
+      eval { run_command( [ $iscsiadm, '-m', 'session', '-r', $1, '-u' ], timeout => 45, quiet => 1 ); };
+    }
+    my %seen_p;
+    for my $portal ( nimble_iscsi_node_portals_for_target($safe) ) {
+      my $p = nimble_untaint_iscsiadm_scalar($portal);
+      next unless length($p) && !$seen_p{ $p }++;
+      eval { run_command( [ $iscsiadm, '-m', 'node', '-T', $safe, '-p', $p, '--op', 'delete' ], timeout => 15, quiet => 1 ); };
+    }
+    delete $next{ $iqn };
+  }
+  my $tmp = "$state_file.tmp.$$";
+  if ( open my $fh, '>', $tmp ) {
+    print $fh encode_json( \%next );
+    close $fh;
+    rename( $tmp, $state_file );
+  }
+}
+
+# Host part of an open-iscsi portal string ("10.1.1.1:3260,2460" / "[::1]:3260" -> address).
+sub nimble_iscsi_portal_host {
+  my ($portal) = @_;
+  return '' unless defined $portal;
+  my $p = nimble_iscsi_portal_strip_tpgt($portal);
+  return $1 if $p =~ m/^\[(.+)\](?::\d+)?\z/;
+  $p =~ s/:\d+\z//;
+  return $p;
+}
+
+# True when a block device behind one of these sessions is held open (VM disk, mounted, stacked maps).
+sub nimble_iscsi_target_in_use {
+  my ( $iqn, $sids ) = @_;
+  my $iscsiadm = nimble_iscsiadm_path();
+  for my $sid ( @{ $sids || [] } ) {
+    next unless $sid =~ m/^(\d+)$/;
+    my @out;
+    eval {
+      run_command( [ $iscsiadm, '-m', 'session', '-r', $1, '-P', '3' ],
+        outfunc => sub { push @out, shift }, errfunc => sub { }, timeout => 20, quiet => 1 );
+    };
+    for my $l (@out) {
+      next unless $l =~ m/Attached scsi disk\s+(sd[a-z]+)/;
+      my $disk = $1;
+      return 1 if nimble_block_disk_in_use($disk);
+    }
+  }
+  return 0;
+}
+
+sub nimble_block_disk_in_use {
+  my ($disk) = @_;
+  my $holders = "/sys/block/$disk/holders";
+  my @dm;
+  if ( opendir( my $dh, $holders ) ) { @dm = grep { /^dm-\d+\z/ } readdir($dh); closedir($dh); }
+  return 0 unless @dm;
+  # One dmsetup call: name, uuid, open for every map. A multipath map is "in use" only when something
+  # other than its OWN partition (kpartx) maps holds it: each partition map accounts for one open on the
+  # parent, so a disk with 4 idle partitions shows open=4 and is still idle.
+  my @lines;
+  eval {
+    run_command(
+      [ get_command_path('dmsetup'), 'info', '-c', '--noheadings', '--separator', ':', '-o', 'name,uuid,open' ],
+      outfunc => sub { push @lines, shift }, errfunc => sub { }, quiet => 1 );
+  };
+  my ( %open, %uuid_of );
+  for my $l (@lines) {
+    next unless $l =~ /^\s*([^:\s]+):(\S+):(\d+)\s*$/;
+    my ( $name, $uuid, $op ) = ( $1, lc $2, $3 );
+    $open{ $name }    = $op;
+    $uuid_of{ $name } = $uuid;
+  }
+  my %parts_by_parent_uuid;
+  for my $name ( keys %uuid_of ) {
+    push @{ $parts_by_parent_uuid{ $1 } }, $name if $uuid_of{ $name } =~ /^part\d+-(mpath-\S+)\z/;
+  }
+  for my $h (@dm) {
+    my $name = '';
+    if ( open my $fh, '<', "/sys/block/$h/dm/name" ) { $name = <$fh> // ''; chomp $name; close $fh; }
+    next unless length $name && defined $open{ $name };
+    my @parts = @{ $parts_by_parent_uuid{ $uuid_of{ $name } // '' } || [] };
+    return 1 if grep { ( $open{ $_ } // 0 ) > 0 } @parts;    # a partition itself is open
+    return 1 if $open{ $name } > scalar(@parts);              # opened by something else
+  }
+  return 0;
 }
 
 sub nimble_get_local_iscsi_iqn {
@@ -2655,14 +3004,17 @@ sub nimble_iscsi_establish_volume_session {
       return 1;
     }
 
-    for my $dp ( @dip ) {
+    for my $dp_raw ( @dip ) {
+      # Launder for perl -T: API-derived IPs are tainted and run_command would die (swallowed by the eval).
+      my $dp = nimble_untaint_iscsiadm_scalar($dp_raw);
+      next unless length $dp;
       my @lines;
       eval {
         run_command(
           [ $iscsiadm, '-m', 'discovery', '-t', 'sendtargets', '-p', $dp ],
           outfunc => sub { push @lines, shift },
           errfunc => sub { },
-          timeout => 20,
+          timeout => 10,
           quiet   => 1
         );
       };
@@ -3674,7 +4026,10 @@ sub free_image {
   my ( $class, $storeid, $scfg, $volname, $isBase ) = @_;
   $class->deactivate_volume( $storeid, $scfg, $volname );
   $class->nimble_remove_volume( $scfg, $volname, $storeid );
-  nimble_multipath_deregister( $storeid, $volname );
+  {
+    local $STORAGE_LOCK_HELD = 1;    # vdisk_free already holds the storage lock
+    nimble_multipath_deregister( $storeid, $volname );
+  }
   return undef;
 }
 
@@ -4186,6 +4541,13 @@ sub unmap_volume {
   exec_command( ['sync'] );
 
   if ( length( $wwid ) ) {
+    # Partition (kpartx) and LVM maps stacked on the multipath map keep it open, so `multipath -f` below
+    # would silently fail and leave the map behind. free_image already does this before deleting.
+    my $wwid_safe = nimble_untaint_multipath_wwid($wwid);
+    if ( length($wwid_safe) ) {
+      eval { cleanup_lvm_on_device($wwid_safe) };
+      eval { cleanup_partitions_on_device($wwid_safe) };
+    }
     nimble_multipath_teardown_for_unmap($wwid);
   }
   block_device_action( 'remove', @slaves );
@@ -4201,8 +4563,31 @@ sub activate_volume {
 
 sub deactivate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache ) = @_;
+  my ( undef, $wwid ) = eval { $class->get_device_path_wwid( $scfg, $volname, $storeid ) };
+  $wwid //= '';
   $class->unmap_volume( $storeid, $scfg, $volname, $snapname );
   $class->nimble_volume_connection( $storeid, $scfg, $volname, 0 );
+  # Per-volume IQNs mean one iSCSI session per volume per node. While the session is up, multipathd keeps
+  # rebuilding the map from its paths (a map removed by unmap_volume reappears within seconds), so drop
+  # this node's session (and node record) and THEN remove whatever map is left. Skipped when the map is
+  # still open, so a disk something is still using is never cut off.
+  # Partition (kpartx) maps rebuilt by udev hold the map open themselves; drop them before judging.
+  if ( length($wwid) ) {
+    my ( undef, @parts ) = nimble_dm_names_for_wwid($wwid);
+    for my $part ( reverse sort @parts ) {
+      exec_command( [ get_command_path('dmsetup'), 'remove', $part ], -1, quiet => 1, errfunc => sub { } );
+    }
+  }
+  my $open = length($wwid) ? nimble_dm_map_open_count($wwid) : undef;
+  if ( nimble_auto_iscsi_discovery_enabled($scfg) ) {
+    # Baseline on: pvestatd re-logs in every volume IQN within a minute, so dropping the session here only
+    # churns. Sessions stay by design; the baseline prunes IQNs the array no longer reports.
+  } elsif ( defined $open && $open > 0 ) {
+    warn "Warning :: \"$volname\" multipath map is still open ($open); leaving its iSCSI session up.\n";
+  } else {
+    eval { nimble_iscsi_logout_volume_local( $class, $scfg, $volname, $storeid ); };
+    nimble_multipath_teardown_for_unmap($wwid) if length($wwid);
+  }
   print "Info :: Volume \"$volname\" deactivated.\n";
   return 1;
 }
@@ -4231,7 +4616,10 @@ sub rename_volume {
   # node keeps a stale session + node-db records for a target that no longer exists.
   eval { nimble_iscsi_logout_volume_local( $class, $scfg, $source_volname, $storeid ); };
   $class->nimble_rename_volume( $scfg, $storeid, $source_volname, $target_volname );
-  nimble_multipath_rename_cache_entry( $storeid, $source_volname, $target_volname );
+  {
+    local $STORAGE_LOCK_HELD = 1;    # PVE::Storage::rename_volume already holds the storage lock
+    nimble_multipath_rename_cache_entry( $storeid, $source_volname, $target_volname );
+  }
   return "$storeid:$target_volname";
 }
 
