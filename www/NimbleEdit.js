@@ -256,6 +256,13 @@ Ext.define('PVE.storage.NimbleInputPanel', {
     console.error('NimbleEdit.js: PVE.Utils not defined — script loaded before pvemanagerlib.js? "HPE Nimble" storage panel not registered.');
     return;
   }
+  // PVE 9.3+ builds the Add/Edit dialog for third-party plugins natively from the plugin's
+  // metadata (GET /plugins/storage/plugin: titles, advanced/hidden fields, sensitive password,
+  // display name). A storageSchema entry would take precedence over it, so step aside there and
+  // only register this panel on older releases that have no native custom-plugin dialog.
+  if (Ext.ClassManager.get('PVE.storage.CustomInputPanel')) {
+    return;
+  }
   if (!PVE.Utils.storageSchema) { PVE.Utils.storageSchema = {}; }
   PVE.Utils.storageSchema['nimble'] = {
     name: 'Nimble',

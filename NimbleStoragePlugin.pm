@@ -99,8 +99,9 @@ sub api {
   # APIVER 15: volume_resize $snapname, volume_snapshot_info virtual-size — implemented.
   # APIVER 16: optional format/name helpers for directory-like alloc/rename; unused here
   #   (alloc_image/rename_volume are implemented directly).
-  # APIVER 17: guest volume types vm-vol/vm-state/ct-vol (images/rootdir still accepted),
-  #   plugin UI metadata, optional isolate-properties — additive; parse_volname still returns images.
+  # APIVER 17: guest volume types (parse_volname via guest_volume_vtype; content types in plugindata),
+  #   web UI metadata in plugindata, 'isolate-properties' (see nimble_isolate_properties).
+  #   free_image returns no cleanup worker, so the lock change does not apply.
   # Report the host version up to 17 so PVE does not warn about an older storage API.
   my $tested_apiver = 17;
   my $apiver        = eval { PVE::Storage::APIVER() };
@@ -120,9 +121,45 @@ sub type {
   return "nimble";
 }
 
+sub nimble_host_apiver {
+  my $v = eval { PVE::Storage::APIVER() };
+  return ( defined($v) && $v =~ /^\d+$/ ) ? $v : 0;
+}
+
+# APIVER 17 'isolate-properties': our declared properties belong to this plugin alone, so they can
+# never clash with in-tree or other third-party plugins (no more probing, legacy names always parse)
+# and we declare our own username/password/port. PVE refuses to load an isolating plugin that
+# reports api() < 17, so only isolate where the host is 17+ (api() then reports >= 17 too).
+sub nimble_isolate_properties {
+  return nimble_host_apiver() >= 17 ? 1 : 0;
+}
+
 sub plugindata {
+  my $supported = { images => 1, rootdir => 1, none => 1 };
+  # APIVER 17: offer the per-type guest content types so a storage can be restricted to, e.g.,
+  # VM disks only (keeping RAM-snapshot state volumes off the array). Older hosts do not know
+  # these types, so only advertise them there. 'images'/'rootdir' keep allowing all of them.
+  if ( nimble_host_apiver() >= 17 ) {
+    $supported->{ $_ } = 1 for qw(vm-vol vm-state ct-vol);
+  }
   return {
-    content => [ { images => 1, rootdir => 1, none => 1 }, { images => 1, rootdir => 1 } ],
+    content => [ $supported, { images => 1, rootdir => 1 } ],
+    # Web UI metadata (pve-storage APIVER 17, ignored by older hosts). The NimbleEdit.js panel still
+    # takes precedence for the dialog; this feeds GET /plugins/storage/plugin and the type label.
+    meta => { 'display-name' => 'HPE Nimble / Alletra 5000/6000' },
+    'advanced-properties' => {
+      map { $_ => 1 }
+        qw(nimble_token_ttl nimble_debug nimble_auto_iscsi_discovery nimble_iscsi_discovery_ips
+        nimble_iscsi_discovery_override nimble_legacy_name_fallback nimble_limit_iops
+        nimble_limit_mbps san-multipath)
+    },
+    # nimble_storeid is maintained by check_config; legacy pre-v0.0.25 aliases are migrated on write.
+    # `format` stays in options() so existing "format raw" lines keep parsing, but the generated
+    # dialog would offer qcow2/subvol/vmdk, which PVE then refuses ("storage does not support
+    # format"): raw is the only format, like the in-tree RBD/iSCSI plugins that do not offer it.
+    'hidden-properties' => {
+      map { $_ => 1 } ( 'nimble_storeid', 'format', values %NIMBLE_LEGACY_CONFIG_KEYS )
+    },
     format  => [ { raw    => 1 },            "raw" ],
     # `password` is sensitive (APIVER 11 mechanism): PVE keeps it out of storage.cfg and passes it
     # to on_add/on_update hooks separately; our hooks persist it to /etc/pve/priv/storage/<id>.pw.
@@ -131,6 +168,7 @@ sub plugindata {
     # on APIVER 11+ hosts only, leaving the password in cluster-replicated, GUI-visible storage.cfg.
     # Legacy cfg password lines from older plugin versions still work (see nimble_api_credentials).
     'sensitive-properties' => { password => 1 },
+    ( nimble_isolate_properties() ? ( 'isolate-properties' => 1 ) : () ),
   };
 }
 
@@ -228,13 +266,67 @@ sub properties {
       type        => 'string',
       optional    => 1,
     },
+    'san-multipath' => {
+      description =>
+        "Register volume WWIDs in the cluster multipath configuration (Proxmox VE 9.3+) so Datacenter → SAN can manage them. Default off; host multipath connect and teardown stay with the plugin.",
+      type    => 'boolean',
+      default => 'no',
+    },
   };
+  # Field labels for the generated web UI dialog (APIVER 17). `title` has long been a valid
+  # JSONSchema key in pve-common, so older hosts accept and ignore it.
+  my %titles = (
+    nimble_address                  => 'Array Address',
+    nimble_initiator_group          => 'Initiator Group',
+    nimble_vnprefix                 => 'Volume Name Prefix',
+    nimble_pool_name                => 'Pool',
+    nimble_volume_collection        => 'Volume Collection',
+    nimble_check_ssl                => 'Verify TLS Certificate',
+    nimble_token_ttl                => 'Session Token TTL (s)',
+    nimble_debug                    => 'Debug Level',
+    nimble_auto_iscsi_discovery     => 'Automatic iSCSI Discovery',
+    nimble_iscsi_discovery_ips      => 'Extra Discovery Portals',
+    nimble_iscsi_discovery_override => 'Use Only Listed Portals',
+    nimble_legacy_name_fallback     => 'Match Unprefixed Volumes',
+    nimble_folder                   => 'Folder',
+    nimble_limit_iops               => 'IOPS Limit',
+    nimble_limit_mbps               => 'Throughput Limit (MB/s)',
+    nimble_storeid                  => 'Storage ID',
+    'san-multipath'                 => 'SAN Multipath (cluster)',
+  );
+  $canonical->{ $_ }{ title } = $titles{ $_ } for grep { $canonical->{ $_ } } keys %titles;
+
   my $props = { %$canonical };
   for my $new ( keys %NIMBLE_LEGACY_CONFIG_KEYS ) {
     my $old    = $NIMBLE_LEGACY_CONFIG_KEYS{ $new };
     my %schema = %{ $canonical->{ $new } };
     $schema{ description } = "Legacy alias of ${new} (pre-v0.0.25 configs). " . $schema{ description };
     $props->{ $old } = \%schema;
+  }
+
+  if ( nimble_isolate_properties() ) {
+    # Isolated (APIVER 17+): declare everything we use that is not a common base property. Every
+    # declared property is an option; options() decides required/fixed for the ones it lists, the
+    # rest must say optional here (legacy aliases are migrated away by check_config).
+    $props->{ username } = {
+      title       => 'Username',
+      description => 'Array management API user.',
+      type        => 'string',
+    };
+    $props->{ password } = {
+      title       => 'Password',
+      description => 'Array management API password (kept in /etc/pve/priv/storage/<storage>.pw).',
+      type        => 'string',
+    };
+    $props->{ port } = {
+      title       => 'API Port',
+      description => 'Array management REST API port (default 5392).',
+      type        => 'integer',
+      minimum     => 1,
+      maximum     => 65535,
+    };
+    $_->{ optional } = 1 for values %$props;
+    return $props;
   }
 
   return $props if $properties_in_progress;
@@ -277,6 +369,7 @@ sub options {
     nimble_limit_iops  => { optional => 1 },
     nimble_limit_mbps  => { optional => 1 },
     nimble_storeid     => { optional => 1 },
+    'san-multipath'    => { optional => 1 },
     nodes          => { optional => 1 },
     disable        => { optional => 1 },
     content        => { optional => 1 },
@@ -287,7 +380,10 @@ sub options {
   # owns the schemas match; ours were copied from Pure originally). init() calls options() AFTER
   # merging every plugin's properties(), so the propertyList is complete here. Referencing a name
   # nobody declared would make init() die ("undefined property"), hence the existence check.
-  my $registered = eval { PVE::Storage::Plugin->private()->{ propertyList } } // {};
+  # Isolated (APIVER 17+): we declare the legacy names ourselves, so they always exist.
+  my $registered = nimble_isolate_properties()
+    ? { map { $_ => 1 } values %NIMBLE_LEGACY_CONFIG_KEYS }
+    : ( eval { PVE::Storage::Plugin->private()->{ propertyList } } // {} );
   for my $old ( values %NIMBLE_LEGACY_CONFIG_KEYS ) {
     $opts->{ $old } = { optional => 1 } if $registered->{ $old };
   }
@@ -989,6 +1085,218 @@ sub nimble_multipath_wwid_in_main_conf {
   return index( lc($content), lc($wwid) ) >= 0 ? 1 : 0;
 }
 
+# PVE 9.3+ cluster-wide multipath management (/etc/pve/multipath.cfg, applied by pvestatd into
+# /etc/multipath/conf.d/pve-aliases.conf). There is no plugin API for it, and every change there
+# makes every node rewrite its drop-in and reconfigure multipathd, so the plugin keeps managing its
+# own per-volume aliases. But if an admin puts a Nimble LUN's WWID into multipath.cfg, PVE owns it:
+# do not write a competing alias (two multipaths{} entries for one WWID), and note that PVE never
+# removes WWIDs, so pvestatd re-adds a deleted volume's WWID to the allow-list.
+# Returns { lc(wwid) => 1 }; empty on hosts without the module (PVE < 9.3) or on any error.
+sub nimble_multipath_pve_managed_wwids {
+  my $ids = eval {
+    require PVE::Multipath::Config;
+    PVE::Multipath::Config::read_config()->{ ids };
+  };
+  return {} unless ref($ids) eq 'HASH';
+  return { map { lc($_) => 1 } keys %$ids };
+}
+
+# HPE-recommended multipath device settings for Nimble / Alletra 5000/6000 (same as the README).
+# Scoped to vendor "Nimble" only, so unlike defaults/blacklist it is safe to apply cluster-wide.
+our $NIMBLE_MULTIPATH_DEVICE_BLOCK = <<'MPDEV';
+devices {
+    device {
+        vendor               "Nimble"
+        product              "Server"
+        path_grouping_policy group_by_prio
+        prio                 "alua"
+        hardware_handler     "1 alua"
+        path_selector        "service-time 0"
+        path_checker         tur
+        no_path_retry        30
+        failback             immediate
+        fast_io_fail_tmo     5
+        dev_loss_tmo         infinity
+    }
+}
+MPDEV
+
+# True if multipath config text already has a device entry for vendor Nimble inside a top-level
+# `devices` section (a `vendor "Nimble"` under blacklist_exceptions does not count).
+sub nimble_multipath_text_has_nimble_device {
+  my ($text) = @_;
+  my ( $depth, $section ) = ( 0, '' );
+  for my $line ( split /\n/, $text // '' ) {
+    ( my $l = $line ) =~ s/[#!].*//;
+    $section = $1 if $depth == 0 && $l =~ /^\s*(\w+)\s*\{/;
+    return 1 if $section eq 'devices' && $depth >= 1 && $l =~ /^\s*vendor\s+"?Nimble"?\s*$/i;
+    $depth++ while $l =~ /\{/g;
+    $depth-- while $l =~ /\}/g;
+    $depth = 0 if $depth < 0;
+    $section = '' if $depth == 0;
+  }
+  return 0;
+}
+
+# PVE 9.3+: make sure the cluster-wide Multipath Overrides (Datacenter > SAN, /etc/pve/
+# multipath-overrides.conf) carry the Nimble device settings, so every node gets them without editing
+# /etc/multipath.conf. Called from the package postinst. Never replaces an existing Nimble device entry
+# (the admin's tuning wins) and never touches defaults/blacklist, which are host-wide policy.
+# Returns 'added', 'present', 'removed-by-admin', 'unsupported' (no PVE managed multipath) or
+# 'error: ...'.
+# Added once per cluster: the marker below keeps an admin's deliberate removal from being undone by the
+# next upgrade.
+our $NIMBLE_MULTIPATH_OVERRIDES_MARKER = '/etc/pve/priv/nimble/multipath-overrides-added';
+
+sub nimble_multipath_ensure_pve_overrides {
+  return 'unsupported' unless eval { require PVE::Multipath::Config; 1 };
+  return 'unsupported'
+    unless PVE::Multipath::Config->can('lock_overrides')
+    && PVE::Multipath::Config->can('read_overrides')
+    && PVE::Multipath::Config->can('write_overrides');
+  my $result = 'present';
+  eval {
+    PVE::Multipath::Config::lock_overrides(
+      sub {
+        my $cur = PVE::Multipath::Config::read_overrides() // '';
+        return if nimble_multipath_text_has_nimble_device($cur);
+        if ( -e $NIMBLE_MULTIPATH_OVERRIDES_MARKER ) {
+          $result = 'removed-by-admin';
+          return;
+        }
+        my $trimmed = $cur;
+        $trimmed =~ s/\s+$//;
+        my $new = length($trimmed) ? "$trimmed\n\n" : '';
+        $new .= $NIMBLE_MULTIPATH_DEVICE_BLOCK;
+        if ( PVE::Multipath::Config->can('check_overrides') ) {
+          PVE::Multipath::Config::check_overrides($new);
+        }
+        my $out = PVE::Multipath::Config->can('format_overrides')
+          ? PVE::Multipath::Config::format_overrides($new)
+          : $new;
+        PVE::Multipath::Config::write_overrides($out);
+        eval {
+          File::Path::make_path( dirname($NIMBLE_MULTIPATH_OVERRIDES_MARKER) );
+          PVE::Tools::file_set_contents( $NIMBLE_MULTIPATH_OVERRIDES_MARKER, time() . "\n" );
+        };
+        $result = 'added';
+      }
+    );
+    die $@ if $@;
+  };
+  return "error: $@" if $@;
+  return $result;
+}
+
+# Allow-list a volume's WWID (every form multipath may use) in /etc/multipath/wwids, as PVE's managed
+# multipath does with `multipath -a`, so maps are built under Debian's default find_multipaths "strict"
+# too. Idempotent and best-effort; the WWIDs file is per node, so each mapping node adds it.
+our $NIMBLE_MULTIPATH_WWIDS_FILE = '/etc/multipath/wwids';
+
+sub nimble_multipath_wwids_listed {
+  my %have;
+  my $txt = eval { file_get_contents($NIMBLE_MULTIPATH_WWIDS_FILE) } // '';
+  $have{ lc $1 } = 1 while $txt =~ m{^/([^/\s]+)/\s*$}mg;
+  return \%have;
+}
+
+sub nimble_multipath_allowlist_wwid {
+  my ( $wwid, $remove ) = @_;
+  return unless length($wwid);
+  my $mp = eval { get_command_path('multipath') };
+  return unless $mp;
+  my $have = nimble_multipath_wwids_listed();
+  for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
+    my $t = nimble_untaint_multipath_wwid($w);
+    next unless length $t;
+    # Only spawn multipath when the file would actually change (activation calls this every cycle).
+    next if !$remove && $have->{ lc $t };
+    next if $remove  && !$have->{ lc $t };
+    eval {
+      exec_command( [ $mp, ( $remove ? '-w' : '-a' ), '--', $t ], -1, quiet => 1, errfunc => sub { } );
+    };
+  }
+}
+
+# Proxmox VE 9.3+ cluster multipath.cfg: third-party plugins need explicit WWID entries (built-in
+# iSCSI uses managed-multipath). Opt-in via san-multipath; host map add/remove stays in this plugin.
+sub san_multipath_config_available {
+  return eval {
+    require PVE::Multipath::Config;
+    PVE::Multipath::Config->can('lock_config')
+      && PVE::Multipath::Config->can('write_cluster_config');
+  };
+}
+
+sub san_multipath_register_wwid {
+  my ( $class, $wwid, $scfg ) = @_;
+
+  return 0 unless $scfg && $scfg->{'san-multipath'};
+  return 0 unless defined($wwid) && length($wwid);
+  return 0 unless san_multipath_config_available();
+
+  my $ok = eval {
+    PVE::Multipath::Config::lock_config(
+      sub {
+        my $cfg = PVE::Multipath::Config::read_config();
+        $cfg->{ ids } //= {};
+        return if $cfg->{ ids }->{$wwid};
+        $cfg->{ ids }->{$wwid} = { type => 'wwid' };
+        PVE::Multipath::Config::write_cluster_config($cfg);
+      }
+    );
+    1;
+  };
+  if ( !$ok ) {
+    warn "Warning :: Failed to register multipath WWID \"$wwid\": $@";
+    return 0;
+  }
+  return 1;
+}
+
+sub san_multipath_unregister_wwid {
+  my ( $class, $wwid, $scfg ) = @_;
+
+  return 0 unless $scfg && $scfg->{'san-multipath'};
+  return 0 unless defined($wwid) && length($wwid);
+  return 0 unless san_multipath_config_available();
+
+  my $ok = eval {
+    PVE::Multipath::Config::lock_config(
+      sub {
+        my $cfg = PVE::Multipath::Config::read_config();
+        $cfg->{ ids } //= {};
+        return unless $cfg->{ ids }->{$wwid};
+        delete $cfg->{ ids }->{$wwid};
+        PVE::Multipath::Config::write_cluster_config($cfg);
+      }
+    );
+    1;
+  };
+  if ( !$ok ) {
+    warn "Warning :: Failed to unregister multipath WWID \"$wwid\": $@";
+    return 0;
+  }
+  return 1;
+}
+
+# Best-effort only: never fail alloc/clone/activate because SAN registration failed.
+sub san_multipath_register_volume {
+  my ( $class, $scfg, $volname, $storeid ) = @_;
+
+  return 0 unless $scfg && $scfg->{'san-multipath'};
+  my $wwid = eval {
+    my ( undef, $id ) = $class->get_device_path_wwid( $scfg, $volname, $storeid );
+    $id;
+  };
+  if ($@) {
+    warn "Warning :: Cannot resolve WWID of volume \"$volname\" for SAN registration: $@";
+    return 0;
+  }
+  return 0 unless length( $wwid // '' );
+  return $class->san_multipath_register_wwid( $wwid, $scfg );
+}
+
 # Returns 1 only when the file on disk actually changed (written or removed), so callers can skip
 # `multipathd reconfigure` when the alias set is unchanged.
 sub nimble_multipath_write_conf {
@@ -1031,10 +1339,12 @@ sub nimble_multipath_write_conf {
 sub nimble_multipath_build_aliases {
   my ( $storeid, $cache ) = @_;
   my %aliases;
+  my $pve_managed = nimble_multipath_pve_managed_wwids();
   for my $vn ( keys %$cache ) {
     my $w = $cache->{$vn};
     next unless length($w);
     next if nimble_multipath_wwid_in_main_conf($w);
+    next if $pve_managed->{ lc($w) };
     $aliases{$w} = nimble_multipath_alias_name( $storeid, $vn );
   }
   return %aliases;
@@ -1172,27 +1482,44 @@ sub nimble_multipath_register {
       . " /etc/multipath.conf to enable plugin-managed aliases.\n";
     return;
   }
-  nimble_multipath_with_storage_lock( $storeid, sub {
-    my $cache = nimble_multipath_load_wwid_cache($storeid);
-    return if ( $cache->{$volname} // '' ) eq $sane_wwid;
-    $cache->{$volname} = $sane_wwid;
-    nimble_multipath_save_wwid_cache( $storeid, $cache );
-    my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
-    nimble_multipath_reconfigure() if nimble_multipath_write_conf( $storeid, \%aliases );
-  } );
+  if ( nimble_multipath_pve_managed_wwids()->{ lc($sane_wwid) } ) {
+    # Still cached (so deregister/rename see it); build_aliases leaves its alias to PVE.
+    print "Info :: [nimble-multipath] WWID $sane_wwid ($volname) is managed by Proxmox VE"
+      . " (Datacenter > SAN, /etc/pve/multipath.cfg) — leaving its alias to PVE.\n";
+  }
+  nimble_multipath_with_storage_lock(
+    $storeid,
+    sub {
+      my $cache = nimble_multipath_load_wwid_cache($storeid);
+      return if ( $cache->{$volname} // '' ) eq $sane_wwid;
+      $cache->{$volname} = $sane_wwid;
+      nimble_multipath_save_wwid_cache( $storeid, $cache );
+      my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
+      nimble_multipath_reconfigure() if nimble_multipath_write_conf( $storeid, \%aliases );
+    }
+  );
 }
 
 sub nimble_multipath_deregister {
   my ( $storeid, $volname ) = @_;
   return unless length($volname) && length($storeid);
-  nimble_multipath_with_storage_lock( $storeid, sub {
-    my $cache = nimble_multipath_load_wwid_cache($storeid);
-    return unless exists $cache->{$volname};
-    delete $cache->{$volname};
-    nimble_multipath_save_wwid_cache( $storeid, $cache );
-    my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
-    nimble_multipath_reconfigure() if nimble_multipath_write_conf( $storeid, \%aliases );
-  } );
+  nimble_multipath_with_storage_lock(
+    $storeid,
+    sub {
+      my $cache = nimble_multipath_load_wwid_cache($storeid);
+      return unless exists $cache->{$volname};
+      my $old_wwid = $cache->{$volname} // '';
+      if ( length($old_wwid) && nimble_multipath_pve_managed_wwids()->{ lc($old_wwid) } ) {
+        warn "Warning :: [nimble-multipath] WWID $old_wwid ($volname) still has an entry in"
+          . " /etc/pve/multipath.cfg; PVE keeps it allow-listed. Remove it under Datacenter > SAN.\n";
+      }
+      nimble_multipath_allowlist_wwid( $old_wwid, 1 ) if length($old_wwid);
+      delete $cache->{$volname};
+      nimble_multipath_save_wwid_cache( $storeid, $cache );
+      my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
+      nimble_multipath_reconfigure() if nimble_multipath_write_conf( $storeid, \%aliases );
+    }
+  );
 }
 
 # rename_volume: cache keys (and thus aliases) are volname-based; move the entry or the old alias
@@ -1219,6 +1546,7 @@ sub nimble_multipath_restore_aliases {
   my $changed = 0;
   my $cache   = nimble_multipath_load_wwid_cache($storeid);
   if ( keys %$cache ) {
+    nimble_multipath_allowlist_wwid($_) for grep { length } values %$cache;
     my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
     $changed = nimble_multipath_write_conf( $storeid, \%aliases ) if keys %aliases;
   }
@@ -3954,10 +4282,16 @@ sub nimble_host_refresh_volume_size_after_array_resize {
 sub parse_volname {
   my ( $class, $volname ) = @_;
   if ( $volname =~ m/^((vm|base)-(\d+)-\S+)$/ ) {
-    # Core block plugins (RBD/LVM/ZFS) return ('images', <full volname>, vmid, ..., $isBase, fmt).
-    # 'base' is not a valid vtype — base images are vtype 'images' with the isBase flag. base-*
+    # Core block plugins (RBD/LVM/ZFS) return (<guest vtype>, <full volname>, vmid, ..., $isBase, fmt).
+    # 'base' is not a valid vtype — base images are a guest vtype with the isBase flag. base-*
     # volumes cannot currently be created (create_base dies) but the contract must still hold.
-    return ( 'images', $1, $3, undef, undef, ( $2 eq 'base' ? 1 : 0 ), 'raw' );
+    # APIVER 17: the base helper returns 'vm-state' for vm-<id>-state-*, else 'vm-vol' (raw CT
+    # volumes share the VM naming scheme, same as in-tree LVM/RBD), and 'images' when api() < 17.
+    # Hosts before 9.3 lack the helper and keep getting 'images'.
+    my $vtype = PVE::Storage::Plugin->can('guest_volume_vtype')
+      ? $class->guest_volume_vtype( 'raw', $1 )
+      : 'images';
+    return ( $vtype, $1, $3, undef, undef, ( $2 eq 'base' ? 1 : 0 ), 'raw' );
   }
   die "Error :: Invalid volume name ($volname).\n";
 }
@@ -4021,17 +4355,27 @@ sub alloc_image {
   $size = 1024 if $size < 1024;
   my $sizeB = $size * 1024;
   $class->nimble_create_volume( $scfg, $name, $sizeB, $storeid );
+  # Best-effort: device may not be mapped yet; activate_volume lazy-adopts if this is a no-op.
+  eval { $class->san_multipath_register_volume( $scfg, $name, $storeid ); };
+  warn "Warning :: SAN multipath registration after alloc of \"$name\" failed: $@\n" if $@;
   return $name;
 }
 
 sub free_image {
   my ( $class, $storeid, $scfg, $volname, $isBase ) = @_;
+  # Resolve WWID before deactivate/remove while the volume still answers on the array.
+  my $wwid;
+  if ( $scfg->{'san-multipath'} ) {
+    ( undef, $wwid ) = eval { $class->get_device_path_wwid( $scfg, $volname, $storeid ) };
+    warn "Warning :: Cannot resolve WWID of volume \"$volname\" before remove: $@\n" if $@;
+  }
   $class->deactivate_volume( $storeid, $scfg, $volname );
   $class->nimble_remove_volume( $scfg, $volname, $storeid );
   {
     local $STORAGE_LOCK_HELD = 1;    # vdisk_free already holds the storage lock
     nimble_multipath_deregister( $storeid, $volname );
   }
+  $class->san_multipath_unregister_wwid( $wwid, $scfg ) if length( $wwid // '' );
   return undef;
 }
 
@@ -4500,6 +4844,7 @@ sub map_volume {
     . "). See task log for portals tried and iscsiadm errors above.\n"
     unless length($path) && -b $path;
   $path = nimble_untaint_dev_path($path) || $path;
+  nimble_multipath_allowlist_wwid($wwid) if length($wwid);
   if ( length( $wwid ) && !multipath_check( $wwid ) ) {
     for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
       eval { exec_command( [ 'multipathd', 'add', 'map', $w ], -1, timeout => 30 ); };
@@ -4512,6 +4857,7 @@ sub map_volume {
     eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
     ( $path, $wwid ) = get_device_path_by_serial( $serial );
     $path = nimble_untaint_dev_path($path) || $path if length $path;
+    nimble_multipath_allowlist_wwid($wwid) if length($wwid);
     if ( length( $wwid ) && !multipath_check( $wwid ) ) {
       for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
         eval { exec_command( [ 'multipathd', 'add', 'map', $w ], -1, timeout => 30 ); };
@@ -4523,7 +4869,7 @@ sub map_volume {
   }
   $path = nimble_untaint_dev_path($path) || $path;
   nimble_multipath_register( $storeid, $volname, $wwid ) if length($wwid);
-  return $path;
+  return wantarray ? ( $path, $wwid ) : $path;
 }
 
 sub unmap_volume {
@@ -4559,7 +4905,11 @@ sub unmap_volume {
 sub activate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache, $hints ) = @_;
   $class->nimble_volume_connection( $storeid, $scfg, $volname, 1 );
-  $class->map_volume( $storeid, $scfg, $volname, $snapname, $hints );
+  my ( undef, $wwid ) = $class->map_volume( $storeid, $scfg, $volname, $snapname, $hints );
+  # Lazy adopt for volumes created before san-multipath was enabled (or on older plugin versions).
+  # Use the WWID from map_volume so activation does not call the array again for registration.
+  eval { $class->san_multipath_register_wwid( $wwid, $scfg ) if length( $wwid // '' ); };
+  warn "Warning :: SAN multipath registration during activate of \"$volname\" failed: $@\n" if $@;
   return 1;
 }
 
@@ -4782,6 +5132,8 @@ sub clone_image {
   my ( $class, $scfg, $storeid, $volname, $vmid, $snap ) = @_;
   my $name = $class->find_free_diskname( $storeid, $scfg, $vmid );
   $class->nimble_clone_from_snapshot( $scfg, $storeid, $name, $volname, $snap );
+  eval { $class->san_multipath_register_volume( $scfg, $name, $storeid ); };
+  warn "Warning :: SAN multipath registration after clone of \"$name\" failed: $@\n" if $@;
   return $name;
 }
 

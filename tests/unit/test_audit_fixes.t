@@ -269,6 +269,8 @@ my $P = 'PVE::Storage::Custom::NimbleStoragePlugin';
     'options() declares nimble_iscsi_discovery_override optional' );
   ok( $opts->{nimble_legacy_name_fallback} && $opts->{nimble_legacy_name_fallback}{optional},
     'options() declares nimble_legacy_name_fallback optional' );
+  ok( $opts->{'san-multipath'} && $opts->{'san-multipath'}{optional},
+    'options() declares san-multipath optional' );
 }
 
 ### Opt-in booleans: default OFF, PVE boolean spellings honored

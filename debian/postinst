@@ -43,9 +43,27 @@ inject_gui_script() {
   sed -i "s|</head>|${tag}\n  </head>|" "$tpl"
 }
 
+# PVE 9.3+: add the HPE Nimble multipath device settings to the cluster-wide Multipath Overrides
+# (Datacenter > SAN), once per cluster, unless a Nimble device entry already exists. Never fails the
+# install (e.g. without quorum it just says so); opt out with NIMBLE_SKIP_MULTIPATH_OVERRIDES=1.
+ensure_multipath_overrides() {
+  [ "${NIMBLE_SKIP_MULTIPATH_OVERRIDES:-0}" = "1" ] && return 0
+  [ -f /usr/share/perl5/PVE/Multipath/Config.pm ] || return 0
+  [ -d /etc/pve/nodes ] || return 0
+  local res
+  res=$(timeout 60 perl -e 'use PVE::Storage; print PVE::Storage::Custom::NimbleStoragePlugin::nimble_multipath_ensure_pve_overrides();' 2>/dev/null) || true
+  case "$res" in
+    added) echo "pve-nimble-plugin: added HPE Nimble device settings to Datacenter > SAN > Multipath Overrides." ;;
+    present|removed-by-admin|unsupported) ;;
+    *) echo "pve-nimble-plugin: could not update Multipath Overrides (${res:-no result}); see README, Multipath." >&2 ;;
+  esac
+  return 0
+}
+
 case "$1" in
   configure)
     inject_gui_script
+    ensure_multipath_overrides
     if [ -d /run/systemd/system ]; then
       restart_pve_stack
     fi
