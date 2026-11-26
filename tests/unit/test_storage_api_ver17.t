@@ -112,12 +112,38 @@ ok( $pd->{'hidden-properties'}{address}, 'plugindata: legacy alias hidden' );
 ok( $pd->{'hidden-properties'}{format}, 'plugindata: format hidden (raw only; dialog would offer qcow2/vmdk)' );
 ok( $pd->{'advanced-properties'}{nimble_limit_iops}, 'plugindata: QoS limit is advanced' );
 ok( $pd->{'advanced-properties'}{'san-multipath'}, 'plugindata: san-multipath is advanced' );
+ok( $pd->{'advanced-properties'}{nimble_volume_collection}, 'plugindata: volume collection is advanced (NimbleEdit parity)' );
+ok( $pd->{'advanced-properties'}{nimble_check_ssl}, 'plugindata: TLS verify is advanced (NimbleEdit parity)' );
 ok( !$pd->{'advanced-properties'}{nimble_address}, 'plugindata: address is not advanced' );
+ok( !$pd->{'advanced-properties'}{nimble_folder}, 'plugindata: folder stays on main pane' );
+# Native 9.3 dialog inventory: every operator-facing option has a title; main-pane keys are not advanced.
+{
+  my $gui = $class->properties();
+  my @main = qw(nimble_address nimble_vnprefix nimble_pool_name nimble_folder nimble_initiator_group);
+  my @adv  = qw(
+    nimble_volume_collection nimble_token_ttl nimble_debug nimble_check_ssl
+    nimble_auto_iscsi_discovery nimble_iscsi_discovery_ips nimble_iscsi_discovery_override
+    nimble_legacy_name_fallback nimble_limit_iops nimble_limit_mbps san-multipath
+  );
+  for my $k (@main) {
+    ok( $gui->{$k}{title}, "native GUI: main field $k has title" );
+    ok( !$pd->{'advanced-properties'}{$k}, "native GUI: $k not forced into Advanced" );
+  }
+  for my $k (@adv) {
+    ok( $pd->{'advanced-properties'}{$k}, "native GUI: $k is Advanced" );
+    ok( $gui->{$k}{title}, "native GUI: advanced field $k has title" );
+  }
+  ok( $gui->{username}{title} && $gui->{password}{title} && $gui->{port}{title},
+    'native GUI: isolate auth/port fields have titles' );
+  is( $gui->{port}{default}, 5392, 'native GUI: API port default 5392' );
+  is( $pd->{meta}{'display-name'}, 'HPE Nimble / Alletra 5000/6000', 'native GUI: Add-menu display name' );
+}
 ok( $pd->{'sensitive-properties'}{password}, 'plugindata: password still sensitive' );
 is( $pd->{'isolate-properties'}, 1, 'plugindata: isolates properties on APIVER 17' );
 {
   my $iso = $class->properties();
   ok( $iso->{$_}, "isolated properties: declares own $_" ) for qw(username password port);
+  is( $iso->{port}{format}, 'pve-storage-port', 'isolated properties: port uses pve-storage-port format' );
   ok( $iso->{address} && $iso->{vnprefix}, 'isolated properties: legacy aliases always declared' );
   ok( $iso->{'san-multipath'}, 'isolated properties: san-multipath declared' );
   my @req = grep { !$iso->{$_}{optional} } keys %$iso;
@@ -146,6 +172,62 @@ is_deeply( \@untitled, [], 'properties: every nimble_/san-multipath property has
 my $opts = $class->options();
 my @bad_adv = grep { !$opts->{$_} } keys %{ $pd->{'advanced-properties'} };
 is_deeply( \@bad_adv, [], 'plugindata: advanced properties are all options' );
+
+# --- targeted iSCSI rescans (no host-wide `iscsiadm -m session --rescan`) -------------------------
+{
+  my $P = 'PVE::Storage::Custom::NimbleStoragePlugin';
+  my $out = join "\n",
+    'tcp: [3] 10.0.0.11:3260,2460 iqn.2007-11.com.nimblestorage:vm-100-disk-0-v1.a.b (non-flash)',
+    'tcp: [4] 10.0.0.12:3260,2460 iqn.2007-11.com.nimblestorage:vm-100-disk-0-v1.a.b (non-flash)',
+    'tcp: [5] 10.0.0.11:3260,2460 iqn.2007-11.com.nimblestorage:vm-100-disk-01-v1.a.b (non-flash)',
+    'tcp: [9] 192.0.2.5:3260,1 iqn.2001-05.com.other:lun7 (non-flash)';
+  is_deeply(
+    [ PVE::Storage::Custom::NimbleStoragePlugin::nimble_iscsi_session_ids_for_target(
+        'iqn.2007-11.com.nimblestorage:vm-100-disk-0-v1.a.b', $out
+      ) ],
+    [ 3, 4 ],
+    'session ids: both paths of this target, not a prefix-sharing volume or another array',
+  );
+  is_deeply(
+    [ PVE::Storage::Custom::NimbleStoragePlugin::nimble_iscsi_session_ids_for_target(
+        'IQN.2007-11.COM.NIMBLESTORAGE:VM-100-DISK-0-V1.A.B', $out
+      ) ],
+    [ 3, 4 ],
+    'session ids: IQN case-insensitive',
+  );
+  is_deeply(
+    [ PVE::Storage::Custom::NimbleStoragePlugin::nimble_iscsi_session_ids_for_target( 'iqn.none:x', $out ) ],
+    [],
+    'session ids: none for an unknown target',
+  );
+  is_deeply(
+    [ PVE::Storage::Custom::NimbleStoragePlugin::nimble_iscsi_session_ids_for_target( "bad iqn; rm -rf /", $out ) ],
+    [],
+    'session ids: unsafe IQN rejected',
+  );
+
+  no warnings 'redefine';
+  no strict 'refs';
+  my @cmds;
+  # Prefer /usr/bin/true (macOS CI/dev hosts often lack /bin/true).
+  my $adm = ( -x '/usr/bin/true' ) ? '/usr/bin/true' : '/bin/true';
+  local *{"${P}::nimble_iscsiadm_path"}       = sub { $adm };
+  local *{"${P}::nimble_iscsi_session_output"} = sub { $out };
+  # Plugin imports run_command into its package; stub there so the helper sees it.
+  local *{"${P}::run_command"} = sub { push @cmds, join( ' ', @{ $_[0] } ); return 0 };
+  is(
+    PVE::Storage::Custom::NimbleStoragePlugin::nimble_iscsi_rescan_target_sessions(
+      'iqn.2007-11.com.nimblestorage:vm-100-disk-0-v1.a.b'
+    ),
+    2,
+    'targeted rescan: one per session of the target',
+  );
+  is_deeply(
+    \@cmds,
+    [ "$adm -m session -r 3 --rescan", "$adm -m session -r 4 --rescan" ],
+    'targeted rescan: only -r <sid> --rescan, never a bare host-wide session rescan',
+  );
+}
 
 is(
   PVE::Storage::Custom::NimbleStoragePlugin::nimble_snapshot_virtual_size_bytes( { size => 10 } ),

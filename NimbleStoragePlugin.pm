@@ -100,7 +100,8 @@ sub api {
   # APIVER 16: optional format/name helpers for directory-like alloc/rename; unused here
   #   (alloc_image/rename_volume are implemented directly).
   # APIVER 17: guest volume types (parse_volname via guest_volume_vtype; content types in plugindata),
-  #   web UI metadata in plugindata, 'isolate-properties' (see nimble_isolate_properties).
+  #   web UI metadata in plugindata, 'isolate-properties' (see nimble_isolate_properties),
+  #   opt-in san-multipath for cluster multipath.cfg (separate from the APIVER bump; needs 9.3 host).
   #   free_image returns no cleanup worker, so the lock change does not apply.
   # Report the host version up to 17 so PVE does not warn about an older storage API.
   my $tested_apiver = 17;
@@ -144,14 +145,16 @@ sub plugindata {
   }
   return {
     content => [ $supported, { images => 1, rootdir => 1 } ],
-    # Web UI metadata (pve-storage APIVER 17, ignored by older hosts). The NimbleEdit.js panel still
-    # takes precedence for the dialog; this feeds GET /plugins/storage/plugin and the type label.
+    # Web UI metadata (pve-storage APIVER 17, ignored by older hosts). On PVE 9.3+ (CustomInputPanel)
+    # the native dialog uses this; NimbleEdit.js returns early there so it does not override.
     meta => { 'display-name' => 'HPE Nimble / Alletra 5000/6000' },
+    # Match the NimbleEdit.js Advanced tab so the native 9.3 CustomInputPanel keeps the same
+    # main vs advanced split (plus san-multipath, which only exists on 9.3+).
     'advanced-properties' => {
       map { $_ => 1 }
-        qw(nimble_token_ttl nimble_debug nimble_auto_iscsi_discovery nimble_iscsi_discovery_ips
-        nimble_iscsi_discovery_override nimble_legacy_name_fallback nimble_limit_iops
-        nimble_limit_mbps san-multipath)
+        qw(nimble_volume_collection nimble_token_ttl nimble_debug nimble_check_ssl
+        nimble_auto_iscsi_discovery nimble_iscsi_discovery_ips nimble_iscsi_discovery_override
+        nimble_legacy_name_fallback nimble_limit_iops nimble_limit_mbps san-multipath)
     },
     # nimble_storeid is maintained by check_config; legacy pre-v0.0.25 aliases are migrated on write.
     # `format` stays in options() so existing "format raw" lines keep parsing, but the generated
@@ -321,9 +324,12 @@ sub properties {
     $props->{ port } = {
       title       => 'API Port',
       description => 'Array management REST API port (default 5392).',
+      # APIVER 17 isolate: prefer the registered storage port format (same bounds as integer 1–65535).
+      format      => 'pve-storage-port',
       type        => 'integer',
       minimum     => 1,
       maximum     => 65535,
+      default     => 5392,
     };
     $_->{ optional } = 1 for values %$props;
     return $props;
@@ -2552,6 +2558,41 @@ sub nimble_iscsi_compact_lc {
   return $t;
 }
 
+# Session IDs whose target is exactly this IQN: the [N] in `iscsiadm -m session` lines
+# ("tcp: [3] 10.0.0.1:3260,1 iqn... (non-flash)"), which session mode selects with `-r N`.
+# Optional $out lets tests and callers pass already-captured output.
+sub nimble_iscsi_session_ids_for_target {
+  my ( $target_iqn, $out ) = @_;
+  my $iqn_safe = nimble_untaint_iscsiadm_scalar($target_iqn);
+  return () unless length $iqn_safe;
+  $out //= nimble_iscsi_session_output();
+  my @sids;
+  for my $line ( split /\n/, $out // '' ) {
+    next unless $line =~ /^\s*\S+:\s+\[(\d+)\]\s+\S+\s+(\S+)/;
+    push @sids, $1 if lc($2) eq lc($iqn_safe);
+  }
+  return @sids;
+}
+
+# Rescan only the sessions of one volume's target. A bare `iscsiadm -m session --rescan` revalidates every
+# LUN path of every session on the host (all other Nimble volumes, each its own target, plus other
+# storages' LUNs); on ALUA arrays like Nimble that floods the kernel log and can freeze request queues
+# while disks revalidate. PVE 9.3 dropped the same full rescan from its iSCSI plugin for that reason.
+# New LUNs still appear through scsi_scan_new (host scan for new devices only).
+sub nimble_iscsi_rescan_target_sessions {
+  my ( $target_iqn, $timeout ) = @_;
+  my $adm = nimble_iscsiadm_path();
+  return 0 unless -x $adm;
+  my $n = 0;
+  for my $sid ( nimble_iscsi_session_ids_for_target($target_iqn) ) {
+    eval {
+      run_command( [ $adm, '-m', 'session', '-r', $sid, '--rescan' ], timeout => $timeout // 60, quiet => 1 );
+    };
+    $n++ unless $@;
+  }
+  return $n;
+}
+
 # True if an active session exists for this IQN. Uses only `iscsiadm -m session` and matches the IQN in
 # output (compact + plain). Do not use `-m session -T <iqn>`: on common open-iscsi builds `-T`/`--targetname`
 # is for **node** mode, not session mode, and produces "option '-' is not allowed/supported" spam.
@@ -4230,10 +4271,8 @@ sub nimble_host_refresh_volume_size_after_array_resize {
   return unless $volume && length( $volume->{ serial } // '' );
   my $serial = $volume->{ serial };
 
-  eval {
-    my $adm = nimble_iscsiadm_path();
-    run_command( [ $adm, '-m', 'session', '--rescan' ], timeout => 120, quiet => 1 ) if -x $adm;
-  };
+  # Targeted per-volume session rescan (not host-wide --rescan); see nimble_iscsi_rescan_target_sessions.
+  eval { nimble_iscsi_rescan_target_sessions( $volume->{ target_name }, 120 ); };
   eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
   eval { scsi_scan_new('iscsi'); };
 
@@ -4801,11 +4840,9 @@ sub map_volume {
   elsif ( !length($target_iqn) ) {
     warn "Warning :: Volume \"$volname\" has no target_name (iSCSI IQN) from Nimble API.\n";
   }
-  # Like the GUI after attaching a LUN: rescan active iSCSI sessions so new LUNs appear without waiting only on sysfs scan.
-  eval {
-    my $adm = nimble_iscsiadm_path();
-    run_command( [ $adm, '-m', 'session', '--rescan' ], timeout => 120, quiet => 1 ) if -x $adm;
-  };
+  # Rescan only this volume's sessions (see nimble_iscsi_rescan_target_sessions); the per-path device
+  # rescan and scsi_scan_new below still discover new LUNs without a host-wide session --rescan.
+  eval { nimble_iscsi_rescan_target_sessions( $target_iqn, 120 ) if length($target_iqn); };
   eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
   eval { scsi_scan_new( 'iscsi' ); };
   warn "Warning :: iSCSI host scan failed: $@" if $@;
@@ -4817,12 +4854,9 @@ sub map_volume {
       if ( $wait_ticks % 100 == 0 ) {
         eval { scsi_scan_new('iscsi'); };
       }
-      # Sessions up but LUN/multipath slow: periodic rescan + multipath refresh (migration target).
+      # Sessions up but LUN/multipath slow: periodic targeted rescan + multipath refresh (migration target).
       if ( $wait_ticks % 50 == 0 ) {
-        eval {
-          my $adm = nimble_iscsiadm_path();
-          run_command( [ $adm, '-m', 'session', '--rescan' ], timeout => 90, quiet => 1 ) if -x $adm;
-        };
+        eval { nimble_iscsi_rescan_target_sessions( $target_iqn, 90 ) if length($target_iqn); };
         eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
       }
       my ( $p, $w ) = get_device_path_by_serial( $serial );
@@ -4868,6 +4902,14 @@ sub map_volume {
     }
   }
   $path = nimble_untaint_dev_path($path) || $path;
+  # When san-multipath is on, register the WWID in cluster multipath.cfg BEFORE writing a plugin
+  # conf.d alias. Otherwise the first map writes a plugin alias, then activate registers the same
+  # WWID with PVE — dual ownership until the next restore_aliases rebuild. With SAN first,
+  # nimble_multipath_pve_managed_wwids skips the alias (same as an admin-owned SAN entry).
+  if ( length($wwid) && $scfg && $scfg->{'san-multipath'} ) {
+    eval { $class->san_multipath_register_wwid( $wwid, $scfg ); };
+    warn "Warning :: SAN multipath registration during map of \"$volname\" failed: $@\n" if $@;
+  }
   nimble_multipath_register( $storeid, $volname, $wwid ) if length($wwid);
   return wantarray ? ( $path, $wwid ) : $path;
 }
@@ -4906,8 +4948,9 @@ sub activate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache, $hints ) = @_;
   $class->nimble_volume_connection( $storeid, $scfg, $volname, 1 );
   my ( undef, $wwid ) = $class->map_volume( $storeid, $scfg, $volname, $snapname, $hints );
-  # Lazy adopt for volumes created before san-multipath was enabled (or on older plugin versions).
-  # Use the WWID from map_volume so activation does not call the array again for registration.
+  # map_volume already registers when san-multipath is on (before plugin aliases). This second
+  # call is a lazy adopt for volumes mapped before the flag was enabled, or if map skipped
+  # registration (empty WWID then resolved later). Idempotent against multipath.cfg.
   eval { $class->san_multipath_register_wwid( $wwid, $scfg ) if length( $wwid // '' ); };
   warn "Warning :: SAN multipath registration during activate of \"$volname\" failed: $@\n" if $@;
   return 1;

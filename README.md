@@ -111,6 +111,7 @@ Use `images` only if you do not want LXC root disks on this store. Then in the P
 | `nimble_check_ssl` | No | Default `no`. Set to `yes` to verify TLS certificates. |
 | `nimble_token_ttl` | No | Session token cache TTL in seconds (default `3600`) |
 | `nimble_debug` | No | `0`=off, `1`=basic, `2`=verbose, `3`=trace |
+| `san-multipath` | No | PVE 9.3+. Default `no`. Register each volume WWID in cluster `/etc/pve/multipath.cfg` so **Datacenter → SAN** can manage it. Built-in iSCSI uses a different option (`managed-multipath`); third-party plugins cannot use that name — see [Multipath / SAN](#multipath--san-pve-93). |
 
 **Example `storage.cfg` entry:**
 
@@ -224,6 +225,14 @@ After editing, run `multipathd reconfigure`.
 
 > **Alias management:** The plugin automatically writes per-volume WWID→alias entries to `/etc/multipath/conf.d/nimble-<storeid>.conf` when volumes are mapped, and restores them on `activate_storage`. You do not need to manage this file manually — but do not hand-edit it, as the plugin owns it.
 
+### Multipath / SAN (PVE 9.3)
+
+**Why not `managed-multipath`?** That option belongs to the **built-in `iscsi` storage type** only. It tells PVE’s iSCSI plugin to feed that target’s LUNs into cluster multipath without writing per-WWID rows. Third-party plugins cannot declare it: the storage layer drops a custom plugin that redeclares another type’s property, and the option name was chosen as `managed-multipath` (not `multipath`) precisely because third-party plugins already use `multipath`. Nimble also uses **one iSCSI target IQN per volume**, not one shared target with many LUNs — the built-in machinery does not apply.
+
+**What we use instead:** opt-in `san-multipath` (same approach as the Pure Storage plugin). When enabled, the plugin registers each volume’s WWID in `/etc/pve/multipath.cfg` so **Datacenter → SAN** can manage it; host connect / `multipathd` map add-remove stay in this plugin. Without it, maps still work via the plugin’s `conf.d` aliases and appear under SAN as “Other Maps”.
+
+**APIVER 18?** Current `pve-storage` on PVE 9.3 is **APIVER 17**. Draft APIVER 18 (iso/vztmpl/snippets subdirectory scan depth) is not about block/iSCSI plugins and does not apply to Nimble.
+
 ## Lab validation (informal)
 
 The maintainer has exercised most day-to-day flows on **real Proxmox VE + HPE Nimble** (volumes, QEMU VM and LXC root disks where applicable, PVE and array snapshots, rollback, clone, move disk, capacity/status, multipath, array snapshot import into the VM snapshot list including snap time and descriptions). Alletra 5000/6000 use the same NimbleOS API, so those flows apply there too; that lab work was on Nimble. This is **not** a guarantee for every firmware or cluster layout; treat your own checks as authoritative.
@@ -268,9 +277,9 @@ curl -sk -X POST "https://<nimble>:5392/v1/tokens" \
   -H "Content-Type: application/json" \
   -d '{"data":{"username":"<user>","password":"<password>"}}'
 
-# iSCSI sessions
+# iSCSI sessions (prefer per-session rescan over host-wide `session --rescan`)
 iscsiadm -m session
-iscsiadm -m session --rescan
+# iscsiadm -m session -r <sid> --rescan
 
 # Multipath
 multipath -ll | grep -A 10 "Nimble"
@@ -285,13 +294,14 @@ systemctl restart pvedaemon pveproxy pvestatd
 ## Features
 
 - Create, delete, resize, rename volumes via Nimble REST API (grow triggers host iSCSI/multipath rescan so Proxmox sees the new LUN size immediately)
-- **VM disks** (`images`) and **LXC CT roots** (`rootdir`) on raw Nimble volumes — set `content` as in **Add Storage** (typically `images,rootdir`)
+- **VM disks** (`images`) and **LXC CT roots** (`rootdir`) on raw Nimble volumes — set `content` as in **Add Storage** (typically `images,rootdir`). On PVE 9.3+ / APIVER 17 the plugin also advertises `vm-vol` / `vm-state` / `ct-vol` for finer content restrictions.
 - Initiator group management (auto-create or use existing)
 - Storage-level snapshots: create, delete, rollback
 - Clone from snapshot
 - Array snapshot sync: Nimble array-created snapshots are imported into **QEMU** VM configs automatically (visible in the Proxmox UI snapshot list; LXC/`rootdir` is not part of this sync path — see [AI project context](docs/AI_PROJECT_CONTEXT.md)). The snapshot **description** lists each LUN as **array volume name**, a colon, and the **Nimble snapshot name**; multiple disks in one PVE snapshot are separated by semicolons.
 - Live migration (shared iSCSI block storage)
 - Optional multipath with automatic alias management (`/etc/multipath/conf.d/nimble-<storeid>.conf`)
+- **PVE 9.3+:** opt-in `san-multipath` registers WWIDs in cluster `/etc/pve/multipath.cfg` (Datacenter → SAN); native Add/Edit dialog from plugin metadata (`isolate-properties`, titles, advanced/hidden fields)
 - Veeam Backup & Replication V13+ compatible (`raw+size` import/export)
 - Token cache under `/etc/pve/priv/nimble/` (cluster-safe)
 

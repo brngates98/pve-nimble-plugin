@@ -22,7 +22,9 @@ The `NimbleStoragePlugin.pm` module defines the storage type, properties, and AP
 
 ### Frontend (JavaScript)
 
-The `www/NimbleEdit.js` file provides the web GUI components:
+On **PVE 9.3+**, the native `CustomInputPanel` dialog is used (plugin metadata only). `NimbleEdit.js` still loads but its IIFE returns early when that class exists so it does **not** override the native form. Full 9.3 GUI support is therefore entirely the backend metadata in `plugindata()` / `properties()` / `options()` — see [PVE 9.3 native dialog checklist](#pve-93-native-dialog-checklist) below.
+
+On **older hosts**, `www/NimbleEdit.js` provides the web GUI components:
 
 - **`PVE.storage.NimbleInputPanel`**: ExtJS form panel with all configuration fields
   - Inherits from `PVE.panel.StorageBase` (provides ID, Nodes, Enable fields automatically)
@@ -76,7 +78,25 @@ During `.deb` removal, `debian/postrm`:
    - **Auto iSCSI Discovery**: Automatically discover and login to iSCSI targets (default: enabled)
    - **IOPS Limit / Throughput Limit MB/s**: QoS limits applied to newly created volumes and clones (default: unlimited; IOPS minimum is 256)
    - **Legacy Name Fallback**: Also resolve volumes by their bare un-prefixed array name (default: off). **Caution:** do not enable on multiple storages that share one array separated only by prefix
+   - **SAN Multipath (cluster)** *(PVE 9.3+ only)*: Register volume WWIDs in `/etc/pve/multipath.cfg` so Datacenter → SAN can manage them (default: off)
 7. Click **Add**
+
+## PVE 9.3 native dialog checklist
+
+The manager builds Add/Edit from `GET /plugins/storage/plugin/nimble`. This plugin supplies:
+
+| Native UI need | How we wire it |
+|----------------|----------------|
+| Type label in Add menu | `meta.display-name` → `HPE Nimble / Alletra 5000/6000` |
+| Field labels | `title` on every `nimble_*` / `san-multipath` / isolate `username`/`password`/`port` |
+| Advanced tab | `advanced-properties` (collection, TTL, debug, TLS, iSCSI, QoS, legacy fallback, **san-multipath**) |
+| Hide internals | `hidden-properties` (`nimble_storeid`, `format`, legacy aliases) |
+| Password masking / priv file | `sensitive-properties` → `password` (optional in `options()`) |
+| No property clashes with Pure/core | `isolate-properties` on host APIVER ≥ 17 |
+| Content picker | `images`/`rootdir`/`none` always; plus `vm-vol`/`vm-state`/`ct-vol` on APIVER ≥ 17 |
+| API port (isolate hosts) | Declared `port` with `format => pve-storage-port`, default `5392` |
+
+`NimbleEdit.js` must keep returning early when `PVE.storage.CustomInputPanel` exists; otherwise a `storageSchema['nimble']` entry would hide this native dialog.
 
 ### Editing Nimble Storage
 
@@ -113,6 +133,8 @@ During `.deb` removal, `debian/postrm`:
 | IOPS Limit (new volumes) | `nimble_limit_iops` | No | Default: -1 (unlimited); minimum 256 |
 | Throughput Limit MB/s | `nimble_limit_mbps` | No | Default: -1 (unlimited); minimum 1 |
 | Legacy Name Fallback | `nimble_legacy_name_fallback` | No | Default: off. Also resolve bare un-prefixed volume names |
+| API Port *(9.3 isolate)* | `port` | No | Default: `5392` |
+| SAN Multipath (cluster) *(9.3+)* | `san-multipath` | No | Default: off. Registers WWIDs in cluster `multipath.cfg` |
 
 ## Manual Override
 
