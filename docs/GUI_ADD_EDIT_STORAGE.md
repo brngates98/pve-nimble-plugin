@@ -153,6 +153,20 @@ Password should be placed in `/etc/pve/priv/storage/nimble1.pw` (v0.0.25+) for c
 
 ## Troubleshooting
 
+### GUI files “not in /usr/share/pve-manager”
+
+`NimbleEdit.js` is **not** at the top of that directory. After a normal `.deb` install:
+
+```bash
+ls -l /usr/share/pve-manager/js/NimbleEdit.js
+grep -F NimbleEdit.js /usr/share/pve-manager/index.html.tpl
+dpkg -L libpve-storage-nimble-perl | grep -E 'NimbleEdit|NimbleStorage'
+```
+
+- `index.html.tpl` is owned by **`pve-manager`**; this package only inserts a `<script>` tag (via `debian/postinst`).
+- If the `.js` file is missing, reinstall the package (`apt-get install --reinstall libpve-storage-nimble-perl`). Configuring storage with `pvesm` alone never installs the GUI files.
+- **PVE 9.3+:** Add/Edit uses the native dialog from plugin metadata; `NimbleEdit.js` may load and exit immediately when `PVE.storage.CustomInputPanel` exists. Storage still appears under Add as **HPE Nimble / Alletra 5000/6000**.
+
 ### Edit button does nothing
 
 - Check browser console for JavaScript errors
@@ -169,6 +183,7 @@ Password should be placed in `/etc/pve/priv/storage/nimble1.pw` (v0.0.25+) for c
 
 - Same troubleshooting steps as "Edit button does nothing"
 - Verify `PVE.Utils.storageSchema.nimble` is defined (open browser console and type `PVE.Utils.storageSchema.nimble`)
+- On PVE 9.3+, check `PVE.storage.CustomInputPanel` exists and look for the display name from plugin meta instead of `storageSchema.nimble`
 
 ### pve-manager upgrades overwrite `index.html.tpl`
 

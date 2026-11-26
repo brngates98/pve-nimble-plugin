@@ -24,13 +24,23 @@ restart_pve_stack() {
 # Inject the Nimble GUI script tag into the pveproxy HTML template so the
 # ExtJS InputPanel and storageSchema registration load in the browser.
 # The tag is placed just before </head> and is idempotent (safe to re-run).
+#
+# Paths operators often confuse (discussion #11):
+#   - Panel file:  /usr/share/pve-manager/js/NimbleEdit.js   (from this package)
+#   - Template:    /usr/share/pve-manager/index.html.tpl     (from pve-manager; we only edit it)
+# On PVE 9.3+ the panel loads then returns early — native CustomInputPanel owns Add/Edit.
 inject_gui_script() {
   local tpl="/usr/share/pve-manager/index.html.tpl"
+  local js="/usr/share/pve-manager/js/NimbleEdit.js"
   local tag='    <script type="text/javascript" src="/pve2/js/NimbleEdit.js"></script>'
   local marker="NimbleEdit.js"
 
+  if [ ! -f "$js" ]; then
+    echo "WARNING: $js missing — package install incomplete; pre-9.3 Add/Edit GUI will not load." >&2
+  fi
+
   if [ ! -f "$tpl" ]; then
-    echo "WARNING: $tpl not found — Nimble GUI script tag not injected." >&2
+    echo "WARNING: $tpl not found — install pve-manager; Nimble GUI script tag not injected." >&2
     return 0
   fi
 
@@ -41,6 +51,7 @@ inject_gui_script() {
 
   # Insert our <script> tag on the line before </head>
   sed -i "s|</head>|${tag}\n  </head>|" "$tpl"
+  echo "pve-nimble-plugin: injected NimbleEdit.js into $tpl (panel at $js)."
 }
 
 # PVE 9.3+: add the HPE Nimble multipath device settings to the cluster-wide Multipath Overrides

@@ -707,6 +707,17 @@ sub nimble_serial_normalize {
   return lc $s;
 }
 
+# Multipath WWID from Nimble API serial_number without the LUN being mapped (Pure-style).
+# by-id `wwn-0x<32 hex>` maps to multipath WWID `2<32 hex>` (see nimble_multipath_wwid_from_by_id_basename).
+sub nimble_wwid_from_serial {
+  my ($serial) = @_;
+  my $sn = nimble_serial_normalize($serial);
+  return '' unless length $sn;
+  return $sn if $sn =~ /^2[0-9a-f]{32}$/;
+  return "2$sn" if $sn =~ /^[0-9a-f]{32}$/;
+  return '';
+}
+
 # True if Nimble API serial matches kernel-reported SCSI unit serial (spacing/case quirks).
 sub nimble_serial_matches {
   my ( $api, $kernel ) = @_;
@@ -1226,12 +1237,16 @@ sub nimble_multipath_allowlist_wwid {
 
 # Proxmox VE 9.3+ cluster multipath.cfg: third-party plugins need explicit WWID entries (built-in
 # iSCSI uses managed-multipath). Opt-in via san-multipath; host map add/remove stays in this plugin.
+my $SAN_MPATH_CFG_AVAIL;    # undef until probed; 0/1 thereafter (daemon lifetime)
+
 sub san_multipath_config_available {
-  return eval {
+  return $SAN_MPATH_CFG_AVAIL if defined $SAN_MPATH_CFG_AVAIL;
+  $SAN_MPATH_CFG_AVAIL = eval {
     require PVE::Multipath::Config;
     PVE::Multipath::Config->can('lock_config')
       && PVE::Multipath::Config->can('write_cluster_config');
-  };
+  } ? 1 : 0;
+  return $SAN_MPATH_CFG_AVAIL;
 }
 
 sub san_multipath_register_wwid {
@@ -1240,13 +1255,15 @@ sub san_multipath_register_wwid {
   return 0 unless $scfg && $scfg->{'san-multipath'};
   return 0 unless defined($wwid) && length($wwid);
   return 0 unless san_multipath_config_available();
+  my $want = lc($wwid);
 
   my $ok = eval {
     PVE::Multipath::Config::lock_config(
       sub {
         my $cfg = PVE::Multipath::Config::read_config();
         $cfg->{ ids } //= {};
-        return if $cfg->{ ids }->{$wwid};
+        # Case-insensitive: avoid a second row if an admin/PVE already stored another casing.
+        return if grep { lc($_) eq $want } keys %{ $cfg->{ ids } };
         $cfg->{ ids }->{$wwid} = { type => 'wwid' };
         PVE::Multipath::Config::write_cluster_config($cfg);
       }
@@ -1266,14 +1283,16 @@ sub san_multipath_unregister_wwid {
   return 0 unless $scfg && $scfg->{'san-multipath'};
   return 0 unless defined($wwid) && length($wwid);
   return 0 unless san_multipath_config_available();
+  my $want = lc($wwid);
 
   my $ok = eval {
     PVE::Multipath::Config::lock_config(
       sub {
         my $cfg = PVE::Multipath::Config::read_config();
         $cfg->{ ids } //= {};
-        return unless $cfg->{ ids }->{$wwid};
-        delete $cfg->{ ids }->{$wwid};
+        my @hit = grep { lc($_) eq $want } keys %{ $cfg->{ ids } };
+        return unless @hit;
+        delete $cfg->{ ids }->{$_} for @hit;
         PVE::Multipath::Config::write_cluster_config($cfg);
       }
     );
@@ -1287,12 +1306,18 @@ sub san_multipath_unregister_wwid {
 }
 
 # Best-effort only: never fail alloc/clone/activate because SAN registration failed.
+# Prefer serial→WWID (no LUN map required) so alloc/clone can register before first activate.
 sub san_multipath_register_volume {
   my ( $class, $scfg, $volname, $storeid ) = @_;
 
   return 0 unless $scfg && $scfg->{'san-multipath'};
   my $wwid = eval {
-    my ( undef, $id ) = $class->get_device_path_wwid( $scfg, $volname, $storeid );
+    my $sid    = nimble_effective_storeid( $scfg, $storeid );
+    my $volume = $class->nimble_get_volume_info( $scfg, $volname, $sid );
+    my $serial = $volume && $volume->{ serial } ? $volume->{ serial } : '';
+    my $from_serial = nimble_wwid_from_serial($serial);
+    return $from_serial if length $from_serial;
+    my ( undef, $id ) = length($serial) ? get_device_path_by_serial($serial) : ( '', '' );
     $id;
   };
   if ($@) {
@@ -1488,16 +1513,17 @@ sub nimble_multipath_register {
       . " /etc/multipath.conf to enable plugin-managed aliases.\n";
     return;
   }
-  if ( nimble_multipath_pve_managed_wwids()->{ lc($sane_wwid) } ) {
-    # Still cached (so deregister/rename see it); build_aliases leaves its alias to PVE.
-    print "Info :: [nimble-multipath] WWID $sane_wwid ($volname) is managed by Proxmox VE"
-      . " (Datacenter > SAN, /etc/pve/multipath.cfg) — leaving its alias to PVE.\n";
-  }
   nimble_multipath_with_storage_lock(
     $storeid,
     sub {
       my $cache = nimble_multipath_load_wwid_cache($storeid);
       return if ( $cache->{$volname} // '' ) eq $sane_wwid;
+      # Still cache PVE-managed WWIDs (deregister/rename); build_aliases leaves the alias to PVE.
+      # Log only on the first cache write, not on every map_volume of an already-known volume.
+      if ( nimble_multipath_pve_managed_wwids()->{ lc($sane_wwid) } ) {
+        print "Info :: [nimble-multipath] WWID $sane_wwid ($volname) is managed by Proxmox VE"
+          . " (Datacenter > SAN, /etc/pve/multipath.cfg) — leaving its alias to PVE.\n";
+      }
       $cache->{$volname} = $sane_wwid;
       nimble_multipath_save_wwid_cache( $storeid, $cache );
       my %aliases = nimble_multipath_build_aliases( $storeid, $cache );
@@ -2574,6 +2600,23 @@ sub nimble_iscsi_session_ids_for_target {
   return @sids;
 }
 
+# Rescan the given session IDs only (no host-wide --rescan). Callers that already listed SIDs
+# should pass them here to avoid another `iscsiadm -m session` round-trip.
+sub nimble_iscsi_rescan_session_ids {
+  my ( $sids, $timeout ) = @_;
+  my $adm = nimble_iscsiadm_path();
+  return 0 unless -x $adm && ref($sids) eq 'ARRAY';
+  my $n = 0;
+  for my $sid (@$sids) {
+    next unless defined $sid && $sid =~ /^\d+$/;
+    eval {
+      run_command( [ $adm, '-m', 'session', '-r', $sid, '--rescan' ], timeout => $timeout // 60, quiet => 1 );
+    };
+    $n++ unless $@;
+  }
+  return $n;
+}
+
 # Rescan only the sessions of one volume's target. A bare `iscsiadm -m session --rescan` revalidates every
 # LUN path of every session on the host (all other Nimble volumes, each its own target, plus other
 # storages' LUNs); on ALUA arrays like Nimble that floods the kernel log and can freeze request queues
@@ -2581,16 +2624,7 @@ sub nimble_iscsi_session_ids_for_target {
 # New LUNs still appear through scsi_scan_new (host scan for new devices only).
 sub nimble_iscsi_rescan_target_sessions {
   my ( $target_iqn, $timeout ) = @_;
-  my $adm = nimble_iscsiadm_path();
-  return 0 unless -x $adm;
-  my $n = 0;
-  for my $sid ( nimble_iscsi_session_ids_for_target($target_iqn) ) {
-    eval {
-      run_command( [ $adm, '-m', 'session', '-r', $sid, '--rescan' ], timeout => $timeout // 60, quiet => 1 );
-    };
-    $n++ unless $@;
-  }
-  return $n;
+  return nimble_iscsi_rescan_session_ids( [ nimble_iscsi_session_ids_for_target($target_iqn) ], $timeout );
 }
 
 # True if an active session exists for this IQN. Uses only `iscsiadm -m session` and matches the IQN in
@@ -3332,14 +3366,17 @@ sub nimble_ensure_volume_acl_for_current_node {
 # Follows the same pattern as TrueNAS _iscsi_login_all, adapted for Nimble's per-volume IQN
 # model (each volume has a unique IQN, served on LUN 0, only by the owning controller port):
 #
-#   1. Fast exit if session already up.
-#   2. Run sendtargets on discovery portals; retry until this IQN appears in the node DB.
-#      (Nimble only returns a volume's IQN to authorised initiators; a fresh ACL may take
-#      up to ~24 s to propagate before sendtargets responds.)
-#   3. Read login portals from the node DB via `iscsiadm -m node --targetname <iqn>`.
+#   1. Fast exit if any session for this IQN is already up (VM start / live migrate — sessions
+#      often persist; do NOT burn the ACL/sendtargets wait when `iscsiadm -m session` already
+#      lists the target). Then best-effort login any missing node-DB portals for multipath.
+#   2. Fast exit if every known node-DB portal already has a session.
+#   3. Run sendtargets on discovery portals; retry until this IQN appears in the node DB.
+#      (Nimble only returns a volume's IQN to authorised initiators; a *fresh* ACL may take
+#      up to ~24 s to propagate before sendtargets responds. Skip this when step 1/2 hit.)
+#   4. Read login portals from the node DB via `iscsiadm -m node --targetname <iqn>`.
 #      These are the portals sendtargets populated — the actual data portals, not the
 #      discovery IPs.  Login to each one explicitly with -T <iqn> -p <portal>.
-#   4. Verify session and emit a diagnostic warning if still absent.
+#   5. Verify session and emit a diagnostic warning if still absent.
 sub nimble_iscsi_establish_volume_session {
   my ( $class, $scfg, $volname, $storeid ) = @_;
 
@@ -3351,8 +3388,19 @@ sub nimble_iscsi_establish_volume_session {
   my $iscsiadm = nimble_iscsiadm_path();
   return 0 unless -x $iscsiadm;
 
+  # 1. Session already up (discussion #11): node DB may be empty while sessions persist after
+  #    prior login / iscsid restart. Waiting on sendtargets here caused ~20–24 s per disk.
+  if ( nimble_iscsi_target_in_sessions( $iqn, 0 ) ) {
+    for my $raw_portal ( nimble_iscsi_node_portals_for_target($iqn) ) {
+      my $portal = nimble_untaint_iscsiadm_scalar($raw_portal);
+      next unless length $portal;
+      nimble_iscsi_node_login_if_needed( $iqn, $portal );
+    }
+    return 1;
+  }
+
   my @known_portals = nimble_iscsi_node_portals_for_target($iqn);
-  # 1. Fast path: every known portal for this IQN already has a session (multipath-ready).
+  # 2. Every known portal for this IQN already has a session (multipath-ready).
   return 1 if @known_portals && nimble_iscsi_all_portals_in_sessions( $iqn, \@known_portals, 0 );
 
   my @dip = get_nimble_iscsi_discovery_ips( $scfg, $storeid );
@@ -3362,7 +3410,7 @@ sub nimble_iscsi_establish_volume_session {
     return 0;
   }
 
-  # 2. Sendtargets retry loop — wait for this IQN to appear in the node DB.
+  # 3. Sendtargets retry loop — wait for this IQN to appear in the node DB (fresh ACL only).
   #    Also collect portals directly from sendtargets output as a fallback so
   #    we can login even when the node DB write is delayed or suppressed.
   my $max_rounds  = 12;    # up to 24 s (12 x 2 s)
@@ -3370,6 +3418,9 @@ sub nimble_iscsi_establish_volume_session {
   my @direct_portals;      # portals reported by sendtargets for THIS IQN
   my %seen_dp;             # dedupe across discovery IPs AND retry rounds
   for my $round ( 1 .. $max_rounds ) {
+    # Session may appear mid-wait (another node / parallel activate); stop spinning.
+    return 1 if nimble_iscsi_target_in_sessions( $iqn, 0 );
+
     @known_portals = nimble_iscsi_node_portals_for_target($iqn);
     if ( @known_portals && nimble_iscsi_all_portals_in_sessions( $iqn, \@known_portals, 0 ) ) {
       return 1;
@@ -3479,10 +3530,11 @@ sub nimble_iscsi_establish_volume_session {
   }
 
   # Settle udev so the kernel has processed any new device events.
-  eval { exec_command( [ 'udevadm', 'settle', '--timeout=15' ] ); };
+  eval { exec_command( [ 'udevadm', 'settle', '--timeout=10' ] ); };
 
-  # 4. Verify at least one session; multipath needs every portal (warn if any path is still down).
-  my $up = nimble_iscsi_target_in_sessions( $iqn, 20 );    # poll up to 10 s
+  # 5. Verify at least one session; multipath needs every portal (warn if any path is still down).
+  #    Short poll (≤~3s): login just ran; a 10s spin was a common add-on delay after ACL waits (#11).
+  my $up = nimble_iscsi_target_in_sessions( $iqn, 6 );
   if ( $up && !nimble_iscsi_all_portals_in_sessions( $iqn, \@node_portals, 0 ) ) {
     my @missing = grep { !nimble_iscsi_portal_in_sessions( $iqn, $_, 0 ) } @node_portals;
     warn "Warning :: iSCSI session for \"$iqn\" is up but multipath portal(s) missing: "
@@ -4402,10 +4454,17 @@ sub alloc_image {
 
 sub free_image {
   my ( $class, $storeid, $scfg, $volname, $isBase ) = @_;
-  # Resolve WWID before deactivate/remove while the volume still answers on the array.
+  # Resolve WWID before deactivate/remove. Prefer serial→WWID (no by-id scan) while the array
+  # still answers; fall back to the mapped device if the serial shape is unexpected.
   my $wwid;
   if ( $scfg->{'san-multipath'} ) {
-    ( undef, $wwid ) = eval { $class->get_device_path_wwid( $scfg, $volname, $storeid ) };
+    eval {
+      my $volume = $class->nimble_get_volume_info( $scfg, $volname, $storeid );
+      $wwid = nimble_wwid_from_serial( $volume && $volume->{ serial } ? $volume->{ serial } : '' );
+      if ( !length($wwid) && $volume && length( $volume->{ serial } // '' ) ) {
+        ( undef, $wwid ) = get_device_path_by_serial( $volume->{ serial } );
+      }
+    };
     warn "Warning :: Cannot resolve WWID of volume \"$volname\" before remove: $@\n" if $@;
   }
   $class->deactivate_volume( $storeid, $scfg, $volname );
@@ -4826,58 +4885,73 @@ sub map_volume {
     warn "Warning :: Volume \"$volname\" target_name is not usable for iscsiadm (sanitization failed); check Nimble API target_name.\n";
   }
   # Session should already be up from nimble_volume_connection (activate_volume path).
-  # If not (called directly, session dropped, or multipath path missing), establish now.
+  # Require any session for this IQN (not every node-DB portal) before skipping establish —
+  # requiring all portals forced a redundant establish when multipath was partially up (#11).
   if ( length($target_iqn) ) {
-    my @vol_portals = nimble_iscsi_node_portals_for_target($target_iqn);
-    my $need_session = @vol_portals
-      ? !nimble_iscsi_all_portals_in_sessions( $target_iqn, \@vol_portals, 0 )
-      : !nimble_iscsi_target_in_sessions( $target_iqn, 0 );
-    if ($need_session) {
-      print "Info :: iSCSI session incomplete for \"$target_iqn\" at map time; attempting connect.\n";
+    if ( !nimble_iscsi_target_in_sessions( $target_iqn, 0 ) ) {
+      print "Info :: iSCSI session missing for \"$target_iqn\" at map time; attempting connect.\n";
       $class->nimble_iscsi_establish_volume_session( $scfg, $volname, $storeid );
+    }
+    else {
+      for my $raw_portal ( nimble_iscsi_node_portals_for_target($target_iqn) ) {
+        my $portal = nimble_untaint_iscsiadm_scalar($raw_portal);
+        next unless length $portal;
+        nimble_iscsi_node_login_if_needed( $target_iqn, $portal );
+      }
     }
   }
   elsif ( !length($target_iqn) ) {
     warn "Warning :: Volume \"$volname\" has no target_name (iSCSI IQN) from Nimble API.\n";
   }
-  # Rescan only this volume's sessions (see nimble_iscsi_rescan_target_sessions); the per-path device
-  # rescan and scsi_scan_new below still discover new LUNs without a host-wide session --rescan.
-  eval { nimble_iscsi_rescan_target_sessions( $target_iqn, 120 ) if length($target_iqn); };
-  eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
-  eval { scsi_scan_new( 'iscsi' ); };
-  warn "Warning :: iSCSI host scan failed: $@" if $@;
-  eval { exec_command( [ 'udevadm', 'settle', '--timeout=30' ] ); };
-  my $wait_ticks = 0;
-  wait_for(
-    sub {
-      ++$wait_ticks;
-      if ( $wait_ticks % 100 == 0 ) {
-        eval { scsi_scan_new('iscsi'); };
-      }
-      # Sessions up but LUN/multipath slow: periodic targeted rescan + multipath refresh (migration target).
-      if ( $wait_ticks % 50 == 0 ) {
-        eval { nimble_iscsi_rescan_target_sessions( $target_iqn, 90 ) if length($target_iqn); };
-        eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
-      }
-      my ( $p, $w ) = get_device_path_by_serial( $serial );
-      return length($p) && -e $p;
-    },
-    "volume \"$volname\" to appear (API serial "
-      . $serial
-      . (
-      length($target_iqn)
-      ? "; IQN $target_iqn"
-      : ''
-      )
-      . "; stuck: see prior Nimble iSCSI warnings for portals tried / iscsiadm errors, then iscsiadm -m session, ACL, data-network)",
-    180
-  );
-  my ( $path, $wwid ) = get_device_path_by_serial( $serial );
-  die "Error :: Volume \"$volname\" device did not appear after rescan (serial $serial"
-    . ( length($target_iqn) ? "; IQN $target_iqn" : '' )
-    . "). See task log for portals tried and iscsiadm errors above.\n"
-    unless length($path) && -b $path;
-  $path = nimble_untaint_dev_path($path) || $path;
+
+  # Hot path (VM start / remount): device already visible — skip rescan/settle/180s wait.
+  my ( $path, $wwid ) = get_device_path_by_serial($serial);
+  $path = nimble_untaint_dev_path($path) || $path if length $path;
+  my $already_mapped = length($path) && -b $path;
+
+  unless ($already_mapped) {
+    # Cold path: one session listing + targeted rescan; reuse SIDs in the wait loop.
+    my @session_sids = length($target_iqn) ? nimble_iscsi_session_ids_for_target($target_iqn) : ();
+    eval { nimble_iscsi_rescan_session_ids( \@session_sids, 120 ) if @session_sids; };
+    eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
+    eval { scsi_scan_new( 'iscsi' ); };
+    warn "Warning :: iSCSI host scan failed: $@" if $@;
+    eval { exec_command( [ 'udevadm', 'settle', '--timeout=15' ] ); };
+    my $wait_ticks = 0;
+    wait_for(
+      sub {
+        ++$wait_ticks;
+        if ( $wait_ticks % 100 == 0 ) {
+          eval { scsi_scan_new('iscsi'); };
+          if ( length($target_iqn) ) {
+            @session_sids = nimble_iscsi_session_ids_for_target($target_iqn);
+            eval { nimble_iscsi_rescan_session_ids( \@session_sids, 90 ) if @session_sids; };
+          }
+        }
+        if ( $wait_ticks % 50 == 0 ) {
+          eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
+        }
+        my ( $p, $w ) = get_device_path_by_serial($serial);
+        return length($p) && -e $p;
+      },
+      "volume \"$volname\" to appear (API serial "
+        . $serial
+        . (
+        length($target_iqn)
+        ? "; IQN $target_iqn"
+        : ''
+        )
+        . "; stuck: see prior Nimble iSCSI warnings for portals tried / iscsiadm errors, then iscsiadm -m session, ACL, data-network)",
+      180
+    );
+    ( $path, $wwid ) = get_device_path_by_serial($serial);
+    die "Error :: Volume \"$volname\" device did not appear after rescan (serial $serial"
+      . ( length($target_iqn) ? "; IQN $target_iqn" : '' )
+      . "). See task log for portals tried and iscsiadm errors above.\n"
+      unless length($path) && -b $path;
+    $path = nimble_untaint_dev_path($path) || $path;
+  }
+
   nimble_multipath_allowlist_wwid($wwid) if length($wwid);
   if ( length( $wwid ) && !multipath_check( $wwid ) ) {
     for my $w ( nimble_multipath_wwid_try_list($wwid) ) {
@@ -4885,11 +4959,11 @@ sub map_volume {
       last if multipath_check( $wwid );
     }
     my $mp_ready = sub { return multipath_check( $wwid ) };
-    wait_for( $mp_ready, "multipath for \"$volname\"", 45 );
+    wait_for( $mp_ready, "multipath for \"$volname\"", $already_mapped ? 15 : 45 );
   }
   elsif ( !length($wwid) ) {
     eval { exec_command( [ get_command_path('multipath'), '-v2' ], -1, timeout => 60 ); };
-    ( $path, $wwid ) = get_device_path_by_serial( $serial );
+    ( $path, $wwid ) = get_device_path_by_serial($serial);
     $path = nimble_untaint_dev_path($path) || $path if length $path;
     nimble_multipath_allowlist_wwid($wwid) if length($wwid);
     if ( length( $wwid ) && !multipath_check( $wwid ) ) {
@@ -4898,7 +4972,7 @@ sub map_volume {
         last if multipath_check( $wwid );
       }
       my $mp_ready = sub { return multipath_check( $wwid ) };
-      wait_for( $mp_ready, "multipath for \"$volname\"", 45 );
+      wait_for( $mp_ready, "multipath for \"$volname\"", $already_mapped ? 15 : 45 );
     }
   }
   $path = nimble_untaint_dev_path($path) || $path;
@@ -4947,12 +5021,10 @@ sub unmap_volume {
 sub activate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache, $hints ) = @_;
   $class->nimble_volume_connection( $storeid, $scfg, $volname, 1 );
-  my ( undef, $wwid ) = $class->map_volume( $storeid, $scfg, $volname, $snapname, $hints );
-  # map_volume already registers when san-multipath is on (before plugin aliases). This second
-  # call is a lazy adopt for volumes mapped before the flag was enabled, or if map skipped
-  # registration (empty WWID then resolved later). Idempotent against multipath.cfg.
-  eval { $class->san_multipath_register_wwid( $wwid, $scfg ) if length( $wwid // '' ); };
-  warn "Warning :: SAN multipath registration during activate of \"$volname\" failed: $@\n" if $@;
+  # map_volume registers san-multipath (before plugin aliases) when the flag is on. Do not lock
+  # multipath.cfg again here — every guest start/migration would pay a redundant cluster lock.
+  # Enabling the flag later is adopted on the next map/activate (map runs with the new scfg).
+  $class->map_volume( $storeid, $scfg, $volname, $snapname, $hints );
   return 1;
 }
 

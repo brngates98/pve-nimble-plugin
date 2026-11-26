@@ -114,4 +114,32 @@ $session_output = "tcp: [1] 10.0.0.1:3260,1 $iqn (non-flash)\n";
 PVE::Storage::Custom::NimbleStoragePlugin::nimble_iscsi_node_login_if_needed( $iqn, '10.0.0.1:3260' );
 is( scalar @login_cmds, 0, 'node_login_if_needed skips login when portal already in session' );
 
+# Discussion #11: VM start / live migrate waited ~20–24s per disk on ACL/sendtargets even when
+# `iscsiadm -m session` already listed the volume IQN (empty node DB skipped the old fast path).
+{
+  my $P = 'PVE::Storage::Custom::NimbleStoragePlugin';
+  my ( $discovery_calls, $slept, $sendtargets ) = ( 0, 0, 0 );
+  no warnings 'redefine';
+  no strict 'refs';
+  local *{"${P}::nimble_get_volume_info"} = sub {
+    return { target_name => $iqn, serial => 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' };
+  };
+  local *{"${P}::nimble_iscsi_target_in_sessions"} = sub { return 1; };
+  local *{"${P}::nimble_iscsi_node_portals_for_target"} = sub { return (); };    # empty node DB
+  local *{"${P}::get_nimble_iscsi_discovery_ips"} = sub { $discovery_calls++; return ('10.0.0.1'); };
+  local *{"${P}::sleep"} = sub { $slept += $_[0] // 1; };
+  local *{"${P}::run_command"} = sub {
+    my ($cmd) = @_;
+    $sendtargets++ if ref($cmd) eq 'ARRAY' && grep { $_ eq 'sendtargets' } @$cmd;
+    return 1;
+  };
+  ok(
+    $P->nimble_iscsi_establish_volume_session( {}, 'vm-100-disk-0', 'nimble1' ),
+    'establish: returns immediately when session already up (discussion #11)',
+  );
+  is( $discovery_calls, 0, 'establish: skips discovery IP lookup when session already up' );
+  is( $sendtargets,     0, 'establish: skips sendtargets ACL wait when session already up' );
+  is( $slept,           0, 'establish: does not sleep for ACL propagation when session already up' );
+}
+
 done_testing();
