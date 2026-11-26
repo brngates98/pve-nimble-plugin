@@ -5,3 +5,5 @@ build/
 *.changes
 changelog
 .DS_Store
+.ref-*
+.ref-elisalient/
