@@ -22,8 +22,8 @@ BEGIN {
 
 BEGIN {
   package PVE::Storage;
-  sub APIVER { 14 }
-  sub APIAGE { 5 }
+  sub APIVER { 16 }
+  sub APIAGE { 7 }
   $INC{'PVE/Storage.pm'} = 1;
 }
 
@@ -55,6 +55,9 @@ sub set_pve_storage_api {
   *PVE::Storage::APIAGE = sub { $apiage };
 }
 
+set_pve_storage_api( 16, 7 );
+is( $class->api(), 16, 'api() reports 16 when host APIVER is 16 (PVE 9.2 / libpve-storage-perl 9.1.13)' );
+
 set_pve_storage_api( 15, 6 );
 is( $class->api(), 15, 'api() reports 15 when host APIVER is 15' );
 
@@ -64,11 +67,11 @@ is( $class->api(), 14, 'api() reports 14 when host APIVER is 14' );
 set_pve_storage_api( 13, 4 );
 is( $class->api(), 13, 'api() reports 13 when host APIVER is 13 (backward compatible)' );
 
-set_pve_storage_api( 18, 5 );
+set_pve_storage_api( 19, 5 );
 is(
   $class->api(),
-  15,
-  'api() reports tested 15 when host APIVER is newer but within APIAGE window',
+  16,
+  'api() reports tested 16 when host APIVER is newer but within APIAGE window',
 );
 
 is(

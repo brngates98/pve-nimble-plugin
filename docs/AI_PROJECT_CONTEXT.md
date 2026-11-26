@@ -24,7 +24,7 @@ Read this first when resuming work. **Operators:** use [README.md](../README.md)
 - Multipath alias register/deregister skip the write + `multipathd reconfigure` when the WWID is already correct/absent (was firing unconditionally on every map/unmap), and the WWID cache (shared cluster-wide via `/etc/pve/priv`) is now guarded by `PVE::Cluster::cfs_lock_storage` to avoid cross-node lost updates.
 - `raw+size` import/export (e.g. Veeam V13+).
 - Array snapshot **import** into QEMU VM configs (`nimble*` keys, throttled from `status()`).
-- Storage plugin API through **APIVER 15** (current `pve-storage`: APIVER 15, APIAGE 6). `api()` reports the host version when it is 2–15, so current PVE 9 does not log the older-API warning. Includes APIVER 12–14 (`storage` QEMU snapshots, `qemu_blockdev_options`, `get_identity`) and the APIVER 15 additions: `volume_resize` `$snapname` (dies; no snapshot-as-volume-chain) and `volume_snapshot_info` `virtual-size`.
+- Storage plugin API through **APIVER 16** (current `pve-storage` on libpve-storage-perl 9.1.13 / PVE 9.2: APIVER 16, APIAGE 7). `api()` reports the host version when it is 2–16, so current PVE 9 does not log the older-API warning. Includes APIVER 12–14 (`storage` QEMU snapshots, `qemu_blockdev_options`, `get_identity`), APIVER 15 (`volume_resize` `$snapname` dies — no snapshot-as-volume-chain; `volume_snapshot_info` `virtual-size`), and APIVER 16 (optional format/name helpers; unused here because `alloc_image`/`rename_volume` are implemented directly).
 - Package + CI + unit tests (no live Nimble in CI).
 
 ### Partial / needs validation
