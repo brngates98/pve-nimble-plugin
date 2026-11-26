@@ -22,8 +22,8 @@ BEGIN {
 
 BEGIN {
   package PVE::Storage;
-  sub APIVER { 16 }
-  sub APIAGE { 7 }
+  sub APIVER { 17 }
+  sub APIAGE { 8 }
   $INC{'PVE/Storage.pm'} = 1;
 }
 

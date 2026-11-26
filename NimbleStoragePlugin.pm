@@ -95,12 +95,14 @@ sub set_debug_from_config {
 sub api {
   # PVE::Storage::APIVER / APIAGE are `use constant` (subs), not package scalars — do not use $PVE::Storage::APIVER.
   # Call with (); bareword form trips strict subs under perl 5.36+ (e.g. CI Docker bookworm).
-  # 16 is current pve-storage APIVER on libpve-storage-perl 9.1.13 / PVE 9.2 (APIAGE 7).
-  # APIVER 15 methods (volume_resize $snapname, volume_snapshot_info virtual-size) are implemented.
-  # APIVER 16 only adds optional format/name helpers used by directory-like alloc/rename paths;
-  # this plugin implements alloc_image/rename_volume itself, so inherited helpers are enough.
-  # Report the host version up to 16 so PVE does not warn about an older storage API.
-  my $tested_apiver = 16;
+  # 17 is current pve-storage APIVER on libpve-storage-perl 9.1.17+ / PVE 9.2.29+ (APIAGE 8).
+  # APIVER 15: volume_resize $snapname, volume_snapshot_info virtual-size — implemented.
+  # APIVER 16: optional format/name helpers for directory-like alloc/rename; unused here
+  #   (alloc_image/rename_volume are implemented directly).
+  # APIVER 17: guest volume types vm-vol/vm-state/ct-vol (images/rootdir still accepted),
+  #   plugin UI metadata, optional isolate-properties — additive; parse_volname still returns images.
+  # Report the host version up to 17 so PVE does not warn about an older storage API.
+  my $tested_apiver = 17;
   my $apiver        = eval { PVE::Storage::APIVER() };
   my $apiage        = eval { PVE::Storage::APIAGE() };
   $apiver = $tested_apiver if !defined($apiver) || $apiver !~ /^\d+$/;
