@@ -122,4 +122,5 @@ See the [README](https://github.com/brngates98/pve-nimble-plugin#configuration) 
 ## Contributors and quality
 
 - **CI:** Unit tests (APIVER 17 / isolate / san-multipath / session fast paths), plugin syntax (bookworm + trixie) must pass before the release deb build.
+- Docker co-install verify resolves `nimble_*` via `get_property_schema` when `isolate-properties` is on (APIVER 17 / PVE 9.3 trixie), so the syntax job matches isolated registration.
 - Addresses discussion [#11](https://github.com/brngates98/pve-nimble-plugin/discussions/11) (GUI path + start delays).

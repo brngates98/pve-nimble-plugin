@@ -179,9 +179,16 @@ my $pl = PVE::Storage::Plugin->private()->{propertyList};
 for my $p (qw(address vnprefix check_ssl token_ttl debug)) {
   die "shared property '$p' missing from propertyList\n" unless $pl->{$p};
 }
+# APIVER 17+: nimble isolates its properties, which then live in its own per-type schema rather
+# than the global propertyList; resolve them the way the plugin metadata API does.
+my $isolated = PVE::Storage::Custom::NimbleStoragePlugin->plugindata()->{'isolate-properties'} ? 1 : 0;
+print "nimble isolate-properties: $isolated\n";
 for my $p (qw(nimble_address nimble_vnprefix nimble_check_ssl nimble_token_ttl nimble_debug
               nimble_pool_name nimble_initiator_group nimble_volume_collection)) {
-  die "canonical property '$p' missing from propertyList\n" unless $pl->{$p};
+  my $found = $isolated
+    ? eval { PVE::Storage::Plugin->get_property_schema('nimble', $p) }
+    : $pl->{$p};
+  die "canonical property '$p' missing\n" unless $found;
 }
 # Legacy nimble section must still parse (shared names resolve via the rival plugin's property).
 my $raw = "nimble: legacy\n\taddress array1.example\n\tusername admin\n\tdebug 1\n\tcontent images\n";
